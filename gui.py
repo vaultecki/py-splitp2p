@@ -485,7 +485,9 @@ class ExpenseDialog(tk.Toplevel):
         self._split_mode = tk.StringVar(value="equal")
         mode_row = tk.Frame(frm, bg=BG)
         mode_row.pack(anchor="w")
-        for val, txt in [("equal", "Gleich"), ("custom", "Individuell")]:
+        for val, txt in [("equal", "Gleich"),
+                         ("custom", "Individuell"),
+                         ("percent", "Prozent %")]:
             tk.Radiobutton(mode_row, text=txt, variable=self._split_mode, value=val,
                            bg=BG, fg=FG_MUTED, selectcolor=BG,
                            activebackground=BG, activeforeground=FG,
@@ -494,12 +496,14 @@ class ExpenseDialog(tk.Toplevel):
 
         self._split_frame = tk.Frame(frm, bg=BG)
         self._split_frame.pack(fill="x", pady=4)
-        self._member_vars: dict[str, tk.BooleanVar] = {}
-        self._amount_vars: dict[str, tk.StringVar]  = {}
+        self._member_vars:  dict[str, tk.BooleanVar] = {}
+        self._amount_vars:  dict[str, tk.StringVar]  = {}
+        self._percent_vars: dict[str, tk.StringVar]  = {}
         self._split_widgets: list = []
         for m in self.members:
-            self._member_vars[m.pubkey] = tk.BooleanVar(value=True)
-            self._amount_vars[m.pubkey] = tk.StringVar(value="")
+            self._member_vars[m.pubkey]  = tk.BooleanVar(value=True)
+            self._amount_vars[m.pubkey]  = tk.StringVar(value="")
+            self._percent_vars[m.pubkey] = tk.StringVar(value="")
         self._update_splits()
 
         # Anhang
@@ -524,6 +528,7 @@ class ExpenseDialog(tk.Toplevel):
     def _update_splits(self):
         for w in self._split_widgets: w.destroy()
         self._split_widgets.clear()
+        mode = self._split_mode.get()
         for m in self.members:
             row = tk.Frame(self._split_frame, bg=BG)
             row.pack(fill="x", pady=1)
@@ -533,12 +538,35 @@ class ExpenseDialog(tk.Toplevel):
                            bg=BG, fg=FG, selectcolor=BG,
                            activebackground=BG, activeforeground=FG,
                            font=FONT, width=18, anchor="w").pack(side="left")
-            if self._split_mode.get() == "custom":
+            if mode == "custom":
                 tk.Entry(row, textvariable=self._amount_vars[m.pubkey],
                          font=FONT, bg=PANEL, fg=FG,
                          insertbackground=GREEN, relief="flat", bd=4, width=10).pack(
                     side="left", padx=6)
                 _lbl(row, self.group_currency, fg=FG_DIM, font=FONT_SMALL, bg=BG).pack(side="left")
+            elif mode == "percent":
+                e = tk.Entry(row, textvariable=self._percent_vars[m.pubkey],
+                             font=FONT, bg=PANEL, fg=FG,
+                             insertbackground=GREEN, relief="flat", bd=4, width=6)
+                e.pack(side="left", padx=6)
+                _lbl(row, "%", fg=FG_DIM, font=FONT_SMALL, bg=BG).pack(side="left")
+                # Live-Vorschau des absoluten Betrags
+                preview = _lbl(row, "", fg=FG_DIM, font=FONT_SMALL, bg=BG)
+                preview.pack(side="left", padx=(4, 0))
+                def _upd_prev(_, pv=preview, pk=m.pubkey):
+                    try:
+                        pct = float(self._percent_vars[pk].get().replace(",", "."))
+                        raw = float(self._amount.get().replace(",", ".") or "0")
+                        ic  = self._input_currency.get()
+                        if ic != self.group_currency:
+                            from currency import convert
+                            raw = convert(raw, ic, self.group_currency,
+                                          self.rates) or raw
+                        pv.configure(text=f"= {raw * pct / 100:.2f} {self.group_currency}")
+                    except ValueError:
+                        pv.configure(text="")
+                self._percent_vars[m.pubkey].trace_add("write", _upd_prev)
+                self._amount.trace_add("write", _upd_prev)
 
     def _pick_file(self):
         path = fd.askopenfilename(
@@ -598,8 +626,26 @@ class ExpenseDialog(tk.Toplevel):
         if not selected:
             mb.showerror("Fehler", "Mind. ein Mitglied auswählen.", parent=self); return
 
-        if self._split_mode.get() == "equal":
+        mode = self._split_mode.get()
+        if mode == "equal":
             splits = split_equally(amount, [m.pubkey for m in selected])
+        elif mode == "percent":
+            try:
+                pcts = {m.pubkey: float(self._percent_vars[m.pubkey].get().replace(",", "."))
+                        for m in selected}
+                total_pct = sum(pcts.values())
+                if total_pct <= 0:
+                    raise ValueError("0%")
+                if abs(total_pct - 100) > 0.01:
+                    if not mb.askyesno(
+                        "Summe ≠ 100 %",
+                        f"Die Prozentwerte ergeben {total_pct:.1f} %,\n"
+                        "nicht 100 %. Proportional aufteilen?",
+                        parent=self): return
+            except ValueError:
+                mb.showerror("Fehler", "Prozentwerte ungültig.", parent=self); return
+            from models import split_by_percent
+            splits = split_by_percent(amount, pcts)
         else:
             try:
                 custom = {m.pubkey: float(self._amount_vars[m.pubkey].get().replace(",", "."))
@@ -873,7 +919,7 @@ class ChartsWindow(tk.Toplevel):
         COLS   = ["#2ecc8f","#4d9de0","#e0a03a","#e05c6a","#a78bfa",
                   "#5dcaa5","#f09595","#fac775","#85b7eb","#ed93b1"]
 
-        fig = Figure(figsize=(11, 7.5), facecolor=DARK, tight_layout=True)
+        fig = Figure(figsize=(13, 9.5), facecolor=DARK, tight_layout=True)
         fig.patch.set_facecolor(DARK)
 
         def style_ax(ax, title):
@@ -885,7 +931,7 @@ class ChartsWindow(tk.Toplevel):
             ax.title.set_fontsize(10)
 
         # ── 1. Ausgaben nach Kategorie ───────────────────────────────
-        ax1 = fig.add_subplot(2, 2, 1)
+        ax1 = fig.add_subplot(3, 2, 1)
         style_ax(ax1, "Ausgaben nach Kategorie")
         from collections import defaultdict
         by_cat = defaultdict(float)
@@ -906,7 +952,7 @@ class ChartsWindow(tk.Toplevel):
                      ha="center", va="center", color=DIM_)
 
         # ── 2. Saldo pro Person ──────────────────────────────────────
-        ax2 = fig.add_subplot(2, 2, 2)
+        ax2 = fig.add_subplot(3, 2, 2)
         style_ax(ax2, "Saldo pro Person")
         from ledger import compute_balances
         balances = compute_balances(expenses, settlements)
@@ -929,7 +975,7 @@ class ChartsWindow(tk.Toplevel):
                      ha="center", va="center", color=DIM_)
 
         # ── 3. Kumulierte Ausgaben über Zeit ─────────────────────────
-        ax3 = fig.add_subplot(2, 1, 2)
+        ax3 = fig.add_subplot(3, 1, 2)
         style_ax(ax3, "Kumulierte Ausgaben über Zeit")
         if expenses:
             import datetime
@@ -960,6 +1006,49 @@ class ChartsWindow(tk.Toplevel):
             fig.autofmt_xdate(rotation=30, ha="right")
         else:
             ax3.text(0.5, 0.5, "Keine Daten", transform=ax3.transAxes,
+                     ha="center", va="center", color=DIM_)
+
+        # ── 4. Saldo-Verlauf pro Person ─────────────────────────────
+        ax4 = fig.add_subplot(3, 1, 3)
+        style_ax(ax4, "Saldo-Verlauf pro Person über Zeit")
+        if expenses:
+            import datetime
+            from ledger import compute_balances
+            # Alle Events (Expenses + Settlements) zeitlich sortieren
+            all_events = []
+            for e in expenses:
+                all_events.append((e.display_date(), "expense", e))
+            for s in settlements:
+                all_events.append((s.display_date(), "settlement", s))
+            all_events.sort(key=lambda x: x[0])
+            # Saldo schrittweise berechnen
+            running_exp, running_set = [], []
+            pk_series = {m.pubkey: [] for m in members}
+            ts_series = []
+            for ts, etype, obj in all_events:
+                if etype == "expense":
+                    running_exp.append(obj)
+                else:
+                    running_set.append(obj)
+                bals = compute_balances(running_exp, running_set)
+                ts_series.append(datetime.datetime.fromtimestamp(ts))
+                for m in members:
+                    pk_series[m.pubkey].append(bals.get(m.pubkey, 0.0))
+            if ts_series:
+                for i, m in enumerate(members):
+                    vals = pk_series[m.pubkey]
+                    col  = COLS[i % len(COLS)]
+                    ax4.plot(ts_series, vals, color=col,
+                             linewidth=1.8, label=name(m.pubkey))
+                    ax4.fill_between(ts_series, vals, alpha=0.08, color=col)
+                ax4.axhline(0, color=DIM_, linewidth=0.8, linestyle="--")
+                ax4.set_ylabel(group_currency, color=DIM_, fontsize=9)
+                ax4.yaxis.label.set_color(DIM_)
+                ax4.legend(facecolor=PANEL_, edgecolor=DIM_,
+                           labelcolor=FG_, fontsize=8, loc="best")
+                fig.autofmt_xdate(rotation=30, ha="right")
+        else:
+            ax4.text(0.5, 0.5, "Keine Daten", transform=ax4.transAxes,
                      ha="center", va="center", color=DIM_)
 
         canvas = FigureCanvasTkAgg(fig, master=self)
@@ -1269,6 +1358,13 @@ class App(tk.Tk):
         self._rates_age_label = _lbl(sb, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14)
         self._rates_age_label.pack(fill="x")
         _btn(sb, "↻ Aktualisieren", self._manual_refresh_rates,
+             bg=BORDER, fg=FG_MUTED, font=FONT_SMALL, width=20).pack(padx=12, pady=4)
+
+        _div(sb).pack(fill="x", pady=8)
+        _lbl(sb, "P2P SYNC", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(fill="x")
+        self._sync_label = _lbl(sb, "kein Sync", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14)
+        self._sync_label.pack(fill="x")
+        _btn(sb, "⟳ History abrufen", self._manual_history_sync,
              bg=BORDER, fg=FG_MUTED, font=FONT_SMALL, width=20).pack(padx=12, pady=4)
 
     def _build_main(self, paned):
@@ -1922,6 +2018,10 @@ class App(tk.Tk):
                 self2._app.after(0, lambda: self2._app._on_net_status(online, pid))
             def on_file_received(self2, sha256):
                 self2._app.after(0, self2._app._refresh)
+            def on_history_synced(self2, n_exp, n_set):
+                if n_exp + n_set > 0:
+                    self2._app.after(0, lambda: self2._app._on_history_synced(
+                        n_exp, n_set))
 
         self._network = P2PNetwork(self._group_pw, _CB(self))
         self._network.start_in_thread()
@@ -1981,6 +2081,25 @@ class App(tk.Tk):
             ))
             self._refresh()
 
+
+    # ── P2P History-Sync ─────────────────────────────────────────────
+
+    def _on_history_synced(self, n_exp: int, n_set: int) -> None:
+        import time as _t
+        ts  = _t.strftime("%H:%M")
+        msg = f"Sync {ts}: +{n_exp} Ausgaben, +{n_set} Zahlungen"
+        self._sync_label.configure(text=msg, fg=GREEN)
+        self._refresh()
+        # Status nach 8s zurücksetzen
+        self.after(8000, lambda: self._sync_label.configure(
+            text="letzter Sync: " + ts, fg=FG_DIM))
+
+    def _manual_history_sync(self) -> None:
+        if not self._network or not self._network.is_online:
+            mb.showinfo("Offline", "Kein P2P-Netz verbunden.", parent=self)
+            return
+        self._sync_label.configure(text="Sync läuft…", fg=AMBER)
+        self._network.request_history_from_all()
 
     # ── Filter-Helfer ────────────────────────────────────────────────
 

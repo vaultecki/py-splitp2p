@@ -307,3 +307,35 @@ def split_equally(amount: float, pubkeys: list[str]) -> list[Split]:
 
 def split_custom(amounts_by_pubkey: dict[str, float]) -> list[Split]:
     return [Split(pubkey=pk, amount=round(amt, 2)) for pk, amt in amounts_by_pubkey.items()]
+
+
+def split_by_percent(amount: float,
+                     percentages_by_pubkey: dict[str, float]) -> list[Split]:
+    """
+    Teilt einen Betrag nach Prozentwerten auf.
+
+    Args:
+        amount: Gesamtbetrag
+        percentages_by_pubkey: {pubkey: prozent}  – Summe sollte 100 ergeben.
+            Falls die Summe abweicht, wird proportional skaliert.
+
+    Returns:
+        Liste von Splits in absoluten Beträgen.
+        Rundungsdifferenz wird auf den ersten Eintrag aufgeschlagen.
+    """
+    if not percentages_by_pubkey:
+        return []
+    total_pct = sum(percentages_by_pubkey.values())
+    if total_pct <= 0:
+        return []
+    # Normalisieren falls Summe ≠ 100
+    scale = 100.0 / total_pct
+    splits = [
+        Split(pubkey=pk, amount=round(amount * (pct * scale) / 100.0, 2))
+        for pk, pct in percentages_by_pubkey.items()
+    ]
+    # Rundungsfehler ausgleichen
+    diff = round(amount - sum(s.amount for s in splits), 2)
+    if diff:
+        splits[0] = Split(splits[0].pubkey, round(splits[0].amount + diff, 2))
+    return splits

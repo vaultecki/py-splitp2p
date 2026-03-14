@@ -188,3 +188,48 @@ def attachment_path(sha256: str) -> Optional[str]:
 
 def attachment_exists(sha256: str) -> bool:
     return os.path.exists(os.path.join(STORAGE_DIR, sha256))
+
+
+# ---------------------------------------------------------------------------
+# History-Sync Hilfsfunktionen (für network.py)
+# ---------------------------------------------------------------------------
+
+def load_all_expense_blobs_since(since_ts: int) -> list[tuple[str, bytes]]:
+    """Alle Expense-Blobs mit timestamp > since_ts (inkl. gelöschter für Tombstone-Sync)."""
+    import sqlite3 as _sq
+    conn = _sq.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = _sq.Row
+    rows = conn.execute(
+        "SELECT id, blob FROM expenses WHERE timestamp > ? ORDER BY timestamp ASC",
+        (since_ts,),
+    ).fetchall()
+    conn.close()
+    return [(r["id"], bytes(r["blob"])) for r in rows]
+
+
+def load_all_settlement_blobs_since(since_ts: int) -> list[tuple[str, bytes]]:
+    """Alle Settlement-Blobs mit timestamp > since_ts."""
+    import sqlite3 as _sq
+    conn = _sq.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = _sq.Row
+    rows = conn.execute(
+        "SELECT id, blob FROM settlements WHERE timestamp > ? ORDER BY timestamp ASC",
+        (since_ts,),
+    ).fetchall()
+    conn.close()
+    return [(r["id"], bytes(r["blob"])) for r in rows]
+
+
+def get_max_timestamp() -> int:
+    """Höchster bekannter Timestamp über Expenses und Settlements."""
+    import sqlite3 as _sq
+    conn = _sq.connect(DB_PATH, check_same_thread=False)
+    row = conn.execute(
+        "SELECT MAX(ts) as m FROM ("
+        "  SELECT MAX(timestamp) as ts FROM expenses"
+        "  UNION ALL"
+        "  SELECT MAX(timestamp) as ts FROM settlements"
+        ")"
+    ).fetchone()
+    conn.close()
+    return int(row[0] or 0)

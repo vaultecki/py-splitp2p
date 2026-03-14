@@ -33,9 +33,30 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _local_max_timestamp() -> int:
+    """Modul-level Wrapper für storage.get_max_timestamp()."""
+    try:
+        from storage import get_max_timestamp
+        return get_max_timestamp()
+    except Exception:
+        return 0
+
+
+def load_all_expense_blobs_since(since: int):
+    from storage import load_all_expense_blobs_since as _f
+    return _f(since)
+
+
+def load_all_settlement_blobs_since(since: int):
+    from storage import load_all_settlement_blobs_since as _f
+    return _f(since)
+
+
 SYNC_PROTOCOL = "/splitp2p/sync/1.0"
-FILE_PROTOCOL = "/splitp2p/files/1.0"
-CHUNK_SIZE    = 16_384
+FILE_PROTOCOL    = "/splitp2p/files/1.0"
+HISTORY_PROTOCOL = "/splitp2p/history/1.0"
+CHUNK_SIZE       = 16_384
 
 # Öffentliche libp2p / IPFS Bootstrap-Knoten
 IPFS_BOOTSTRAP = [
@@ -58,6 +79,7 @@ class NetworkCallbacks:
     def on_peer_disconnected(self, peer_id: str) -> None: pass
     def on_status_changed(self, online: bool, peer_id: str) -> None: pass
     def on_file_received(self, sha256: str) -> None: pass
+    def on_history_synced(self, n_expenses: int, n_settlements: int) -> None: pass
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +140,7 @@ class P2PNetwork:
 
             self._sub = await self._pubsub.subscribe(self.topic_id)
             self._host.set_stream_handler(FILE_PROTOCOL, self._file_serve_handler)
+            self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
             self._host.get_network().notify(self._PeerNotifee(self))
 
             self.callbacks.on_status_changed(online=True, peer_id=peer_id)
@@ -343,6 +366,11 @@ class P2PNetwork:
             pid = conn.get_remote_peer_id().to_string()
             self._net._peers.add(pid)
             self._net.callbacks.on_peer_connected(pid)
+            # Sofort History vom neuen Peer anfordern
+            asyncio.run_coroutine_threadsafe(
+                self._net._request_history(pid),
+                self._net._loop,
+            ) if self._net._loop else None
         def disconnected(self, _, conn):
             pid = conn.get_remote_peer_id().to_string()
             self._net._peers.discard(pid)
@@ -355,6 +383,130 @@ class P2PNetwork:
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # History Sync – Serving side
+    # ------------------------------------------------------------------
+
+    async def _history_serve_handler(self, stream) -> None:
+        """
+        Antwortet auf eine History-Anfrage.
+
+        Protokoll:
+          Anfrage:  JSON {"since_ts": int, "topic": str}
+          Antwort:  Zeilenweise JSON-Pakete (ein Blob pro Zeile), dann Leerzeile als EOF.
+                    Jede Zeile: {"type": "expense"|"settlement", "id": ..., "blob": hex, "ts": int}
+        """
+        try:
+            req_raw = await asyncio.wait_for(stream.read(), timeout=10.0)
+            req     = json.loads(req_raw.decode())
+            since   = int(req.get("since_ts", 0))
+            topic   = req.get("topic", "")
+
+            # Nur antworten wenn Topic übereinstimmt (Gruppenpasswort-Ableitung)
+            if topic != self.topic_id:
+                logger.debug("History request for wrong topic, ignoring")
+                await stream.close()
+                return
+
+            from storage import load_all_expense_blobs, load_all_settlement_blobs
+            import sqlite3
+
+            # Hole alle Blobs – CRDT-Timestamp liegt in der DB-Tabelle
+            sent = 0
+            for eid, blob in load_all_expense_blobs_since(since):
+                line = json.dumps({"type": "expense",
+                                   "id": eid, "blob": blob.hex()}) + "\n"
+                await stream.write(line.encode())
+                sent += 1
+            for sid, blob in load_all_settlement_blobs_since(since):
+                line = json.dumps({"type": "settlement",
+                                   "id": sid, "blob": blob.hex()}) + "\n"
+                await stream.write(line.encode())
+                sent += 1
+
+            # EOF-Marker
+            await stream.write(b"\n")
+            logger.info("History: served %d records since ts=%d", sent, since)
+
+        except Exception as e:
+            logger.error("History serve error: %s", e)
+        finally:
+            try: await stream.close()
+            except Exception: pass
+
+    # ------------------------------------------------------------------
+    # History Sync – Requesting side
+    # ------------------------------------------------------------------
+
+    async def _request_history(self, peer_id_str: str) -> None:
+        """
+        Fordert alle Expense- und Settlement-Blobs vom Peer an
+        die neuer als unser höchster bekannter Timestamp sind.
+        """
+        try:
+            from libp2p.peer.id import ID as PeerID
+            stream = await asyncio.wait_for(
+                self._host.new_stream(PeerID.from_base58(peer_id_str),
+                                      [HISTORY_PROTOCOL]),
+                timeout=10.0,
+            )
+        except Exception as e:
+            logger.debug("Cannot open history stream to %s: %s",
+                         peer_id_str[:12], e)
+            return
+
+        try:
+            # Unseren aktuellen höchsten Timestamp ermitteln
+            since = _local_max_timestamp()
+            req   = json.dumps({"since_ts": since, "topic": self.topic_id})
+            await stream.write(req.encode())
+
+            # Zeilenweise lesen bis Leerzeile (EOF-Marker)
+            buf = b""
+            n_exp = n_set = 0
+            while True:
+                chunk = await asyncio.wait_for(stream.read(), timeout=30.0)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if not line.strip():
+                        # EOF-Marker
+                        self.callbacks.on_history_synced(n_exp, n_set)
+                        return
+                    try:
+                        pkt = json.loads(line.decode())
+                        blob = bytes.fromhex(pkt["blob"])
+                        if pkt["type"] == "expense":
+                            self.callbacks.on_expense_received(pkt["id"], blob)
+                            n_exp += 1
+                        elif pkt["type"] == "settlement":
+                            self.callbacks.on_settlement_received(pkt["id"], blob)
+                            n_set += 1
+                    except Exception as e:
+                        logger.warning("History parse error: %s", e)
+
+            self.callbacks.on_history_synced(n_exp, n_set)
+            logger.info("History: received %d expenses + %d settlements from %s",
+                        n_exp, n_set, peer_id_str[:12])
+
+        except asyncio.TimeoutError:
+            logger.warning("History request timeout from %s", peer_id_str[:12])
+        except Exception as e:
+            logger.error("History request error: %s", e)
+        finally:
+            try: await stream.close()
+            except Exception: pass
+
+    def request_history_from_all(self) -> None:
+        """Fordert History von allen bekannten Peers an (Thread-safe)."""
+        if not self._peers or not self._running: return
+        async def _do():
+            for pid in list(self._peers):
+                await self._request_history(pid)
+        asyncio.run_coroutine_threadsafe(_do(), self._loop)
 
     @property
     def is_online(self) -> bool:
