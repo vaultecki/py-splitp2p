@@ -2,25 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Network Layer – P2P Expense Synchronisation
+Network Layer
 
-Zwei Protokolle:
+Drei Protokolle:
+  1. GossipSub  "/splitp2p/sync/1.0"
+     Pakete mit type-Feld:
+       {"type": "expense",    "id": ..., "timestamp": ..., "blob": hex}
+       {"type": "settlement", "id": ..., "timestamp": ..., "blob": hex}
+       {"type": "member",     "pubkey": ..., "data": {display_name, joined_at}}
 
-1. GossipSub  ("/splitp2p/expenses/1.0")
-   Jeder Node publiziert neue oder geänderte Ausgaben als JSON-Paket:
-       { "id": str, "timestamp": int, "blob": hex }
-   Der blob ist das AES-GCM-verschlüsselte Expense-Objekt aus crypto.py.
-   Empfänger führen einen CRDT-Merge durch. Ohne das Gruppenpasswort
-   ist der Blob für Fremde wertlos.
+  2. Direct Stream  "/splitp2p/files/1.0"
+     SHA-256-Anfrage → Binärdaten
 
-2. Direct Stream  ("/splitp2p/files/1.0")
-   Dateianhänge werden on-demand per direktem Stream übertragen.
-   Anfrage: SHA-256-Hex (32 Bytes UTF-8)
-   Antwort: Rohdaten der Datei (chunk-weise)
-   Nach dem Download: SHA-256-Verifikation – bei Abweichung wird verworfen.
+  3. Peer-Discovery
+     a) mDNS  – automatisch im lokalen Netz (kein Bootstrap nötig)
+     b) IPFS-Bootstrap-Nodes – öffentliche libp2p-Knoten für das Internet
 
-Offline-Modus: läuft libp2p nicht oder ist es nicht installiert, bleibt
-alles lokal funktionsfähig. Die GUI erhält in beiden Fällen Callbacks.
+Alle Callbacks kommen aus dem asyncio-Thread.
+gui.py leitet sie per root.after(0, ...) in den Tk-Thread weiter.
 """
 
 from __future__ import annotations
@@ -30,63 +29,44 @@ import hashlib
 import json
 import logging
 import os
-from typing import Callable, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-EXPENSE_PROTOCOL = "/splitp2p/expenses/1.0"
-FILE_PROTOCOL    = "/splitp2p/files/1.0"
-STORAGE_DIR      = "storage"
-CHUNK_SIZE       = 16_384   # 16 KB
+SYNC_PROTOCOL = "/splitp2p/sync/1.0"
+FILE_PROTOCOL = "/splitp2p/files/1.0"
+CHUNK_SIZE    = 16_384
+
+# Öffentliche libp2p / IPFS Bootstrap-Knoten
+IPFS_BOOTSTRAP = [
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+]
 
 
 # ---------------------------------------------------------------------------
-# Callbacks-Protokoll (wird von der GUI implementiert)
+# Callbacks-Interface
 # ---------------------------------------------------------------------------
 
 class NetworkCallbacks:
-    """
-    Interface das die GUI (oder ein Test-Stub) implementiert.
-    Alle Methoden werden aus dem asyncio-Thread aufgerufen –
-    gui.py leitet sie per `root.after(0, ...)` in den Tk-Thread weiter.
-    """
-    def on_expense_received(self, expense_id: str, blob: bytes) -> None:
-        """Neuer oder aktualisierter Expense-Blob empfangen."""
-
-    def on_peer_connected(self, peer_id: str) -> None:
-        """Neuer Peer verbunden."""
-
-    def on_peer_disconnected(self, peer_id: str) -> None:
-        """Peer getrennt."""
-
-    def on_status_changed(self, online: bool, peer_id: str) -> None:
-        """Verbindungsstatus geändert."""
-
-    def on_file_received(self, sha256: str) -> None:
-        """Dateianhang erfolgreich empfangen und verifiziert."""
+    def on_expense_received(self, expense_id: str, blob: bytes) -> None: pass
+    def on_settlement_received(self, settlement_id: str, blob: bytes) -> None: pass
+    def on_member_received(self, pubkey: str, data: dict) -> None: pass
+    def on_peer_connected(self, peer_id: str) -> None: pass
+    def on_peer_disconnected(self, peer_id: str) -> None: pass
+    def on_status_changed(self, online: bool, peer_id: str) -> None: pass
+    def on_file_received(self, sha256: str) -> None: pass
 
 
 # ---------------------------------------------------------------------------
-# Hauptklasse
+# P2PNetwork
 # ---------------------------------------------------------------------------
 
 class P2PNetwork:
-    """
-    Verwaltet den libp2p-Host, GossipSub-Subscriptions und File-Streams.
-
-    Verwendung::
-
-        net = P2PNetwork(group_password, callbacks)
-        # Im asyncio-Thread starten:
-        await net.start()
-
-    Oder über start_in_thread() direkt aus synchronem Code.
-    """
-
     def __init__(self, group_password: str, callbacks: NetworkCallbacks):
-        from currency import group_topic_id  # sha256[:16] des Passworts
-
-        # Topic-ID: nicht reversibel, kein Rückschluss auf Passwort möglich
+        from currency import group_topic_id
         self.topic_id   = "splitp2p-" + group_topic_id(group_password)
         self.callbacks  = callbacks
         self._host      = None
@@ -95,24 +75,17 @@ class P2PNetwork:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running   = False
         self._peers: set[str] = set()
-        os.makedirs(STORAGE_DIR, exist_ok=True)
+        os.makedirs("storage", exist_ok=True)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def start_in_thread(self) -> None:
-        """
-        Startet den P2P-Node in einem Daemon-Thread.
-        Kehrt sofort zurück; der Node läuft im Hintergrund.
-        """
         import threading
-        t = threading.Thread(
-            target=self._thread_main,
-            daemon=True,
-            name="p2p-network",
-        )
-        t.start()
+        threading.Thread(
+            target=self._thread_main, daemon=True, name="p2p-network"
+        ).start()
 
     def _thread_main(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -130,29 +103,28 @@ class P2PNetwork:
             from libp2p.pubsub import gossipsub
             from libp2p.pubsub.pubsub import Pubsub
         except ImportError:
-            logger.warning(
-                "libp2p nicht installiert – P2P-Sync deaktiviert. "
-                "Installieren mit: pip install libp2p"
-            )
+            logger.warning("libp2p not installed – offline mode")
             self.callbacks.on_status_changed(online=False, peer_id="offline-mode")
             return
 
-        self._host = new_host()
-        gossip     = gossipsub.GossipSub(["/meshsub/1.1.0"])
+        self._host   = new_host()
+        gossip       = gossipsub.GossipSub(["/meshsub/1.1.0"])
         self._pubsub = Pubsub(self._host, gossip)
 
         async with self._host.run():
-            peer_id = self._host.get_id().to_string()
+            peer_id   = self._host.get_id().to_string()
             self._running = True
-            logger.info("P2P node started. Peer ID: %s", peer_id)
+            logger.info("P2P node started. PeerID: %s", peer_id)
 
             self._sub = await self._pubsub.subscribe(self.topic_id)
             self._host.set_stream_handler(FILE_PROTOCOL, self._file_serve_handler)
-            # Peer-Event-Hooks (falls libp2p das unterstützt)
             self._host.get_network().notify(self._PeerNotifee(self))
 
             self.callbacks.on_status_changed(online=True, peer_id=peer_id)
-            logger.info("Subscribed to topic: %s", self.topic_id)
+
+            # Discovery starten (parallel, Fehler sind nicht fatal)
+            asyncio.create_task(self._setup_mdns())
+            asyncio.create_task(self._connect_bootstrap())
 
             await self._receive_loop()
 
@@ -160,206 +132,228 @@ class P2PNetwork:
         self._running = False
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
-        logger.info("P2P node stopping")
 
     # ------------------------------------------------------------------
-    # Innere Klasse: Peer-Event-Notifier
+    # Peer-Discovery: mDNS
     # ------------------------------------------------------------------
 
-    class _PeerNotifee:
-        """Minimaler libp2p Notifee für Connect/Disconnect-Events."""
-
-        def __init__(self, network: "P2PNetwork"):
-            self._net = network
-
-        def connected(self, net, conn):
-            pid = conn.get_remote_peer_id().to_string()
-            self._net._peers.add(pid)
-            logger.info("Peer connected: %s", pid[:16])
-            self._net.callbacks.on_peer_connected(pid)
-
-        def disconnected(self, net, conn):
-            pid = conn.get_remote_peer_id().to_string()
-            self._net._peers.discard(pid)
-            logger.info("Peer disconnected: %s", pid[:16])
-            self._net.callbacks.on_peer_disconnected(pid)
-
-        # libp2p erwartet diese Methoden auch wenn sie leer sind
-        def listen(self, *_): pass
-        def listen_close(self, *_): pass
-        def open_stream(self, *_): pass
-        def close_stream(self, *_): pass
+    async def _setup_mdns(self) -> None:
+        """
+        mDNS-Discovery für lokale Netze.
+        Peers im selben LAN mit demselben topic_id finden sich automatisch.
+        """
+        try:
+            from libp2p.discovery.mdns import MDNSService
+            mdns = MDNSService(
+                self._host,
+                service_name=f"_splitp2p_{self.topic_id[:8]}._udp.local.",
+            )
+            await mdns.start()
+            logger.info("mDNS discovery started (service: %s)", self.topic_id[:8])
+        except ImportError:
+            logger.debug("libp2p mDNS module not available – skipping local discovery")
+        except Exception as e:
+            logger.warning("mDNS setup failed: %s", e)
 
     # ------------------------------------------------------------------
-    # GossipSub – Empfangsschleife
+    # Peer-Discovery: IPFS Bootstrap
+    # ------------------------------------------------------------------
+
+    async def _connect_bootstrap(self) -> None:
+        """
+        Verbindet mit öffentlichen IPFS-Bootstrap-Nodes.
+        Das reicht um ins globale libp2p-DHT einzutreten und
+        andere SplitP2P-Nodes zu finden, die dieselbe Topic-ID abonniert haben.
+        """
+        try:
+            import multiaddr
+            from libp2p.peer.peerinfo import info_from_p2p_addr
+        except ImportError:
+            logger.debug("multiaddr not available – bootstrap skipped")
+            return
+
+        connected = 0
+        for addr_str in IPFS_BOOTSTRAP:
+            try:
+                ma        = multiaddr.Multiaddr(addr_str)
+                peer_info = info_from_p2p_addr(ma)
+                await asyncio.wait_for(
+                    self._host.connect(peer_info), timeout=10.0
+                )
+                connected += 1
+                logger.info("Bootstrap connected: %s", addr_str.split("/")[-1][:16])
+            except asyncio.TimeoutError:
+                logger.debug("Bootstrap timeout: %s", addr_str[-30:])
+            except Exception as e:
+                logger.debug("Bootstrap %s failed: %s", addr_str[-30:], e)
+
+        logger.info("Bootstrap: %d/%d nodes reached", connected, len(IPFS_BOOTSTRAP))
+
+    # ------------------------------------------------------------------
+    # GossipSub – Receive
     # ------------------------------------------------------------------
 
     async def _receive_loop(self) -> None:
         while self._running and self._sub is not None:
             try:
                 msg = await asyncio.wait_for(self._sub.get(), timeout=1.0)
-                await self._handle_expense_packet(msg)
+                await self._dispatch(msg)
             except asyncio.TimeoutError:
                 pass
             except Exception as e:
                 logger.error("Receive loop error: %s", e)
 
-    async def _handle_expense_packet(self, msg) -> None:
-        """Eingehendes GossipSub-Paket verarbeiten."""
+    async def _dispatch(self, msg) -> None:
         try:
             packet = json.loads(msg.data.decode())
-            expense_id = packet["id"]
-            blob       = bytes.fromhex(packet["blob"])
-            timestamp  = int(packet["timestamp"])
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.warning("Malformed expense packet: %s", e)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.warning("Malformed packet: %s", e)
             return
 
-        logger.debug(
-            "Received expense packet id=%s ts=%d from %s",
-            expense_id[:8], timestamp, str(msg.from_id)[:12],
-        )
-        self.callbacks.on_expense_received(expense_id, blob)
+        ptype = packet.get("type", "expense")
+
+        if ptype == "expense":
+            blob = bytes.fromhex(packet["blob"])
+            self.callbacks.on_expense_received(packet["id"], blob)
+
+        elif ptype == "settlement":
+            blob = bytes.fromhex(packet["blob"])
+            self.callbacks.on_settlement_received(packet["id"], blob)
+
+        elif ptype == "member":
+            self.callbacks.on_member_received(packet["pubkey"], packet["data"])
+
+        else:
+            logger.debug("Unknown packet type: %s", ptype)
 
     # ------------------------------------------------------------------
-    # GossipSub – Senden
+    # GossipSub – Publish
     # ------------------------------------------------------------------
+
+    def _publish_raw(self, data: bytes) -> None:
+        if not self._running or self._loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._do_publish(data), self._loop)
+
+    async def _do_publish(self, data: bytes) -> None:
+        if self._pubsub:
+            await self._pubsub.publish(self.topic_id, data)
 
     def publish_expense(self, expense_id: str, blob: bytes, timestamp: int) -> None:
-        """
-        Publiziert einen Expense-Blob im Gruppen-Topic.
-        Thread-safe: kann aus dem Tk-Thread aufgerufen werden.
-        """
-        if self._loop is None or not self._running:
-            logger.debug("publish_expense: offline, skipping")
-            return
-        packet = json.dumps({
+        self._publish_raw(json.dumps({
+            "type":      "expense",
             "id":        expense_id,
             "timestamp": timestamp,
             "blob":      blob.hex(),
-        })
-        asyncio.run_coroutine_threadsafe(
-            self._publish(packet.encode()),
-            self._loop,
-        )
+        }).encode())
 
-    async def _publish(self, data: bytes) -> None:
-        if self._pubsub is not None:
-            await self._pubsub.publish(self.topic_id, data)
-            logger.debug("Published %d bytes to %s", len(data), self.topic_id)
+    def publish_settlement(self, settlement_id: str, blob: bytes, timestamp: int) -> None:
+        self._publish_raw(json.dumps({
+            "type":      "settlement",
+            "id":        settlement_id,
+            "timestamp": timestamp,
+            "blob":      blob.hex(),
+        }).encode())
+
+    def publish_member(self, pubkey: str, display_name: str, joined_at: int) -> None:
+        self._publish_raw(json.dumps({
+            "type":        "member",
+            "pubkey":      pubkey,
+            "data":        {"display_name": display_name, "joined_at": joined_at},
+        }).encode())
 
     # ------------------------------------------------------------------
-    # File Transfer – Serving side
+    # File Transfer – Serve
     # ------------------------------------------------------------------
 
     async def _file_serve_handler(self, stream) -> None:
-        """
-        Eingehende Datei-Anfrage bearbeiten.
-        Erwartet SHA-256-Hex → sendet Dateiinhalt in Chunks.
-        """
         try:
-            req_data  = await stream.read()
-            sha256    = req_data.decode().strip()
-            if len(sha256) != 64 or not all(c in "0123456789abcdef" for c in sha256):
-                logger.warning("Invalid file request: %r", sha256[:20])
+            sha256    = (await stream.read()).decode().strip()
+            if len(sha256) != 64:
                 return
-
-            file_path = os.path.join(STORAGE_DIR, sha256)
-            if not os.path.exists(file_path):
-                logger.info("Requested file not available locally: %s", sha256[:12])
+            from storage import STORAGE_DIR
+            path = os.path.join(STORAGE_DIR, sha256)
+            if not os.path.exists(path):
                 return
-
-            logger.info("Serving file %s…", sha256[:12])
-            with open(file_path, "rb") as f:
+            with open(path, "rb") as f:
                 while chunk := f.read(CHUNK_SIZE):
                     await stream.write(chunk)
-            logger.info("File %s served successfully", sha256[:12])
-
+            logger.info("Served file %s", sha256[:12])
         except Exception as e:
             logger.error("File serve error: %s", e)
         finally:
-            try:
-                await stream.close()
-            except Exception:
-                pass
+            try: await stream.close()
+            except Exception: pass
 
     # ------------------------------------------------------------------
-    # File Transfer – Requesting side
+    # File Transfer – Request
     # ------------------------------------------------------------------
 
     async def _download_file(self, peer_id_str: str, sha256: str) -> bool:
-        """
-        Datei von einem bestimmten Peer anfordern und SHA-256 verifizieren.
-        Gibt True zurück wenn erfolgreich und Hash korrekt.
-        """
+        import hashlib as _hl
         from libp2p.peer.id import ID as PeerID
-
+        from storage import STORAGE_DIR
         try:
-            peer_id = PeerID.from_base58(peer_id_str)
-            stream  = await self._host.new_stream(peer_id, [FILE_PROTOCOL])
+            stream = await self._host.new_stream(
+                PeerID.from_base58(peer_id_str), [FILE_PROTOCOL]
+            )
         except Exception as e:
             logger.warning("Cannot open file stream to %s: %s", peer_id_str[:12], e)
             return False
 
-        temp_path = os.path.join(STORAGE_DIR, sha256 + ".tmp")
-        h = hashlib.sha256()
+        temp = os.path.join(STORAGE_DIR, sha256 + ".tmp")
+        h    = _hl.sha256()
         try:
             await stream.write(sha256.encode())
-            with open(temp_path, "wb") as f:
+            with open(temp, "wb") as f:
                 while True:
                     chunk = await asyncio.wait_for(stream.read(), timeout=30.0)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    h.update(chunk)
-
+                    if not chunk: break
+                    f.write(chunk); h.update(chunk)
             if h.hexdigest() == sha256:
-                os.rename(temp_path, os.path.join(STORAGE_DIR, sha256))
-                logger.info("File %s downloaded and verified", sha256[:12])
+                os.rename(temp, os.path.join(STORAGE_DIR, sha256))
                 self.callbacks.on_file_received(sha256)
                 return True
-            else:
-                logger.error("Hash mismatch for %s – discarded", sha256[:12])
-                os.remove(temp_path)
-                return False
-
-        except asyncio.TimeoutError:
-            logger.warning("Timeout downloading %s from %s", sha256[:12], peer_id_str[:12])
+            logger.error("Hash mismatch for %s", sha256[:12])
+            os.remove(temp)
+            return False
         except Exception as e:
-            logger.error("Download error for %s: %s", sha256[:12], e)
+            logger.error("Download error %s: %s", sha256[:12], e)
+            if os.path.exists(temp): os.remove(temp)
+            return False
         finally:
-            try:
-                await stream.close()
-            except Exception:
-                pass
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
-        return False
+            try: await stream.close()
+            except Exception: pass
 
     def request_file(self, sha256: str) -> None:
-        """
-        Fordert eine Datei von einem der bekannten Peers an.
-        Probiert alle verbundenen Peers der Reihe nach durch.
-        Thread-safe.
-        """
-        if not self._peers or not self._running:
-            logger.debug("request_file: no peers available")
-            return
-
-        async def _try_peers():
-            for peer_id in list(self._peers):
-                ok = await self._download_file(peer_id, sha256)
-                if ok:
-                    return
-            logger.warning("File %s not available from any peer", sha256[:12])
-
-        asyncio.run_coroutine_threadsafe(_try_peers(), self._loop)
+        if not self._peers or not self._running: return
+        async def _try():
+            for pid in list(self._peers):
+                if await self._download_file(pid, sha256): return
+        asyncio.run_coroutine_threadsafe(_try(), self._loop)
 
     # ------------------------------------------------------------------
-    # Status-Abfragen
+    # Peer events
+    # ------------------------------------------------------------------
+
+    class _PeerNotifee:
+        def __init__(self, net):
+            self._net = net
+        def connected(self, _, conn):
+            pid = conn.get_remote_peer_id().to_string()
+            self._net._peers.add(pid)
+            self._net.callbacks.on_peer_connected(pid)
+        def disconnected(self, _, conn):
+            pid = conn.get_remote_peer_id().to_string()
+            self._net._peers.discard(pid)
+            self._net.callbacks.on_peer_disconnected(pid)
+        def listen(self, *_): pass
+        def listen_close(self, *_): pass
+        def open_stream(self, *_): pass
+        def close_stream(self, *_): pass
+
+    # ------------------------------------------------------------------
+    # Properties
     # ------------------------------------------------------------------
 
     @property
@@ -368,9 +362,7 @@ class P2PNetwork:
 
     @property
     def peer_id(self) -> Optional[str]:
-        if self._host:
-            return self._host.get_id().to_string()
-        return None
+        return self._host.get_id().to_string() if self._host else None
 
     @property
     def peer_count(self) -> int:

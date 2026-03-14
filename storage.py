@@ -2,17 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Storage Module
+Storage Module – SQLite-Persistenz.
 
-SQLite speichert Ausgaben als verschlüsselte Blobs — ohne das
-Gruppenpasswort ist der Datenbankinhalt wertlos.
-
-Dateianhänge liegen als Binärdaten unter storage/<sha256> auf der Platte.
-Der SHA-256-Hash ist Teil der Expense-Signatur, Manipulationen werden erkannt.
-
-CRDT: last-write-wins per Timestamp (für spätere P2P-Synchronisation).
+Ausgaben und Ausgleichszahlungen werden als verschlüsselte Blobs gespeichert.
+Dateianhänge als Binärdaten unter storage/<sha256>.
+CRDT: last-write-wins per Timestamp.
 """
 
+import json
 import logging
 import os
 import sqlite3
@@ -20,24 +17,28 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Standardpfade – werden von der GUI mit Werten aus der Config überschrieben
 STORAGE_DIR = "storage"
 DB_PATH     = "splitp2p.db"
 
 
 def configure_paths(db_path: str, storage_dir: str) -> None:
-    """
-    Setzt die globalen Pfade für DB und Dateianhänge.
-    Muss vor init_db() und allen Attachment-Operationen aufgerufen werden.
-    """
     global DB_PATH, STORAGE_DIR
     DB_PATH     = db_path
     STORAGE_DIR = storage_dir
     logger.info("Paths set: db=%s  storage=%s", db_path, storage_dir)
 
 
+from currency import RATES_DDL as _RATES_DDL
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS expenses (
+    id          TEXT PRIMARY KEY,
+    blob        BLOB NOT NULL,
+    timestamp   INTEGER NOT NULL,
+    is_deleted  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS settlements (
     id          TEXT PRIMARY KEY,
     blob        BLOB NOT NULL,
     timestamp   INTEGER NOT NULL,
@@ -50,19 +51,16 @@ CREATE TABLE IF NOT EXISTS members (
     updated_at  INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_expenses_ts ON expenses(timestamp);
-"""
-
-# Exchange-Rate-Schema kommt aus currency.py
-from currency import RATES_DDL as _RATES_DDL
-_DDL = _DDL + "\n" + _RATES_DDL
+CREATE INDEX IF NOT EXISTS idx_expenses_ts   ON expenses(timestamp);
+CREATE INDEX IF NOT EXISTS idx_settlements_ts ON settlements(timestamp);
+""" + "\n" + _RATES_DDL
 
 
 def init_db(db_path: str = None) -> sqlite3.Connection:
     if db_path is None:
         db_path = DB_PATH
-    os.makedirs(STORAGE_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+    os.makedirs(STORAGE_DIR, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     for stmt in _DDL.strip().split(";"):
@@ -75,67 +73,73 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
-# Ausgaben (verschlüsselt)
+# Generisches CRDT-Blob-Store (Expenses + Settlements teilen die Logik)
 # ---------------------------------------------------------------------------
 
-def save_expense_blob(
-    db: sqlite3.Connection,
-    expense_id: str,
-    blob: bytes,
-    timestamp: int,
-    is_deleted: bool = False,
-) -> bool:
-    """
-    CRDT-merge: speichert nur wenn neu oder Timestamp neuer.
-    blob = Ergebnis von crypto.encrypt_expense().
-    """
+def _save_blob(db: sqlite3.Connection, table: str, obj_id: str,
+               blob: bytes, timestamp: int, is_deleted: bool = False) -> bool:
     row = db.execute(
-        "SELECT timestamp FROM expenses WHERE id = ?", (expense_id,)
+        f"SELECT timestamp FROM {table} WHERE id = ?", (obj_id,)
     ).fetchone()
-
     if row and timestamp <= row["timestamp"]:
-        logger.debug("Stale update für %s ignoriert", expense_id[:8])
         return False
-
     db.execute(
-        "INSERT OR REPLACE INTO expenses (id, blob, timestamp, is_deleted) VALUES (?,?,?,?)",
-        (expense_id, blob, timestamp, int(is_deleted)),
+        f"INSERT OR REPLACE INTO {table} (id, blob, timestamp, is_deleted) VALUES (?,?,?,?)",
+        (obj_id, blob, timestamp, int(is_deleted)),
     )
     db.commit()
     return True
 
 
-def load_all_expense_blobs(db: sqlite3.Connection) -> list[tuple[str, bytes]]:
-    """Gibt (id, blob) für alle nicht gelöschten Ausgaben zurück."""
+def _load_blobs(db: sqlite3.Connection, table: str) -> list[tuple[str, bytes]]:
     rows = db.execute(
-        "SELECT id, blob FROM expenses WHERE is_deleted = 0 ORDER BY timestamp ASC"
+        f"SELECT id, blob FROM {table} WHERE is_deleted = 0 ORDER BY timestamp ASC"
     ).fetchall()
     return [(r["id"], bytes(r["blob"])) for r in rows]
 
 
-def soft_delete_expense_blob(
-    db: sqlite3.Connection,
-    expense_id: str,
-    new_blob: bytes,
-    new_timestamp: int,
-) -> None:
-    """
-    Tombstone: aktualisiert Blob + Timestamp, setzt is_deleted=1.
-    Der neue Blob enthält die Ausgabe mit is_deleted=True (für Sync).
-    """
+def _soft_delete_blob(db: sqlite3.Connection, table: str, obj_id: str,
+                      new_blob: bytes, new_timestamp: int) -> None:
     db.execute(
-        "INSERT OR REPLACE INTO expenses (id, blob, timestamp, is_deleted) VALUES (?,?,?,1)",
-        (expense_id, new_blob, new_timestamp),
+        f"INSERT OR REPLACE INTO {table} (id, blob, timestamp, is_deleted) VALUES (?,?,?,1)",
+        (obj_id, new_blob, new_timestamp),
     )
     db.commit()
 
 
 # ---------------------------------------------------------------------------
-# Mitglieder (Klartext – nur öffentliche Infos)
+# Ausgaben
+# ---------------------------------------------------------------------------
+
+def save_expense_blob(db, eid, blob, ts, is_deleted=False):
+    return _save_blob(db, "expenses", eid, blob, ts, is_deleted)
+
+def load_all_expense_blobs(db):
+    return _load_blobs(db, "expenses")
+
+def soft_delete_expense_blob(db, eid, blob, ts):
+    _soft_delete_blob(db, "expenses", eid, blob, ts)
+
+
+# ---------------------------------------------------------------------------
+# Ausgleichszahlungen
+# ---------------------------------------------------------------------------
+
+def save_settlement_blob(db, sid, blob, ts, is_deleted=False):
+    return _save_blob(db, "settlements", sid, blob, ts, is_deleted)
+
+def load_all_settlement_blobs(db):
+    return _load_blobs(db, "settlements")
+
+def soft_delete_settlement_blob(db, sid, blob, ts):
+    _soft_delete_blob(db, "settlements", sid, blob, ts)
+
+
+# ---------------------------------------------------------------------------
+# Mitglieder
 # ---------------------------------------------------------------------------
 
 def save_member(db: sqlite3.Connection, member) -> None:
-    import json
     db.execute(
         "INSERT OR REPLACE INTO members (pubkey, data_json, updated_at) VALUES (?,?,?)",
         (member.pubkey, json.dumps(member.to_dict()), member.joined_at),
@@ -144,7 +148,6 @@ def save_member(db: sqlite3.Connection, member) -> None:
 
 
 def load_all_members(db: sqlite3.Connection):
-    import json
     from models import Member
     rows = db.execute("SELECT data_json FROM members").fetchall()
     result = []
@@ -152,12 +155,11 @@ def load_all_members(db: sqlite3.Connection):
         try:
             result.append(Member.from_dict(json.loads(row["data_json"])))
         except Exception as e:
-            logger.warning("Member-Deserialisierung fehlgeschlagen: %s", e)
+            logger.warning("Member parse error: %s", e)
     return result
 
 
-def get_member(db: sqlite3.Connection, pubkey: str) -> Optional[object]:
-    import json
+def get_member(db: sqlite3.Connection, pubkey: str):
     from models import Member
     row = db.execute(
         "SELECT data_json FROM members WHERE pubkey = ?", (pubkey,)
@@ -170,22 +172,16 @@ def get_member(db: sqlite3.Connection, pubkey: str) -> Optional[object]:
 # ---------------------------------------------------------------------------
 
 def save_attachment(data: bytes, sha256: str) -> str:
-    """
-    Speichert Rohdaten einer Datei unter storage/<sha256>.
-    Gibt den vollständigen Pfad zurück.
-    Idempotent: existiert die Datei schon, wird sie nicht überschrieben.
-    """
     os.makedirs(STORAGE_DIR, exist_ok=True)
     path = os.path.join(STORAGE_DIR, sha256)
     if not os.path.exists(path):
         with open(path, "wb") as f:
             f.write(data)
-        logger.info("Anhang gespeichert: %s (%d Bytes)", sha256[:12], len(data))
+        logger.info("Attachment saved: %s (%d B)", sha256[:12], len(data))
     return path
 
 
 def attachment_path(sha256: str) -> Optional[str]:
-    """Pfad zur gespeicherten Datei, oder None wenn nicht vorhanden."""
     path = os.path.join(STORAGE_DIR, sha256)
     return path if os.path.exists(path) else None
 

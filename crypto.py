@@ -167,3 +167,51 @@ def mime_type_from_path(path: str) -> str:
         ".gif":  "image/gif",
         ".webp": "image/webp",
     }.get(ext, "application/octet-stream")
+
+
+# ---------------------------------------------------------------------------
+# Settlement-Krypto (analog zu Expense)
+# ---------------------------------------------------------------------------
+
+def sign_settlement(settlement, private_key: ed25519.Ed25519PrivateKey) -> str:
+    """Signiert canonical_bytes() der Zahlung."""
+    return private_key.sign(settlement.canonical_bytes()).hex()
+
+
+def verify_settlement(settlement) -> bool:
+    """Prüft die Ed25519-Signatur der Zahlung."""
+    if not settlement.signature:
+        return False
+    try:
+        pub_key = ed25519.Ed25519PublicKey.from_public_bytes(
+            bytes.fromhex(settlement.from_pubkey)
+        )
+        pub_key.verify(bytes.fromhex(settlement.signature), settlement.canonical_bytes())
+        return True
+    except Exception as e:
+        logger.warning("Ungültige Signatur für Settlement %s: %s", settlement.id[:8], e)
+        return False
+
+
+def encrypt_settlement(settlement, group_password: str) -> bytes:
+    """Serialisiert und verschlüsselt eine Zahlung."""
+    key   = _group_aes_key(group_password)
+    aes   = AESGCM(key)
+    data  = json.dumps(settlement.to_dict(), ensure_ascii=False).encode()
+    nonce = os.urandom(12)
+    return nonce + aes.encrypt(nonce, data, None)
+
+
+def decrypt_settlement(blob: bytes, group_password: str):
+    """Entschlüsselt einen Settlement-Blob. None bei Fehler."""
+    from models import RecordedSettlement
+    if len(blob) < 28:
+        return None
+    try:
+        key  = _group_aes_key(group_password)
+        aes  = AESGCM(key)
+        data = aes.decrypt(blob[:12], blob[12:], None)
+        return RecordedSettlement.from_dict(json.loads(data))
+    except Exception as e:
+        logger.warning("Settlement-Entschlüsselung fehlgeschlagen: %s", e)
+        return None

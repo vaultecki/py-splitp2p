@@ -4,8 +4,7 @@
 """
 Data Models
 
-Alle Domain-Objekte als Dataclasses.
-JSON-serialisierbar für CRDT-Sync und Gruppenverschlüsselung.
+Alle Domain-Objekte als Dataclasses, JSON-serialisierbar.
 """
 
 from __future__ import annotations
@@ -15,13 +14,30 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+# ---------------------------------------------------------------------------
+# Kategorien
+# ---------------------------------------------------------------------------
+
+CATEGORIES: list[str] = [
+    "Allgemein",
+    "Essen & Trinken",
+    "Transport",
+    "Unterkunft",
+    "Einkaufen",
+    "Freizeit",
+    "Gesundheit",
+    "Reisen",
+    "Sport",
+    "Sonstiges",
+]
+
+
+# ---------------------------------------------------------------------------
+# Member
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Member:
-    """
-    Ein Gruppenmitglied.
-    Identität = Ed25519 Public Key (hex).
-    """
     pubkey: str
     display_name: str
     joined_at: int = field(default_factory=lambda: int(time.time()))
@@ -34,23 +50,19 @@ class Member:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Member":
-        return cls(**d)
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
+
+# ---------------------------------------------------------------------------
+# Attachment
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Attachment:
-    """
-    Dateianhang zu einer Ausgabe.
-
-    Die eigentliche Datei liegt lokal unter storage/<sha256>.
-    Im verschlüsselten Expense-Payload stehen nur Metadaten.
-    Beim P2P-Sync kann der Empfänger die Datei per Hash anfordern
-    und nach dem Download gegen den Hash verifizieren.
-    """
-    sha256: str       # Hex-Digest — Dateiname im Storage-Ordner
-    filename: str     # Original-Dateiname (nur zur Anzeige)
-    size: int         # Bytes
-    mime_type: str    # z.B. "image/jpeg", "application/pdf"
+    sha256: str
+    filename: str
+    size: int
+    mime_type: str
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -73,6 +85,10 @@ class Attachment:
         return f"{self.size / (1024*1024):.1f} MB"
 
 
+# ---------------------------------------------------------------------------
+# Split
+# ---------------------------------------------------------------------------
+
 @dataclass
 class Split:
     pubkey: str
@@ -86,29 +102,38 @@ class Split:
         return cls(**d)
 
 
+# ---------------------------------------------------------------------------
+# Expense
+# ---------------------------------------------------------------------------
+
 @dataclass
 class Expense:
     """
     Eine Ausgabe.
 
-    CRDT: gleiche id, steigender timestamp → last-write-wins.
-    Signatur: Ed25519 über canonical_bytes() mit dem Key des Payers.
-    Wird als Ganzes AES-GCM-verschlüsselt mit dem Gruppenkey gespeichert
-    und übertragen — andere Gruppen können nichts lesen.
+    timestamp  : CRDT-Uhr (wann gespeichert/geändert) – nicht bearbeiten
+    expense_date: Anzeige-Datum (vom Nutzer gewählt) – Unix-Tagesbeginn UTC
+                  0 = nicht gesetzt → timestamp wird angezeigt
     """
     id: str
     description: str
-    amount: float              # Betrag in der Gruppenwährung (ggf. konvertiert)
-    currency: str              # Gruppenwährung
+    amount: float
+    currency: str
     payer_pubkey: str
-    splits: list[Split]        # Anteile in Gruppenwährung
+    splits: list[Split]
     timestamp: int
     signature: str
+    category: str = "Allgemein"
+    expense_date: int = 0          # User-chosen display date (UTC day start)
     is_deleted: bool = False
     note: str = ""
     attachment: Optional[Attachment] = None
-    original_amount: Optional[float] = None    # Originalbetrag (falls andere Währung)
-    original_currency: Optional[str] = None    # Originalwährung
+    original_amount: Optional[float] = None
+    original_currency: Optional[str] = None
+
+    def display_date(self) -> int:
+        """Datum für die Anzeige: expense_date falls gesetzt, sonst timestamp."""
+        return self.expense_date if self.expense_date else self.timestamp
 
     @classmethod
     def create(
@@ -118,6 +143,8 @@ class Expense:
         currency: str,
         payer_pubkey: str,
         splits: list[Split],
+        category: str = "Allgemein",
+        expense_date: int = 0,
         note: str = "",
         attachment: Optional[Attachment] = None,
         original_amount: Optional[float] = None,
@@ -132,6 +159,8 @@ class Expense:
             splits=splits,
             timestamp=int(time.time()),
             signature="",
+            category=category,
+            expense_date=expense_date,
             note=note,
             attachment=attachment,
             original_amount=original_amount,
@@ -139,7 +168,6 @@ class Expense:
         )
 
     def canonical_bytes(self) -> bytes:
-        """Kanonische Bytes für die Signatur (attachment-Hash eingeschlossen)."""
         d = {
             "id": self.id,
             "description": self.description,
@@ -165,15 +193,100 @@ class Expense:
         splits = [Split.from_dict(s) for s in d.pop("splits")]
         att_raw = d.pop("attachment", None)
         attachment = Attachment.from_dict(att_raw) if att_raw else None
+        # Forward-compat: ignore unknown fields
+        known = cls.__dataclass_fields__.keys()
+        d = {k: v for k, v in d.items() if k in known}
         return cls(splits=splits, attachment=attachment, **d)
 
     def validate_splits(self, tolerance: float = 0.02) -> bool:
-        total = sum(s.amount for s in self.splits)
-        return abs(total - self.amount) <= tolerance
+        return abs(sum(s.amount for s in self.splits) - self.amount) <= tolerance
 
     def __repr__(self) -> str:
-        att = f", attach={self.attachment.filename}" if self.attachment else ""
-        return f"Expense('{self.description}', {self.amount} {self.currency}{att})"
+        return f"Expense('{self.description}', {self.amount} {self.currency})"
+
+
+# ---------------------------------------------------------------------------
+# RecordedSettlement  –  eine tatsächlich geleistete Ausgleichszahlung
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RecordedSettlement:
+    """
+    Erfasst, dass `from_pubkey` an `to_pubkey` einen Betrag gezahlt hat.
+
+    Unterschied zur berechneten Settlement (ledger.py):
+      - Diese Klasse ist persistiert + signiert + CRDT-synchronisiert.
+      - Die berechnete Settlement ist nur eine Empfehlung.
+
+    CRDT: gleiche id, steigender timestamp → last-write-wins.
+    """
+    id: str
+    from_pubkey: str    # wer hat gezahlt
+    to_pubkey: str      # an wen
+    amount: float
+    currency: str
+    timestamp: int      # CRDT-Uhr
+    signature: str      # Ed25519 über canonical_bytes(), signiert von from_pubkey
+    settlement_date: int = 0   # Anzeige-Datum (UTC-Tagesbeginn), 0 = timestamp
+    is_deleted: bool = False
+    note: str = ""
+    original_amount: Optional[float] = None
+    original_currency: Optional[str] = None
+
+    def display_date(self) -> int:
+        return self.settlement_date if self.settlement_date else self.timestamp
+
+    @classmethod
+    def create(
+        cls,
+        from_pubkey: str,
+        to_pubkey: str,
+        amount: float,
+        currency: str,
+        settlement_date: int = 0,
+        note: str = "",
+        original_amount: Optional[float] = None,
+        original_currency: Optional[str] = None,
+    ) -> "RecordedSettlement":
+        return cls(
+            id=str(uuid.uuid4()),
+            from_pubkey=from_pubkey,
+            to_pubkey=to_pubkey,
+            amount=round(amount, 2),
+            currency=currency,
+            timestamp=int(time.time()),
+            signature="",
+            settlement_date=settlement_date,
+            note=note,
+            original_amount=original_amount,
+            original_currency=original_currency,
+        )
+
+    def canonical_bytes(self) -> bytes:
+        d = {
+            "id": self.id,
+            "from_pubkey": self.from_pubkey,
+            "to_pubkey": self.to_pubkey,
+            "amount": str(self.amount),
+            "currency": self.currency,
+            "timestamp": self.timestamp,
+            "is_deleted": self.is_deleted,
+        }
+        return json.dumps(d, sort_keys=True, ensure_ascii=False).encode()
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RecordedSettlement":
+        d = dict(d)
+        known = cls.__dataclass_fields__.keys()
+        d = {k: v for k, v in d.items() if k in known}
+        return cls(**d)
+
+    def __repr__(self) -> str:
+        return (f"RecordedSettlement({self.from_pubkey[:8]}→"
+                f"{self.to_pubkey[:8]}, {self.amount} {self.currency})")
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +301,7 @@ def split_equally(amount: float, pubkeys: list[str]) -> list[Split]:
     splits = [Split(pubkey=pk, amount=share) for pk in pubkeys]
     diff = round(amount - sum(s.amount for s in splits), 2)
     if diff:
-        splits[0] = Split(pubkey=splits[0].pubkey, amount=round(splits[0].amount + diff, 2))
+        splits[0] = Split(splits[0].pubkey, round(splits[0].amount + diff, 2))
     return splits
 
 

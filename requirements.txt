@@ -1,24 +1,20 @@
 # SplitP2P – Python Dependencies
 # Install with: pip install -r requirements.txt
 
-# ── Pflicht ────────────────────────────────────────────────────────────────
-# Ed25519-Signaturen und AES-256-GCM-Gruppenverschlüsselung
+# ── Pflicht ──────────────────────────────────────────────────────────────
 cryptography>=41.0
 
-# ── P2P-Sync (empfohlen) ───────────────────────────────────────────────────
-# GossipSub-Messaging und direkter Datei-Stream zwischen Peers.
-# Ohne libp2p läuft die App im Offline-Modus (nur lokale Nutzung).
+# ── P2P-Sync (empfohlen) ─────────────────────────────────────────────────
+# GossipSub, mDNS-Discovery, Bootstrap-Verbindungen
 libp2p>=0.1.5
+multiaddr>=0.0.9        # IPFS Bootstrap-Adressen parsen
 
-# ── Optional ───────────────────────────────────────────────────────────────
-# Bildvorschau für Anhänge (JPG, PNG, GIF, WEBP) direkt im App-Fenster.
-# Ohne Pillow werden Bilder im System-Viewer geöffnet.
-# PDFs werden immer im System-Viewer geöffnet (kein Pillow nötig).
+# ── Optional ─────────────────────────────────────────────────────────────
+# Bildvorschau für Anhänge direkt im App-Fenster (JPG, PNG, GIF, WEBP)
 Pillow>=10.0
 
-# ── Stdlib (kein Install nötig) ────────────────────────────────────────────
-# tkinter   – GUI; auf Debian/Ubuntu ggf.: sudo apt install python3-tk
-# sqlite3   – lokale Datenbank
+# ── Stdlib ───────────────────────────────────────────────────────────────
+# tkinter   – GUI; auf Debian/Ubuntu: sudo apt install python3-tk
+# sqlite3   – Datenbank
 # urllib    – Wechselkurs-Abruf
-# asyncio   – asyncio-Loop für den P2P-Thread
-# threading – Hintergrund-Thread für Netzwerk und Kurs-Fetch
+# asyncio / threading – P2P-Hintergrundthread
