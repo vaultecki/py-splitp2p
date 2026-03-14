@@ -1269,6 +1269,261 @@ class ExportDialog(tk.Toplevel):
         mb.showinfo("Exportiert", "PDF gespeichert:" + path, parent=self)
 
 
+
+# ---------------------------------------------------------------------------
+# Activity Log Window
+# ---------------------------------------------------------------------------
+
+class ActivityLogWindow(tk.Toplevel):
+    """
+    Zeigt alle Änderungen an der Gruppe chronologisch an.
+
+    Quellen:
+      1. Persistente Ereignisse  – aus Expenses + Settlements rekonstruiert
+         (wer hat wann was hinzugefügt / bearbeitet / gelöscht)
+      2. Laufzeit-Ereignisse     – P2P-Sync, Peer-Verbindungen, Dateiempfang
+         (nur für die aktuelle Session, nicht persistent)
+
+    Das Fenster kann offen bleiben; neue Laufzeit-Einträge werden
+    per append() live hinzugefügt.
+    """
+
+    # Farbe pro Level
+    LEVEL_COLOR = {
+        "info":  "#2ecc8f",   # grün – eigene Aktionen
+        "sync":  "#4d9de0",   # blau – P2P-Sync
+        "net":   "#a78bfa",   # lila – Netzwerk-Events
+        "warn":  "#e0a03a",   # amber – Warnungen
+        "recv":  "#5dcaa5",   # türkis – empfangene Änderungen
+    }
+
+    def __init__(self, parent, expenses, settlements, members,
+                 runtime_log, group_currency, own_pubkey):
+        super().__init__(parent)
+        self.title("Änderungsprotokoll")
+        self.configure(bg=BG)
+        self.geometry("780x560")
+        self.minsize(600, 400)
+
+        self._own_pubkey = own_pubkey
+        self._currency   = group_currency
+        self._pk_to_name = {m.pubkey: m.display_name for m in members}
+
+        self._build_chrome()
+        self._populate(expenses, settlements, runtime_log)
+
+    def _name(self, pk: str) -> str:
+        return self._pk_to_name.get(pk, pk[:10] + "…")
+
+    # ── UI ──────────────────────────────────────────────────────────
+
+    def _build_chrome(self):
+        # Header
+        hdr = tk.Frame(self, bg=PANEL, height=46)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        _lbl(hdr, "ÄNDERUNGSPROTOKOLL", fg=GREEN, font=FONT_BOLD, bg=PANEL).pack(
+            side="left", padx=14, pady=12)
+
+        # Filter-Buttons (Level)
+        filter_row = tk.Frame(hdr, bg=PANEL)
+        filter_row.pack(side="right", padx=8)
+        self._filter_var = tk.StringVar(value="alle")
+        for val, label in [("alle", "Alle"),
+                            ("info", "Aktionen"),
+                            ("sync", "Sync"),
+                            ("net",  "Netzwerk")]:
+            tk.Radiobutton(
+                filter_row, text=label, variable=self._filter_var,
+                value=val, command=self._apply_filter,
+                bg=PANEL, fg=FG_MUTED, selectcolor=PANEL,
+                activebackground=PANEL, activeforeground=FG,
+                font=FONT_SMALL,
+            ).pack(side="left", padx=4)
+
+        _div(self).pack(fill="x")
+
+        # Suchzeile
+        search_bar = tk.Frame(self, bg=PANEL, pady=5)
+        search_bar.pack(fill="x")
+        _lbl(search_bar, "🔍", fg=FG_DIM, font=FONT, bg=PANEL, padx=8).pack(side="left")
+        self._search_var = tk.StringVar()
+        tk.Entry(search_bar, textvariable=self._search_var, font=FONT,
+                 bg=BORDER, fg=FG, insertbackground=GREEN,
+                 relief="flat", bd=4, width=30).pack(side="left")
+        self._search_var.trace_add("write", lambda *_: self._apply_filter())
+        self._count_lbl = _lbl(search_bar, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
+        self._count_lbl.pack(side="right", padx=10)
+        _ghost(search_bar, "✕", self._clear_search).pack(side="right")
+        _div(self).pack(fill="x")
+
+        # Scrollbares Log
+        container = tk.Frame(self, bg=BG)
+        container.pack(fill="both", expand=True)
+        self._canvas = tk.Canvas(container, bg=BG, highlightthickness=0)
+        sb = tk.Scrollbar(container, orient="vertical", command=self._canvas.yview,
+                          bg=PANEL, troughcolor=BG)
+        self._canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self._inner = tk.Frame(self._canvas, bg=BG)
+        self._win   = self._canvas.create_window((0, 0), window=self._inner, anchor="nw")
+        self._inner.bind("<Configure>", lambda e: self._canvas.configure(
+            scrollregion=self._canvas.bbox("all")))
+        self._canvas.bind("<Configure>", lambda e: self._canvas.itemconfig(
+            self._win, width=e.width))
+        self._canvas.bind_all("<MouseWheel>", lambda e: self._canvas.yview_scroll(
+            int(-1*(e.delta/120)), "units"))
+
+        # Statuszeile
+        status = tk.Frame(self, bg=PANEL, height=32)
+        status.pack(fill="x", side="bottom")
+        status.pack_propagate(False)
+        self._status_lbl = _lbl(status, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
+        self._status_lbl.pack(side="left", padx=12, pady=6)
+        _ghost(status, "Exportieren (TXT)", self._export_txt).pack(side="right", padx=8)
+
+    # ── Daten aufbereiten ───────────────────────────────────────────
+
+    def _populate(self, expenses, settlements, runtime_log):
+        """Alle Einträge – persistent + Laufzeit – zusammenführen."""
+        self._all_entries: list[tuple[int, str, str]] = []  # (ts, level, msg)
+
+        # Aus Expenses rekonstruieren
+        for e in expenses:
+            who = self._name(e.payer_pubkey)
+            is_own = e.payer_pubkey == self._own_pubkey
+            lvl = "info" if is_own else "recv"
+            self._all_entries.append((
+                e.timestamp, lvl,
+                f"Ausgabe {'hinzugefügt' if not e.is_deleted else 'gelöscht'}: "
+                f"'{e.description}'  {e.amount:.2f} {self._currency}  "
+                f"[{e.category}]  von {who}",
+            ))
+
+        # Aus Settlements rekonstruieren
+        for s in settlements:
+            is_own = s.from_pubkey == self._own_pubkey
+            lvl = "info" if is_own else "recv"
+            self._all_entries.append((
+                s.timestamp, lvl,
+                f"Zahlung erfasst: {self._name(s.from_pubkey)} → "
+                f"{self._name(s.to_pubkey)}  {s.amount:.2f} {self._currency}"
+                + ('  "' + s.note + '"' if s.note else ""),
+            ))
+
+        # Laufzeit-Einträge (P2P-Events dieser Session)
+        for ts, lvl, msg in runtime_log:
+            self._all_entries.append((ts, lvl, msg))
+
+        # Chronologisch sortieren (neueste oben)
+        self._all_entries.sort(key=lambda x: x[0], reverse=True)
+
+        self._status_lbl.configure(
+            text=f"{len(self._all_entries)} Einträge gesamt")
+        self._render_all()
+
+    def _render_all(self):
+        """Alle Einträge (gefiltert) neu zeichnen."""
+        for w in self._inner.winfo_children():
+            w.destroy()
+
+        query  = self._search_var.get().lower().strip()
+        level  = self._filter_var.get()
+
+        shown = 0
+        for ts, lvl, msg in self._all_entries:
+            if level != "alle" and lvl != level:
+                continue
+            if query and query not in msg.lower():
+                continue
+            self._render_row(ts, lvl, msg)
+            shown += 1
+
+        total = len(self._all_entries)
+        self._count_lbl.configure(
+            text=f"{shown} von {total}" if shown < total else "")
+
+        if shown == 0:
+            _lbl(self._inner,
+                 "Keine Einträge." if total else "Noch keine Aktivität.",
+                 fg=FG_DIM, font=FONT).pack(pady=30)
+
+        # Scroll to top
+        self._canvas.update_idletasks()
+        self._canvas.yview_moveto(0)
+
+    def _render_row(self, ts: int, level: str, msg: str):
+        color = self.LEVEL_COLOR.get(level, FG_MUTED)
+        ts_str = time.strftime("%d.%m.%Y  %H:%M:%S", time.localtime(ts))
+
+        row = tk.Frame(self._inner, bg=PANEL, padx=12, pady=7)
+        row.pack(fill="x", pady=1)
+
+        # Farbige Level-Pille
+        pill = tk.Frame(row, bg=color, width=4)
+        pill.pack(side="left", fill="y", padx=(0, 10))
+
+        content = tk.Frame(row, bg=PANEL)
+        content.pack(side="left", fill="x", expand=True)
+
+        # Timestamp + Level
+        meta = tk.Frame(content, bg=PANEL)
+        meta.pack(fill="x")
+        _lbl(meta, ts_str, fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
+        _lbl(meta, level.upper(), fg=color, font=FONT_SMALL, bg=PANEL,
+             padx=6).pack(side="left")
+
+        # Message
+        _lbl(content, msg, fg=FG, font=FONT_SMALL, bg=PANEL,
+             wraplength=640, justify="left").pack(anchor="w", pady=(2, 0))
+
+        _div(self._inner).pack(fill="x")
+
+    # ── Live-Update ─────────────────────────────────────────────────
+
+    def append(self, ts: int, level: str, msg: str) -> None:
+        """Fügt einen neuen Eintrag live hinzu (thread-safe via Tk.after)."""
+        self._all_entries.insert(0, (ts, level, msg))
+        if len(self._all_entries) > 500:
+            self._all_entries.pop()
+        self._status_lbl.configure(
+            text=f"{len(self._all_entries)} Einträge gesamt")
+        # Nur neu zeichnen wenn kein aktiver Filter läuft
+        query = self._search_var.get().strip()
+        flvl  = self._filter_var.get()
+        if not query and (flvl == "alle" or flvl == level):
+            self._render_row(ts, level, msg)
+
+    # ── Filter / Search ─────────────────────────────────────────────
+
+    def _apply_filter(self):
+        self._render_all()
+
+    def _clear_search(self):
+        self._search_var.set("")
+        self._filter_var.set("alle")
+
+    # ── Export ──────────────────────────────────────────────────────
+
+    def _export_txt(self):
+        path = fd.asksaveasfilename(
+            title="Log exportieren", defaultextension=".txt",
+            filetypes=[("Textdatei", "*.txt"), ("Alle", "*.*")],
+            parent=self,
+        )
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"SplitP2P – Änderungsprotokoll\n")
+            f.write(f"Exportiert: {time.strftime('%d.%m.%Y %H:%M:%S')}\n")
+            f.write("=" * 60 + "\n\n")
+            for ts, lvl, msg in self._all_entries:
+                ts_str = time.strftime("%d.%m.%Y %H:%M:%S", time.localtime(ts))
+                f.write(f"[{ts_str}] [{lvl.upper():4s}]  {msg}\n")
+        mb.showinfo("Exportiert", "Log gespeichert:\n" + path, parent=self)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1287,6 +1542,9 @@ class App(tk.Tk):
         self._group_currency = "EUR"
         self._rates: dict    = {}
         self._network        = None
+        # Aktivitäts-Log (in-memory, max. 500 Einträge)
+        self._log: list[tuple[int,str,str]] = []  # (ts, level, msg)
+        self._log_window = None
         # Suche / Filter
         self._search_text    = tk.StringVar()
         self._filter_cat     = tk.StringVar(value='Alle')
@@ -1375,6 +1633,7 @@ class App(tk.Tk):
         toolbar.pack(fill="x")
         _lbl(toolbar, "AUSGABEN & ZAHLUNGEN",
              fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=16, pady=10).pack(side="left")
+        _ghost(toolbar, "📋 Log",     self._open_log).pack(side="right", padx=4, pady=6)
         _ghost(toolbar, "📊 Charts",  self._open_charts).pack(side="right", padx=4, pady=6)
         _ghost(toolbar, "⬇ Export",   self._open_export).pack(side="right", padx=4, pady=6)
         _ghost(toolbar, "+ Zahlung",  self._record_settlement).pack(side="right", padx=4, pady=6)
@@ -1716,7 +1975,11 @@ class App(tk.Tk):
                             self._group_currency, self._rates)
         if not dlg.result: return
         from models import Expense
-        self._save_expense(Expense.create(**dlg.result))
+        exp = Expense.create(**dlg.result)
+        self._save_expense(exp)
+        self._append_log('info',
+            f"Ausgabe hinzugefügt: '{exp.description}' "
+            f"{exp.amount:.2f} {exp.currency}")
         self._refresh()
 
     def _edit_expense(self, expense):
@@ -1729,6 +1992,9 @@ class App(tk.Tk):
         updated = Expense(id=expense.id, timestamp=int(time.time()),
                           signature="", **dlg.result)
         self._save_expense(updated)
+        self._append_log('info',
+            f"Ausgabe bearbeitet: '{updated.description}' "
+            f"{updated.amount:.2f} {updated.currency}")
         self._refresh()
 
     def _delete_expense(self, expense):
@@ -1742,6 +2008,7 @@ class App(tk.Tk):
         soft_delete_expense_blob(self._db, expense.id, blob, expense.timestamp)
         if self._network:
             self._network.publish_expense(expense.id, blob, expense.timestamp)
+        self._append_log('info', f"Ausgabe gelöscht: '{expense.description}'")
         self._refresh()
 
     # ── Ausgleichszahlungen ─────────────────────────────────────────
@@ -1756,7 +2023,14 @@ class App(tk.Tk):
                                self._group_currency, self._rates, prefill)
         if not dlg.result: return
         from models import RecordedSettlement
-        self._save_settlement(RecordedSettlement.create(**dlg.result))
+        rs = RecordedSettlement.create(**dlg.result)
+        self._save_settlement(rs)
+        from storage import load_all_members
+        _m = {m.pubkey: m.display_name for m in load_all_members(self._db)}
+        self._append_log('info',
+            f"Zahlung erfasst: {_m.get(rs.from_pubkey, rs.from_pubkey[:8])} "
+            f"→ {_m.get(rs.to_pubkey, rs.to_pubkey[:8])} "
+            f"{rs.amount:.2f} {rs.currency}")
         self._refresh()
 
     def _delete_settlement(self, settlement):
@@ -2010,18 +2284,32 @@ class App(tk.Tk):
                 self2._app.after(0, lambda: self2._app._on_net_settlement(sid, blob))
             def on_member_received(self2, pubkey, data):
                 self2._app.after(0, lambda: self2._app._on_net_member(pubkey, data))
+                name = data.get("display_name","?")
+                self2._app.after(0, lambda: self2._app._append_log(
+                    "sync", f"Mitglied empfangen: {name} ({pubkey[:12]}…)"))
             def on_peer_connected(self2, pid):
                 self2._app.after(0, lambda: self2._app._on_peer_change())
+                self2._app.after(0, lambda: self2._app._append_log(
+                    "net", f"Peer verbunden: {pid[:20]}…"))
             def on_peer_disconnected(self2, pid):
                 self2._app.after(0, lambda: self2._app._on_peer_change())
+                self2._app.after(0, lambda: self2._app._append_log(
+                    "net", f"Peer getrennt: {pid[:20]}…"))
             def on_status_changed(self2, online, pid):
                 self2._app.after(0, lambda: self2._app._on_net_status(online, pid))
+                self2._app.after(0, lambda: self2._app._append_log(
+                    "net", f"Status: {'online' if online else 'offline'}"  
+                           + (f"  id={pid[:16]}…" if online else "")))
             def on_file_received(self2, sha256):
                 self2._app.after(0, self2._app._refresh)
+                self2._app.after(0, lambda: self2._app._append_log(
+                    "sync", f"Datei empfangen: {sha256[:16]}…"))
             def on_history_synced(self2, n_exp, n_set):
                 if n_exp + n_set > 0:
                     self2._app.after(0, lambda: self2._app._on_history_synced(
                         n_exp, n_set))
+                self2._app.after(0, lambda: self2._app._append_log(
+                    "sync", f"History-Sync: +{n_exp} Ausgaben, +{n_set} Zahlungen"))
 
         self._network = P2PNetwork(self._group_pw, _CB(self))
         self._network.start_in_thread()
@@ -2081,6 +2369,41 @@ class App(tk.Tk):
             ))
             self._refresh()
 
+
+    # ── Aktivitäts-Log ───────────────────────────────────────────────
+
+    def _append_log(self, level: str, msg: str) -> None:
+        """
+        Fügt einen Eintrag in den In-Memory-Log ein.
+        level: 'info' | 'sync' | 'net' | 'warn'
+        Aktualisiert das Log-Fenster falls es offen ist.
+        """
+        import time as _t
+        self._log.append((int(_t.time()), level, msg))
+        if len(self._log) > 500:
+            self._log.pop(0)
+        if self._log_window and self._log_window.winfo_exists():
+            self._log_window.append(int(_t.time()), level, msg)
+
+    def _open_log(self) -> None:
+        """Öffnet das Log-Fenster (oder bringt es nach vorne)."""
+        from storage import load_all_members
+        members     = load_all_members(self._db)
+        expenses    = self._load_expenses()
+        settlements = self._load_settlements()
+        if self._log_window and self._log_window.winfo_exists():
+            self._log_window.lift()
+            self._log_window.focus_force()
+            return
+        self._log_window = ActivityLogWindow(
+            self,
+            expenses=expenses,
+            settlements=settlements,
+            members=members,
+            runtime_log=list(self._log),
+            group_currency=self._group_currency,
+            own_pubkey=self._own_pubkey,
+        )
 
     # ── P2P History-Sync ─────────────────────────────────────────────
 
