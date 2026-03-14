@@ -559,6 +559,86 @@ class ExpenseDialog(tk.Toplevel):
 # Mitglied hinzufügen
 # ---------------------------------------------------------------------------
 
+class StorageSetupDialog(tk.Toplevel):
+    """
+    Wird einmalig beim allerersten Start angezeigt.
+    Legt fest wo die Datenbank und die Dateianhänge gespeichert werden.
+    Beide Pfade können danach in den Einstellungen geändert werden.
+    """
+    def __init__(self, parent, defaults: dict):
+        super().__init__(parent)
+        self.title("Speicherort einrichten")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.grab_set()
+        self.result: Optional[dict] = None
+        self._build(defaults)
+        self.wait_window()
+
+    def _build(self, defaults):
+        pad = dict(padx=28)
+        _lbl(self, "SPEICHERORT", fg=GREEN, font=FONT_LARGE).pack(
+            anchor="w", pady=(24, 4), **pad)
+        _lbl(self,
+             "Wo sollen Datenbank und Dateianhänge gespeichert werden?\n"
+             "Die Einstellung kann später in den Einstellungen geändert werden.",
+             fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", **pad)
+        _div(self).pack(fill="x", padx=28, pady=10)
+
+        frm = tk.Frame(self, bg=BG, padx=28)
+        frm.pack(fill="x")
+
+        def path_row(label, var, pick_dir=False):
+            _lbl(frm, label, fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+            row = tk.Frame(frm, bg=BG)
+            row.pack(fill="x", pady=(2, 8))
+            tk.Entry(row, textvariable=var, font=FONT_MONO, bg=PANEL, fg=FG,
+                     insertbackground=GREEN, relief="flat", bd=6).pack(
+                side="left", fill="x", expand=True)
+            def pick(v=var, d=pick_dir):
+                if d:
+                    path = fd.askdirectory(title="Ordner wählen", parent=self)
+                else:
+                    path = fd.asksaveasfilename(
+                        title="Datenbankdatei", parent=self,
+                        defaultextension=".db",
+                        filetypes=[("SQLite-Datenbank", "*.db"), ("Alle Dateien", "*.*")],
+                        initialfile=os.path.basename(v.get()),
+                        initialdir=os.path.dirname(os.path.abspath(v.get())),
+                    )
+                if path:
+                    v.set(path)
+            _ghost(row, "…", pick).pack(side="left", padx=(6, 0))
+
+        self._db_path  = tk.StringVar(value=defaults.get("db_path", ""))
+        self._att_dir  = tk.StringVar(value=defaults.get("storage_dir", ""))
+
+        path_row("DATENBANKDATEI (.db)", self._db_path, pick_dir=False)
+        path_row("ORDNER FÜR DATEIANHÄNGE", self._att_dir, pick_dir=True)
+
+        btn_row = tk.Frame(self, bg=BG, padx=28, pady=20)
+        btn_row.pack(fill="x")
+        _btn(btn_row, "WEITER", self._confirm).pack(side="right")
+
+    def _confirm(self):
+        db_path = self._db_path.get().strip()
+        att_dir = self._att_dir.get().strip()
+        if not db_path:
+            mb.showerror("Fehler", "Datenbankpfad fehlt.", parent=self); return
+        if not att_dir:
+            mb.showerror("Fehler", "Anhang-Ordner fehlt.", parent=self); return
+        # Verzeichnis der DB muss existieren oder erstellbar sein
+        db_dir = os.path.dirname(os.path.abspath(db_path))
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+            os.makedirs(att_dir, exist_ok=True)
+        except OSError as e:
+            mb.showerror("Fehler", f"Ordner konnte nicht erstellt werden:\n{e}", parent=self)
+            return
+        self.result = {"db_path": db_path, "storage_dir": att_dir}
+        self.destroy()
+
+
 class AddMemberDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -721,15 +801,50 @@ class App(tk.Tk):
 
     # ── Identität & Gruppe ────────────────────────────────────────────
 
+
+    @staticmethod
+    def _default_paths() -> dict:
+        """Plattformspezifische Standardpfade für DB und Anhänge."""
+        home = os.path.expanduser("~")
+        if os.name == "nt":
+            base = os.path.join(home, "AppData", "Local", "SplitP2P")
+        else:
+            base = os.path.join(home, ".local", "share", "SplitP2P")
+        return {
+            "db_path":     os.path.join(base, "splitp2p.db"),
+            "storage_dir": os.path.join(base, "attachments"),
+        }
+
     def _init_identity(self):
         from config_manager import ConfigManager
         from crypto import (generate_private_key, private_key_from_bytes,
                             get_public_key_hex, private_key_to_bytes)
-        from storage import init_db
+        from storage import init_db, configure_paths
 
         self._cfg = ConfigManager("SplitP2P", "config.json")
-        self._db  = init_db("splitp2p.db")
 
+        # ── Speicherpfade bestimmen ──────────────────────────────────
+        defaults   = self._default_paths()
+        db_path    = self._cfg.get("db_path",     defaults["db_path"])
+        storage_dir = self._cfg.get("storage_dir", defaults["storage_dir"])
+        first_start = not self._cfg.has_key("db_path")
+
+        if first_start:
+            # Erster Start: Pfade abfragen
+            dlg = StorageSetupDialog(self, {"db_path": db_path,
+                                            "storage_dir": storage_dir})
+            if dlg.result:
+                db_path     = dlg.result["db_path"]
+                storage_dir = dlg.result["storage_dir"]
+            # Pfade speichern (auch wenn Dialog abgebrochen → Defaults nutzen)
+            self._cfg.set("db_path",     db_path)
+            self._cfg.set("storage_dir", storage_dir)
+            self._cfg.save()
+
+        configure_paths(db_path, storage_dir)
+        self._db = init_db()
+
+        # ── Schlüssel ────────────────────────────────────────────────
         raw = self._cfg.get("private_key_hex")
         if raw:
             self._own_key = private_key_from_bytes(bytes.fromhex(raw))
@@ -824,6 +939,46 @@ class App(tk.Tk):
             _lbl(frm, self._own_pubkey, fg=FG_DIM, font=FONT_MONO,
                  wraplength=340, justify="left").pack(anchor="w", pady=2)
 
+        # Speicherort-Sektion (nur wenn nicht first_run)
+        if not first_run:
+            _div(dlg).pack(fill="x", padx=24, pady=(12, 0))
+            _lbl(dlg, "SPEICHERORT", fg=GREEN, font=FONT_LARGE).pack(
+                anchor="w", pady=(12, 2), padx=24)
+            _div(dlg).pack(fill="x", padx=24)
+            sfrm = tk.Frame(dlg, bg=BG, padx=24, pady=8)
+            sfrm.pack(fill="x")
+
+            def _path_row(lbl_text, var, pick_dir=False):
+                _lbl(sfrm, lbl_text, fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+                row = tk.Frame(sfrm, bg=BG)
+                row.pack(fill="x", pady=(2, 6))
+                tk.Entry(row, textvariable=var, font=FONT_MONO, bg=PANEL, fg=FG,
+                         insertbackground=GREEN, relief="flat", bd=6).pack(
+                    side="left", fill="x", expand=True)
+                def pick(v=var, d=pick_dir):
+                    if d:
+                        p = fd.askdirectory(title="Ordner wählen", parent=dlg)
+                    else:
+                        p = fd.asksaveasfilename(
+                            title="Datenbankdatei", parent=dlg,
+                            defaultextension=".db",
+                            filetypes=[("SQLite-Datenbank", "*.db"), ("Alle Dateien", "*.*")],
+                            initialfile=os.path.basename(v.get()),
+                            initialdir=os.path.dirname(os.path.abspath(v.get())),
+                        )
+                    if p:
+                        v.set(p)
+                _ghost(row, "…", pick).pack(side="left", padx=(6, 0))
+
+            db_var  = tk.StringVar(value=self._cfg.get("db_path", ""))
+            att_var = tk.StringVar(value=self._cfg.get("storage_dir", ""))
+            _path_row("DATENBANKDATEI", db_var, pick_dir=False)
+            _path_row("ANHANG-ORDNER",  att_var, pick_dir=True)
+            _lbl(sfrm,
+                 "⚠  Änderungen werden beim nächsten Start wirksam.\n"
+                 "Bestehende Daten bitte manuell verschieben.",
+                 fg=AMBER, font=FONT_SMALL, justify="left").pack(anchor="w")
+
         def save():
             n = name_var.get().strip()
             if not n:
@@ -836,6 +991,14 @@ class App(tk.Tk):
             save_member(self._db, Member(self._own_pubkey, self._own_name))
             self._identity_label.configure(
                 text=f"{self._own_name}  ·  {self._own_pubkey[:12]}…")
+            if not first_run:
+                # Speicherpfade übernehmen (wirksam beim nächsten Start)
+                new_db  = db_var.get().strip()
+                new_att = att_var.get().strip()
+                if new_db and new_att:
+                    self._cfg.set("db_path",     new_db)
+                    self._cfg.set("storage_dir", new_att)
+                    self._cfg.save()
             dlg.destroy()
             if first_run:
                 self._do_group_select()

@@ -20,7 +20,21 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Standardpfade – werden von der GUI mit Werten aus der Config überschrieben
 STORAGE_DIR = "storage"
+DB_PATH     = "splitp2p.db"
+
+
+def configure_paths(db_path: str, storage_dir: str) -> None:
+    """
+    Setzt die globalen Pfade für DB und Dateianhänge.
+    Muss vor init_db() und allen Attachment-Operationen aufgerufen werden.
+    """
+    global DB_PATH, STORAGE_DIR
+    DB_PATH     = db_path
+    STORAGE_DIR = storage_dir
+    logger.info("Paths set: db=%s  storage=%s", db_path, storage_dir)
+
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS expenses (
@@ -44,8 +58,11 @@ from currency import RATES_DDL as _RATES_DDL
 _DDL = _DDL + "\n" + _RATES_DDL
 
 
-def init_db(db_path: str = "splitp2p.db") -> sqlite3.Connection:
+def init_db(db_path: str = None) -> sqlite3.Connection:
+    if db_path is None:
+        db_path = DB_PATH
     os.makedirs(STORAGE_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     for stmt in _DDL.strip().split(";"):
