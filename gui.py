@@ -520,6 +520,7 @@ class App(tk.Tk):
         self._group_pw      = ""
         self._group_currency = "EUR"
         self._rates: dict[str, float] = {}
+        self._network = None   # P2PNetwork instance
 
         self._build_ui()
         self._init_identity()
@@ -545,6 +546,13 @@ class App(tk.Tk):
         self._group_badge.pack(side="left", padx=4)
         self._identity_label = _lbl(hdr, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
         self._identity_label.pack(side="left", padx=4)
+
+        net_frame = tk.Frame(hdr, bg=PANEL)
+        net_frame.pack(side="left", padx=12)
+        self._net_dot   = _lbl(net_frame, "●", fg=FG_DIM, font=("Segoe UI", 9), bg=PANEL)
+        self._net_dot.pack(side="left")
+        self._net_label = _lbl(net_frame, "offline", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
+        self._net_label.pack(side="left", padx=(3, 0))
 
         _ghost(hdr, "⚙ Einstellungen", self._open_settings).pack(side="right", padx=8)
         _ghost(hdr, "🔑 Gruppe wechseln", self._switch_group).pack(side="right", padx=4)
@@ -668,12 +676,18 @@ class App(tk.Tk):
 
         self.deiconify()
         self._load_rates_async()
+        self._start_network()
         self._refresh()
 
     def _switch_group(self):
         self.withdraw()
         self._group_pw = ""
         self._rates = {}
+        if self._network:
+            self._network.stop()
+            self._network = None
+        self._net_dot.configure(fg=FG_DIM)
+        self._net_label.configure(text="offline")
         self._do_group_login()
 
     def _open_settings(self, first_run=False):
@@ -814,6 +828,9 @@ class App(tk.Tk):
         expense.signature = sign_expense(expense, self._own_key)
         blob = encrypt_expense(expense, self._group_pw)
         save_expense_blob(self._db, expense.id, blob, expense.timestamp)
+        # Direkt im Netz publizieren (falls verbunden)
+        if self._network:
+            self._network.publish_expense(expense.id, blob, expense.timestamp)
 
     def _add_expense(self):
         from storage import load_all_members
@@ -859,6 +876,8 @@ class App(tk.Tk):
         expense.signature  = sign_expense(expense, self._own_key)
         blob = encrypt_expense(expense, self._group_pw)
         soft_delete_expense_blob(self._db, expense.id, blob, expense.timestamp)
+        if self._network:
+            self._network.publish_expense(expense.id, blob, expense.timestamp)
         self._refresh()
 
     # ── Refresh / Render ──────────────────────────────────────────────
@@ -971,6 +990,70 @@ class App(tk.Tk):
                  wraplength=180, justify="left").pack(anchor="w")
             _lbl(f, f"{s.amount:.2f} {self._group_currency}",
                  fg=color, font=FONT_BOLD, bg=PANEL).pack(anchor="w")
+
+
+    # ── Netzwerk ──────────────────────────────────────────────────────
+
+    def _start_network(self):
+        from network import P2PNetwork, NetworkCallbacks
+
+        class _Callbacks(NetworkCallbacks):
+            def __init__(self2, app):
+                self2._app = app
+            def on_expense_received(self2, expense_id, blob):
+                self2._app.after(0, lambda: self2._app._on_net_expense(expense_id, blob))
+            def on_peer_connected(self2, peer_id):
+                self2._app.after(0, lambda: self2._app._on_peer_change())
+            def on_peer_disconnected(self2, peer_id):
+                self2._app.after(0, lambda: self2._app._on_peer_change())
+            def on_status_changed(self2, online, peer_id):
+                self2._app.after(0, lambda: self2._app._on_net_status(online, peer_id))
+            def on_file_received(self2, sha256):
+                self2._app.after(0, self2._app._refresh)
+
+        self._network = P2PNetwork(self._group_pw, _Callbacks(self))
+        self._network.start_in_thread()
+
+    def _on_net_status(self, online, peer_id):
+        if online:
+            short = peer_id[:20] + "..." if len(peer_id) > 20 else peer_id
+            self._net_dot.configure(fg=GREEN)
+            self._net_label.configure(text=f"online  {short}", fg=FG_MUTED)
+        else:
+            self._net_dot.configure(fg=FG_DIM)
+            label = "offline-mode" if peer_id == "offline-mode" else "offline"
+            self._net_label.configure(text=label, fg=FG_DIM)
+
+    def _on_peer_change(self):
+        if self._network is None:
+            return
+        n = self._network.peer_count
+        if n == 0:
+            self._net_label.configure(text="online  keine Peers")
+        else:
+            self._net_label.configure(text=f"online  {n} Peer{'s' if n != 1 else ''}")
+
+    def _on_net_expense(self, expense_id, blob):
+        from storage import save_expense_blob
+        from crypto import decrypt_expense
+
+        expense = decrypt_expense(blob, self._group_pw)
+        if expense is None:
+            return  # falsches Passwort oder fremde Gruppe
+
+        saved = save_expense_blob(
+            self._db, expense.id, blob, expense.timestamp, expense.is_deleted
+        )
+        if not saved:
+            return  # veraltet, CRDT hat verworfen
+
+        self._refresh()
+
+        # fehlenden Anhang beim Sender anfordern
+        if expense.attachment and self._network:
+            from storage import attachment_exists
+            if not attachment_exists(expense.attachment.sha256):
+                self._network.request_file(expense.attachment.sha256)
 
 
 # ---------------------------------------------------------------------------

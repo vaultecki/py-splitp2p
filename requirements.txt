@@ -5,15 +5,20 @@
 # Ed25519-Signaturen und AES-256-GCM-Gruppenverschlüsselung
 cryptography>=41.0
 
+# ── P2P-Sync (empfohlen) ───────────────────────────────────────────────────
+# GossipSub-Messaging und direkter Datei-Stream zwischen Peers.
+# Ohne libp2p läuft die App im Offline-Modus (nur lokale Nutzung).
+libp2p>=0.1.5
+
 # ── Optional ───────────────────────────────────────────────────────────────
 # Bildvorschau für Anhänge (JPG, PNG, GIF, WEBP) direkt im App-Fenster.
-# Ohne Pillow werden Bilder stattdessen im System-Viewer geöffnet.
+# Ohne Pillow werden Bilder im System-Viewer geöffnet.
 # PDFs werden immer im System-Viewer geöffnet (kein Pillow nötig).
 Pillow>=10.0
 
-# ── Stdlib (kein Install nötig, vollständigkeitshalber dokumentiert) ───────
-# tkinter     – GUI (ab Python 3.x mitgeliefert; auf manchen Linux-Systemen
-#               muss das Paket python3-tk separat installiert werden)
-# sqlite3     – lokale Datenbank
-# urllib      – HTTP-Abruf der Wechselkurse
-# cryptography wird oben aufgeführt, deckt alle Krypto-Primitiven ab
+# ── Stdlib (kein Install nötig) ────────────────────────────────────────────
+# tkinter   – GUI; auf Debian/Ubuntu ggf.: sudo apt install python3-tk
+# sqlite3   – lokale Datenbank
+# urllib    – Wechselkurs-Abruf
+# asyncio   – asyncio-Loop für den P2P-Thread
+# threading – Hintergrund-Thread für Netzwerk und Kurs-Fetch
