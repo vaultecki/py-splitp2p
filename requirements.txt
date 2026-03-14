@@ -1,0 +1,19 @@
+# SplitP2P – Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Pflicht ────────────────────────────────────────────────────────────────
+# Ed25519-Signaturen und AES-256-GCM-Gruppenverschlüsselung
+cryptography>=41.0
+
+# ── Optional ───────────────────────────────────────────────────────────────
+# Bildvorschau für Anhänge (JPG, PNG, GIF, WEBP) direkt im App-Fenster.
+# Ohne Pillow werden Bilder stattdessen im System-Viewer geöffnet.
+# PDFs werden immer im System-Viewer geöffnet (kein Pillow nötig).
+Pillow>=10.0
+
+# ── Stdlib (kein Install nötig, vollständigkeitshalber dokumentiert) ───────
+# tkinter     – GUI (ab Python 3.x mitgeliefert; auf manchen Linux-Systemen
+#               muss das Paket python3-tk separat installiert werden)
+# sqlite3     – lokale Datenbank
+# urllib      – HTTP-Abruf der Wechselkurse
+# cryptography wird oben aufgeführt, deckt alle Krypto-Primitiven ab
