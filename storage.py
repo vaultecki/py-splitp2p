@@ -2,163 +2,172 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Storage Module – SQLite persistence with CRDT merge semantics.
+Storage Module
 
-Messages are stored as encrypted blobs so the database itself leaks
-no plaintext. CRDT (last-write-wins by timestamp) ensures consistent
-state after peer synchronisation.
+SQLite speichert Ausgaben als verschlüsselte Blobs — ohne das
+Gruppenpasswort ist der Datenbankinhalt wertlos.
+
+Dateianhänge liegen als Binärdaten unter storage/<sha256> auf der Platte.
+Der SHA-256-Hash ist Teil der Expense-Signatur, Manipulationen werden erkannt.
+
+CRDT: last-write-wins per Timestamp (für spätere P2P-Synchronisation).
 """
 
 import logging
+import os
 import sqlite3
-from typing import Any
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
+STORAGE_DIR = "storage"
 
 _DDL = """
-CREATE TABLE IF NOT EXISTS messages (
-    id                    TEXT PRIMARY KEY,
-    creator_pubkey        TEXT    NOT NULL,
-    timestamp             INTEGER NOT NULL,
-    content_json_encrypted TEXT   NOT NULL,
-    nonce                 TEXT    NOT NULL,
-    signature             TEXT    NOT NULL,
-    local_update_id       INTEGER NOT NULL DEFAULT 0,
-    is_deleted            INTEGER NOT NULL DEFAULT 0
+CREATE TABLE IF NOT EXISTS expenses (
+    id          TEXT PRIMARY KEY,
+    blob        BLOB NOT NULL,
+    timestamp   INTEGER NOT NULL,
+    is_deleted  INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS _sequence (
-    name  TEXT PRIMARY KEY,
-    value INTEGER NOT NULL DEFAULT 0
+CREATE TABLE IF NOT EXISTS members (
+    pubkey      TEXT PRIMARY KEY,
+    data_json   TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_expenses_ts ON expenses(timestamp);
 """
 
 
-# ---------------------------------------------------------------------------
-# Initialisation
-# ---------------------------------------------------------------------------
-
-def init_db(db_path: str = "p2p_storage.db") -> sqlite3.Connection:
-    """
-    Open (or create) the SQLite database and apply the schema.
-
-    Args:
-        db_path: Path to the SQLite file. Use ":memory:" for tests.
-
-    Returns:
-        Open sqlite3 connection.
-    """
+def init_db(db_path: str = "splitp2p.db") -> sqlite3.Connection:
+    os.makedirs(STORAGE_DIR, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-
-    for statement in _DDL.strip().split(";"):
-        stmt = statement.strip()
-        if stmt:
-            conn.execute(stmt)
-
-    conn.execute(
-        "INSERT OR IGNORE INTO _sequence (name, value) VALUES ('local_update_id', 0)"
-    )
+    for stmt in _DDL.strip().split(";"):
+        s = stmt.strip()
+        if s:
+            conn.execute(s)
     conn.commit()
-    logger.info("Database initialised at '%s'", db_path)
+    logger.info("DB ready: %s", db_path)
     return conn
 
 
 # ---------------------------------------------------------------------------
-# CRDT merge
+# Ausgaben (verschlüsselt)
 # ---------------------------------------------------------------------------
 
-def merge_message(db: sqlite3.Connection, msg: dict) -> bool:
+def save_expense_blob(
+    db: sqlite3.Connection,
+    expense_id: str,
+    blob: bytes,
+    timestamp: int,
+    is_deleted: bool = False,
+) -> bool:
     """
-    CRDT last-write-wins merge.
-
-    Inserts the message if it is new, or replaces it if the incoming
-    timestamp is strictly newer than the stored one.
-
-    Args:
-        db:  Open database connection.
-        msg: Packet dict; must contain the fields listed in the schema.
-
-    Returns:
-        True if the database was updated, False if the message was ignored.
+    CRDT-merge: speichert nur wenn neu oder Timestamp neuer.
+    blob = Ergebnis von crypto.encrypt_expense().
     """
     row = db.execute(
-        "SELECT timestamp FROM messages WHERE id = ?", (msg["id"],)
+        "SELECT timestamp FROM expenses WHERE id = ?", (expense_id,)
     ).fetchone()
 
-    if row and msg.get("timestamp", 0) <= row["timestamp"]:
-        logger.debug("Ignored stale update for message %s", msg["id"])
+    if row and timestamp <= row["timestamp"]:
+        logger.debug("Stale update für %s ignoriert", expense_id[:8])
         return False
 
-    # Advance the local sequence counter
     db.execute(
-        "UPDATE _sequence SET value = value + 1 WHERE name = 'local_update_id'"
-    )
-    seq = db.execute(
-        "SELECT value FROM _sequence WHERE name = 'local_update_id'"
-    ).fetchone()[0]
-
-    db.execute(
-        """
-        INSERT OR REPLACE INTO messages
-            (id, creator_pubkey, timestamp, content_json_encrypted,
-             nonce, signature, local_update_id, is_deleted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            msg["id"],
-            msg.get("creator_pubkey", ""),
-            msg.get("timestamp", 0),
-            msg.get("encrypted_payload", ""),
-            msg.get("nonce", ""),
-            msg.get("signature", ""),
-            seq,
-            int(msg.get("is_deleted", False)),
-        ),
+        "INSERT OR REPLACE INTO expenses (id, blob, timestamp, is_deleted) VALUES (?,?,?,?)",
+        (expense_id, blob, timestamp, int(is_deleted)),
     )
     db.commit()
-    logger.info("Stored message %s (local_update_id=%d)", msg["id"], seq)
     return True
 
 
-# ---------------------------------------------------------------------------
-# Queries
-# ---------------------------------------------------------------------------
-
-def get_all_messages(db: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Return all non-deleted messages ordered by timestamp."""
+def load_all_expense_blobs(db: sqlite3.Connection) -> list[tuple[str, bytes]]:
+    """Gibt (id, blob) für alle nicht gelöschten Ausgaben zurück."""
     rows = db.execute(
-        "SELECT * FROM messages WHERE is_deleted = 0 ORDER BY timestamp ASC"
+        "SELECT id, blob FROM expenses WHERE is_deleted = 0 ORDER BY timestamp ASC"
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [(r["id"], bytes(r["blob"])) for r in rows]
 
 
-def get_messages_since(
-    db: sqlite3.Connection, local_update_id: int
-) -> list[dict[str, Any]]:
+def soft_delete_expense_blob(
+    db: sqlite3.Connection,
+    expense_id: str,
+    new_blob: bytes,
+    new_timestamp: int,
+) -> None:
     """
-    Return messages inserted/updated after *local_update_id*.
-
-    Useful for incremental sync: a peer sends its highest known
-    local_update_id and receives only the delta.
+    Tombstone: aktualisiert Blob + Timestamp, setzt is_deleted=1.
+    Der neue Blob enthält die Ausgabe mit is_deleted=True (für Sync).
     """
-    rows = db.execute(
-        "SELECT * FROM messages WHERE local_update_id > ? ORDER BY timestamp ASC",
-        (local_update_id,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def soft_delete_message(db: sqlite3.Connection, msg_id: str) -> bool:
-    """Mark a message as deleted (tombstone) instead of removing it."""
     db.execute(
-        "UPDATE messages SET is_deleted = 1 WHERE id = ?", (msg_id,)
+        "INSERT OR REPLACE INTO expenses (id, blob, timestamp, is_deleted) VALUES (?,?,?,1)",
+        (expense_id, new_blob, new_timestamp),
     )
     db.commit()
-    return db.execute(
-        "SELECT changes()"
-    ).fetchone()[0] > 0
+
+
+# ---------------------------------------------------------------------------
+# Mitglieder (Klartext – nur öffentliche Infos)
+# ---------------------------------------------------------------------------
+
+def save_member(db: sqlite3.Connection, member) -> None:
+    import json
+    db.execute(
+        "INSERT OR REPLACE INTO members (pubkey, data_json, updated_at) VALUES (?,?,?)",
+        (member.pubkey, json.dumps(member.to_dict()), member.joined_at),
+    )
+    db.commit()
+
+
+def load_all_members(db: sqlite3.Connection):
+    import json
+    from models import Member
+    rows = db.execute("SELECT data_json FROM members").fetchall()
+    result = []
+    for row in rows:
+        try:
+            result.append(Member.from_dict(json.loads(row["data_json"])))
+        except Exception as e:
+            logger.warning("Member-Deserialisierung fehlgeschlagen: %s", e)
+    return result
+
+
+def get_member(db: sqlite3.Connection, pubkey: str) -> Optional[object]:
+    import json
+    from models import Member
+    row = db.execute(
+        "SELECT data_json FROM members WHERE pubkey = ?", (pubkey,)
+    ).fetchone()
+    return Member.from_dict(json.loads(row["data_json"])) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Dateianhänge
+# ---------------------------------------------------------------------------
+
+def save_attachment(data: bytes, sha256: str) -> str:
+    """
+    Speichert Rohdaten einer Datei unter storage/<sha256>.
+    Gibt den vollständigen Pfad zurück.
+    Idempotent: existiert die Datei schon, wird sie nicht überschrieben.
+    """
+    os.makedirs(STORAGE_DIR, exist_ok=True)
+    path = os.path.join(STORAGE_DIR, sha256)
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(data)
+        logger.info("Anhang gespeichert: %s (%d Bytes)", sha256[:12], len(data))
+    return path
+
+
+def attachment_path(sha256: str) -> Optional[str]:
+    """Pfad zur gespeicherten Datei, oder None wenn nicht vorhanden."""
+    path = os.path.join(STORAGE_DIR, sha256)
+    return path if os.path.exists(path) else None
+
+
+def attachment_exists(sha256: str) -> bool:
+    return os.path.exists(os.path.join(STORAGE_DIR, sha256))

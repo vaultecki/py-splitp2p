@@ -2,38 +2,50 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Cryptographic Operations Module
+Crypto Module
 
-Handles all cryptographic primitives:
-- Ed25519 key generation, signing, verification
-- AES-256-GCM symmetric group encryption
-- SHA-256 file hashing
+Zwei Ebenen:
+  1. Ed25519  – jede Ausgabe wird vom Payer signiert (Authentizität)
+  2. AES-256-GCM – alle Ausgaben einer Gruppe werden mit dem
+     Gruppenpasswort verschlüsselt (Vertraulichkeit zwischen Gruppen)
+
+Ablauf beim Speichern einer Ausgabe:
+  expense  →  canonical JSON  →  Ed25519-Signatur
+  expense.to_dict()  →  AES-GCM(group_key)  →  verschlüsselter Blob in DB
+
+Ablauf beim Laden:
+  verschlüsselter Blob  →  AES-GCM-Entschlüsselung  →  Expense.from_dict()
+  →  verify_expense()  →  anzeigen
+
+SHA-256 für Dateianhänge: Hash wird in der Expense-Signatur eingeschlossen,
+damit niemand den Anhang unbemerkt austauschen kann.
 """
 
 import hashlib
 import json
 import logging
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+if TYPE_CHECKING:
+    from models import Expense, Attachment
+
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Key helpers
+# Key management
 # ---------------------------------------------------------------------------
 
 def generate_private_key() -> ed25519.Ed25519PrivateKey:
-    """Generate a new Ed25519 private key."""
     return ed25519.Ed25519PrivateKey.generate()
 
 
 def private_key_to_bytes(key: ed25519.Ed25519PrivateKey) -> bytes:
-    """Serialize a private key to raw bytes (for storage)."""
     return key.private_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PrivateFormat.Raw,
@@ -42,48 +54,97 @@ def private_key_to_bytes(key: ed25519.Ed25519PrivateKey) -> bytes:
 
 
 def private_key_from_bytes(raw: bytes) -> ed25519.Ed25519PrivateKey:
-    """Deserialize a private key from raw bytes."""
     return ed25519.Ed25519PrivateKey.from_private_bytes(raw)
 
 
-def get_public_key_bytes(private_key: ed25519.Ed25519PrivateKey) -> bytes:
-    """Extract the public key as raw bytes."""
-    return private_key.public_key().public_bytes(
+def get_public_key_hex(key: ed25519.Ed25519PrivateKey) -> str:
+    return key.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
-    )
+    ).hex()
 
 
 # ---------------------------------------------------------------------------
-# Signing & verification
+# Ed25519 – Ausgaben signieren
 # ---------------------------------------------------------------------------
 
-def sign(private_key: ed25519.Ed25519PrivateKey, data: bytes) -> bytes:
-    """Sign data with Ed25519 private key."""
-    return private_key.sign(data)
+def sign_expense(expense: "Expense", private_key: ed25519.Ed25519PrivateKey) -> str:
+    """Signiert canonical_bytes() der Ausgabe, gibt Hex-Signatur zurück."""
+    sig = private_key.sign(expense.canonical_bytes())
+    return sig.hex()
 
 
-def verify(public_key_bytes: bytes, signature: bytes, data: bytes) -> bool:
-    """
-    Verify an Ed25519 signature.
-
-    Returns:
-        True if valid, False otherwise (never raises).
-    """
+def verify_expense(expense: "Expense") -> bool:
+    """Prüft die Ed25519-Signatur. False wenn fehlt oder ungültig."""
+    if not expense.signature:
+        return False
     try:
-        pub_key = ed25519.Ed25519PublicKey.from_public_bytes(public_key_bytes)
-        pub_key.verify(signature, data)
+        pub_key = ed25519.Ed25519PublicKey.from_public_bytes(
+            bytes.fromhex(expense.payer_pubkey)
+        )
+        pub_key.verify(bytes.fromhex(expense.signature), expense.canonical_bytes())
         return True
-    except Exception:
+    except Exception as e:
+        logger.warning("Ungültige Signatur für Ausgabe %s: %s", expense.id[:8], e)
         return False
 
 
 # ---------------------------------------------------------------------------
-# File hashing
+# AES-256-GCM – Gruppenverschlüsselung
+# ---------------------------------------------------------------------------
+
+def _group_aes_key(group_password: str) -> bytes:
+    """Leitet einen 32-Byte AES-Schlüssel aus dem Gruppenpasswort ab."""
+    return hashlib.sha256(group_password.encode("utf-8")).digest()
+
+
+def group_topic_id(group_password: str) -> str:
+    """Kurze Topic-ID für P2P-Routing (nicht umkehrbar)."""
+    return hashlib.sha256(group_password.encode()).hexdigest()[:16]
+
+
+def encrypt_expense(expense: "Expense", group_password: str) -> bytes:
+    """
+    Serialisiert und verschlüsselt eine Ausgabe mit dem Gruppenkey.
+
+    Rückgabe: nonce (12 Bytes) || ciphertext (variable Länge)
+    Das Ergebnis ist ein undurchsichtiger Blob — ohne das Passwort
+    sind weder Beschreibung, Betrag noch Beteiligte erkennbar.
+    """
+    key  = _group_aes_key(group_password)
+    aes  = AESGCM(key)
+    data = json.dumps(expense.to_dict(), ensure_ascii=False).encode()
+    nonce = os.urandom(12)
+    ciphertext = aes.encrypt(nonce, data, None)
+    return nonce + ciphertext
+
+
+def decrypt_expense(blob: bytes, group_password: str) -> Optional["Expense"]:
+    """
+    Entschlüsselt einen Blob und gibt eine Expense zurück.
+    Gibt None zurück wenn das Passwort falsch ist oder der Blob korrupt ist.
+    """
+    from models import Expense
+    if len(blob) < 28:   # 12 nonce + mindestens 16 GCM-Tag
+        return None
+    try:
+        key   = _group_aes_key(group_password)
+        aes   = AESGCM(key)
+        nonce = blob[:12]
+        ct    = blob[12:]
+        data  = aes.decrypt(nonce, ct, None)
+        return Expense.from_dict(json.loads(data))
+    except Exception as e:
+        logger.warning("Entschlüsselung fehlgeschlagen: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# SHA-256 – Dateianhänge
 # ---------------------------------------------------------------------------
 
 def hash_file(file_path: str) -> str:
-    """Compute SHA-256 hex digest of a file."""
+    """SHA-256 Hex-Digest einer Datei (chunk-weise, RAM-schonend)."""
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
         while chunk := f.read(8192):
@@ -91,103 +152,18 @@ def hash_file(file_path: str) -> str:
     return h.hexdigest()
 
 
-def group_key_from_password(password: str) -> bytes:
-    """Derive a 32-byte AES key from a group password via SHA-256."""
-    return hashlib.sha256(password.encode()).digest()
+def hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
-def topic_id_from_password(password: str) -> str:
-    """Derive a short topic identifier from the group password."""
-    return hashlib.sha256(password.encode()).hexdigest()[:16]
-
-
-# ---------------------------------------------------------------------------
-# Group crypto (AES-GCM + Ed25519)
-# ---------------------------------------------------------------------------
-
-class GroupCrypto:
-    """
-    Combines AES-256-GCM group encryption with Ed25519 message signing.
-
-    Every outgoing message is:
-      1. Serialised to JSON
-      2. Encrypted with the shared group key (AES-GCM, random nonce)
-      3. Signed over (nonce || ciphertext) with the sender's private key
-
-    This ensures:
-      - Confidentiality  : only group members with the shared key can read
-      - Integrity        : tampering is detected by the AES-GCM tag
-      - Authenticity     : each message is tied to a specific member key
-    """
-
-    def __init__(
-        self,
-        group_secret_key: bytes,
-        private_key: ed25519.Ed25519PrivateKey,
-    ):
-        if len(group_secret_key) != 32:
-            raise ValueError("group_secret_key must be exactly 32 bytes")
-        self.aes = AESGCM(group_secret_key)
-        self.private_key = private_key
-        self.public_key_bytes = get_public_key_bytes(private_key)
-
-    # ------------------------------------------------------------------
-    # Outbound
-    # ------------------------------------------------------------------
-
-    def encrypt_and_sign(self, inner_data: dict) -> dict:
-        """
-        Encrypt and sign a payload dict.
-
-        Args:
-            inner_data: Plaintext dict (must be JSON-serialisable).
-
-        Returns:
-            Packet dict with hex-encoded fields ready for transmission.
-        """
-        inner_json = json.dumps(inner_data, ensure_ascii=False).encode()
-        nonce = os.urandom(12)
-        encrypted_data = self.aes.encrypt(nonce, inner_json, None)
-
-        payload_to_sign = nonce + encrypted_data
-        signature = self.private_key.sign(payload_to_sign)
-
-        logger.debug("Encrypted and signed payload (%d bytes)", len(inner_json))
-        return {
-            "creator_pubkey": self.public_key_bytes.hex(),
-            "nonce": nonce.hex(),
-            "encrypted_payload": encrypted_data.hex(),
-            "signature": signature.hex(),
-        }
-
-    # ------------------------------------------------------------------
-    # Inbound
-    # ------------------------------------------------------------------
-
-    def verify_packet(self, packet: dict) -> bool:
-        """Verify the Ed25519 signature of an incoming packet."""
-        try:
-            nonce = bytes.fromhex(packet["nonce"])
-            encrypted = bytes.fromhex(packet["encrypted_payload"])
-            signature = bytes.fromhex(packet["signature"])
-            pub_key_bytes = bytes.fromhex(packet["creator_pubkey"])
-            return verify(pub_key_bytes, signature, nonce + encrypted)
-        except Exception as e:
-            logger.warning("Signature verification failed: %s", e)
-            return False
-
-    def decrypt(self, packet: dict) -> Optional[dict]:
-        """
-        Decrypt an incoming packet.
-
-        Returns:
-            Inner data dict, or None if decryption fails.
-        """
-        try:
-            nonce = bytes.fromhex(packet["nonce"])
-            encrypted = bytes.fromhex(packet["encrypted_payload"])
-            inner_json = self.aes.decrypt(nonce, encrypted, None)
-            return json.loads(inner_json)
-        except Exception as e:
-            logger.warning("Decryption failed: %s", e)
-            return None
+def mime_type_from_path(path: str) -> str:
+    """Einfache MIME-Typ-Erkennung anhand der Dateiendung."""
+    ext = os.path.splitext(path)[1].lower()
+    return {
+        ".pdf":  "application/pdf",
+        ".jpg":  "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png":  "image/png",
+        ".gif":  "image/gif",
+        ".webp": "image/webp",
+    }.get(ext, "application/octet-stream")
