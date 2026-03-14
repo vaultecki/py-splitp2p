@@ -76,55 +76,58 @@ def _combobox(parent, var, values, **kw):
 # Gruppen-Login-Dialog
 # ---------------------------------------------------------------------------
 
-class GroupLoginDialog(tk.Toplevel):
-    def __init__(self, parent, saved: dict):
+class NewGroupDialog(tk.Toplevel):
+    """
+    Wird einmalig aufgerufen wenn eine neue Gruppe angelegt oder
+    einer unbekannten Gruppe beigetreten wird.
+    Danach wird das Passwort in der Config gespeichert.
+    """
+    def __init__(self, parent, default_name=""):
         super().__init__(parent)
-        self.title("Gruppe wählen")
+        self.title("Neue Gruppe")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
         self.result: Optional[dict] = None
-        self._build(saved)
+        self._build(default_name)
         self.wait_window()
 
-    def _build(self, saved):
+    def _build(self, default_name):
         from currency import SUPPORTED_CURRENCIES
         pad = dict(padx=28)
 
-        _lbl(self, "GRUPPE BEITRETEN", fg=GREEN, font=FONT_LARGE).pack(
+        _lbl(self, "NEUE GRUPPE", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(24, 4), **pad)
-        _lbl(self, "Alle Mitglieder der Gruppe teilen dasselbe Passwort.",
-             fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", **pad)
+        _lbl(self,
+             "Das gemeinsame Passwort identifiziert die Gruppe im P2P-Netz\n"
+             "und verschlüsselt alle Ausgaben. Es wird einmalig gespeichert.",
+             fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", **pad)
         _div(self).pack(fill="x", padx=28, pady=10)
 
         frm = tk.Frame(self, bg=BG, padx=28)
         frm.pack(fill="x")
 
         _lbl(frm, "GRUPPENNAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
-        self._name = tk.StringVar(value=saved.get("group_name", ""))
+        self._name = tk.StringVar(value=default_name)
         tk.Entry(frm, textvariable=self._name, font=FONT, bg=PANEL, fg=FG,
                  insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=(2, 8))
 
-        _lbl(frm, "GRUPPENPASSWORT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "GEMEINSAMES GRUPPENPASSWORT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "Alle Mitglieder müssen dasselbe Passwort eingeben.",
+             fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", pady=(0, 2))
         self._pw = tk.Entry(frm, show="●", font=FONT, bg=PANEL, fg=FG,
                             insertbackground=GREEN, relief="flat", bd=6)
-        self._pw.pack(fill="x", pady=(2, 8))
-        self._pw.bind("<Return>", lambda _: self._confirm())
+        self._pw.pack(fill="x", pady=(0, 8))
 
-        # Gruppenwährung
-        _lbl(frm, "GRUPPENWÄHRUNG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
-        self._currency = tk.StringVar(value=saved.get("group_currency", "EUR"))
+        _lbl(frm, "WÄHRUNG DER GRUPPE", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        self._currency = tk.StringVar(value="EUR")
         _combobox(frm, self._currency, SUPPORTED_CURRENCIES, width=10).pack(
             anchor="w", pady=(2, 8))
 
-        _lbl(frm,
-             "⚠  Passwort wird nicht gespeichert. Alle Mitglieder\n"
-             "müssen dasselbe Passwort und dieselbe Währung nutzen.",
-             fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", pady=(4, 0))
-
         btn_row = tk.Frame(self, bg=BG, padx=28, pady=20)
         btn_row.pack(fill="x")
-        _btn(btn_row, "BEITRETEN", self._confirm, width=18).pack(side="right")
+        _ghost(btn_row, "Abbrechen", self.destroy).pack(side="right", padx=(6, 0))
+        _btn(btn_row, "ERSTELLEN / BEITRETEN", self._confirm).pack(side="right")
 
     def _confirm(self):
         name = self._name.get().strip()
@@ -132,9 +135,105 @@ class GroupLoginDialog(tk.Toplevel):
         cur  = self._currency.get().strip()
         if not name:
             mb.showerror("Fehler", "Gruppenname fehlt.", parent=self); return
-        if not pw:
-            mb.showerror("Fehler", "Passwort fehlt.", parent=self); return
+        if len(pw) < 4:
+            mb.showerror("Fehler", "Passwort muss mindestens 4 Zeichen haben.", parent=self); return
         self.result = {"group_name": name, "password": pw, "group_currency": cur}
+        self.destroy()
+
+
+class GroupSelectDialog(tk.Toplevel):
+    """
+    Zeigt alle bekannten Gruppen aus der Config.
+    Kein Passwort nötig — wird aus dem gespeicherten Eintrag geladen.
+    Neue Gruppe: öffnet NewGroupDialog.
+    """
+    def __init__(self, parent, groups: dict, last_group: str):
+        super().__init__(parent)
+        self.title("Gruppe wählen")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.grab_set()
+        self.groups = groups       # {name: {password, currency}}
+        self.result: Optional[dict] = None
+        self._build(last_group)
+        self.wait_window()
+
+    def _build(self, last_group):
+        pad = dict(padx=28)
+
+        _lbl(self, "GRUPPE WÄHLEN", fg=GREEN, font=FONT_LARGE).pack(
+            anchor="w", pady=(24, 4), **pad)
+        _div(self).pack(fill="x", padx=28, pady=10)
+
+        frm = tk.Frame(self, bg=BG, padx=28)
+        frm.pack(fill="x")
+
+        if self.groups:
+            _lbl(frm, "BEKANNTE GRUPPEN", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+            self._selected = tk.StringVar(value=last_group if last_group in self.groups else
+                                          next(iter(self.groups)))
+            list_frame = tk.Frame(frm, bg=BORDER, padx=1, pady=1)
+            list_frame.pack(fill="x", pady=(2, 12))
+            inner = tk.Frame(list_frame, bg=BG)
+            inner.pack(fill="x")
+            for name, info in self.groups.items():
+                row = tk.Frame(inner, bg=BG)
+                row.pack(fill="x")
+                tk.Radiobutton(
+                    row, text=f"  {name}", variable=self._selected, value=name,
+                    bg=BG, fg=FG, selectcolor=BG,
+                    activebackground=BG, activeforeground=FG,
+                    font=FONT, anchor="w",
+                    command=lambda: None,
+                ).pack(side="left", fill="x", expand=True)
+                cur = info.get("currency", "EUR")
+                _lbl(row, cur, fg=FG_DIM, font=FONT_SMALL, bg=BG, padx=8).pack(side="right")
+
+            btn_row = tk.Frame(self, bg=BG, padx=28, pady=(0))
+            btn_row.pack(fill="x")
+            _ghost(btn_row, "+ Neue Gruppe", self._new_group).pack(side="left")
+            _ghost(btn_row, "Entfernen", self._remove_group).pack(side="left", padx=6)
+            _btn(btn_row, "ÖFFNEN", self._confirm).pack(side="right")
+            tk.Frame(self, bg=BG, height=16).pack()
+        else:
+            _lbl(frm, "Noch keine Gruppen bekannt.",
+                 fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", pady=(0, 12))
+            self._selected = tk.StringVar(value="")
+            _btn(frm, "+ Erste Gruppe erstellen / beitreten",
+                 self._new_group, width=32).pack(anchor="w", pady=8)
+            tk.Frame(self, bg=BG, height=16).pack()
+
+    def _new_group(self):
+        dlg = NewGroupDialog(self)
+        if not dlg.result:
+            return
+        self.groups[dlg.result["group_name"]] = {
+            "password": dlg.result["password"],
+            "currency": dlg.result["group_currency"],
+        }
+        self.result = dlg.result
+        self.destroy()
+
+    def _remove_group(self):
+        name = self._selected.get()
+        if not name:
+            return
+        if mb.askyesno("Entfernen", f"Gruppe '{name}' aus der Liste entfernen?\n"
+                       "(Daten bleiben erhalten)", parent=self):
+            self.groups.pop(name, None)
+            self.result = {"_removed": name}
+            self.destroy()
+
+    def _confirm(self):
+        name = self._selected.get()
+        if not name or name not in self.groups:
+            mb.showerror("Fehler", "Keine Gruppe ausgewählt.", parent=self); return
+        info = self.groups[name]
+        self.result = {
+            "group_name":     name,
+            "password":       info["password"],
+            "group_currency": info.get("currency", "EUR"),
+        }
         self.destroy()
 
 
@@ -645,22 +744,36 @@ class App(tk.Tk):
         if not self._own_name:
             self._open_settings(first_run=True)
         else:
-            self._do_group_login()
+            self._do_group_select()
 
-    def _do_group_login(self):
-        saved = {
-            "group_name":     self._cfg.get("last_group", ""),
-            "group_currency": self._cfg.get("last_currency", "EUR"),
-        }
-        dlg = GroupLoginDialog(self, saved)
+    def _do_group_select(self):
+        # Gespeicherte Gruppen aus Config laden
+        groups    = self._cfg.get("groups", {})
+        last      = self._cfg.get("last_group", "")
+        dlg = GroupSelectDialog(self, groups, last)
+
         if not dlg.result:
             self.quit(); return
+
+        # "Entfernen" wurde gewählt
+        if dlg.result.get("_removed"):
+            groups.pop(dlg.result["_removed"], None)
+            self._cfg.set("groups", groups)
+            self._cfg.save()
+            self._do_group_select()
+            return
 
         self._group_name     = dlg.result["group_name"]
         self._group_pw       = dlg.result["password"]
         self._group_currency = dlg.result["group_currency"]
-        self._cfg.set("last_group",    self._group_name)
-        self._cfg.set("last_currency", self._group_currency)
+
+        # Gruppe (inkl. Passwort) in Config speichern
+        groups[self._group_name] = {
+            "password": self._group_pw,
+            "currency": self._group_currency,
+        }
+        self._cfg.set("groups",      groups)
+        self._cfg.set("last_group",  self._group_name)
         self._cfg.save()
 
         self._group_badge.configure(
@@ -688,7 +801,7 @@ class App(tk.Tk):
             self._network = None
         self._net_dot.configure(fg=FG_DIM)
         self._net_label.configure(text="offline")
-        self._do_group_login()
+        self._do_group_select()
 
     def _open_settings(self, first_run=False):
         dlg = tk.Toplevel(self)
@@ -725,7 +838,7 @@ class App(tk.Tk):
                 text=f"{self._own_name}  ·  {self._own_pubkey[:12]}…")
             dlg.destroy()
             if first_run:
-                self._do_group_login()
+                self._do_group_select()
             else:
                 self._refresh()
 

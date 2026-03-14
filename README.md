@@ -40,8 +40,8 @@ Beim ersten Start wird ein Anzeigename abgefragt und ein Ed25519-Schlüsselpaar 
 ## Erste Schritte
 
 1. **Anzeigename** eingeben (einmalig beim Start)
-2. **Gruppenname** und **Gruppenpasswort** wählen — alle Mitglieder müssen dasselbe Passwort nutzen
-3. **Gruppenwährung** festlegen (z.B. EUR) — Eingaben in anderen Währungen werden automatisch umgerechnet
+2. **Neue Gruppe erstellen** oder einer bestehenden beitreten — einmalig Gruppenname, gemeinsames Passwort und Währung eingeben; alles wird gespeichert und muss nie wieder eingegeben werden
+3. Beim nächsten Start: Gruppe einfach aus der Liste auswählen, kein Passwort nötig
 4. Über **+ Mitglied** die anderen Teilnehmer anlegen (Name + ihren Public Key; oder temporären Key generieren lassen)
 5. Über **+ Ausgabe** Ausgaben erfassen — sie werden sofort lokal gespeichert und an verbundene Peers gesendet
 
@@ -52,7 +52,8 @@ Beim ersten Start wird ein Anzeigename abgefragt und ein Ed25519-Schlüsselpaar 
 ```
 main.py             Einstiegspunkt, Logging
 gui.py              Tkinter-Oberfläche
-├── GroupLoginDialog      Gruppen-Login mit Passwort + Währung
+├── GroupSelectDialog     Bekannte Gruppen auswählen
+├── NewGroupDialog        Neue Gruppe erstellen / beitreten (Passwort einmalig)
 ├── ExpenseDialog         Ausgabe anlegen/bearbeiten (inkl. Live-Umrechnung)
 ├── AddMemberDialog       Mitglied hinzufügen
 └── AttachmentViewer      Bild-/PDF-Vorschau
@@ -177,7 +178,7 @@ Jede Ausgabe wird vor dem Speichern und Senden mit AES-256-GCM verschlüsselt:
 Expense.to_dict()  →  JSON  →  AES-256-GCM(key=SHA-256(passwort))  →  Blob
 ```
 
-Der Gruppenkey wird **nur im RAM** gehalten und nie gespeichert. Wer die SQLite-Datei oder den Netzwerkverkehr abfängt, sieht ausschließlich verschlüsselte Blobs.
+Das Gruppenpasswort wird in `config.json` gespeichert — analog zum privaten Schlüssel, der ebenfalls dort liegt. Wer die Datenbankdatei oder den Netzwerkverkehr abfängt, sieht ausschließlich verschlüsselte Blobs. Das Passwort hat zwei technische Zwecke: AES-Schlüsselableitung (Vertraulichkeit) und GossipSub-Topic-Ableitung (P2P-Isolation). Als Authentifizierungsmechanismus ist es **nicht** gedacht — dafür ist der Ed25519-Schlüssel zuständig.
 
 ### Signaturen (Authentizität)
 
