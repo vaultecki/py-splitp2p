@@ -18,3 +18,9 @@ Pillow>=10.0
 # sqlite3   – Datenbank
 # urllib    – Wechselkurs-Abruf
 # asyncio / threading – P2P-Hintergrundthread
+
+# ── Charts ───────────────────────────────────────────────────────────────
+matplotlib>=3.7          # Diagramme im Charts-Fenster
+
+# ── PDF-Export ───────────────────────────────────────────────────────────
+fpdf2>=2.7               # PDF-Generierung; CSV-Export funktioniert ohne

@@ -827,6 +827,359 @@ class AddMemberDialog(tk.Toplevel):
 # App – Hauptfenster
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Charts Window
+# ---------------------------------------------------------------------------
+
+class ChartsWindow(tk.Toplevel):
+    """
+    Drei Diagramme in einem Fenster:
+      1. Ausgaben nach Kategorie (Balken)
+      2. Saldo pro Person (Balken, positiv/negativ)
+      3. Kumulierte Ausgaben über Zeit (Linie)
+
+    Nutzt matplotlib mit dem TkAgg-Backend.
+    Falls matplotlib nicht installiert ist: Fehlermeldung mit Installationshinweis.
+    """
+
+    def __init__(self, parent, expenses, settlements, members,
+                 group_currency, own_pubkey):
+        super().__init__(parent)
+        self.title(f"Charts – {group_currency}")
+        self.configure(bg=BG)
+        self.geometry("900x640")
+
+        try:
+            import matplotlib
+            matplotlib.use("TkAgg")
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.figure import Figure
+        except ImportError:
+            _lbl(self, "matplotlib nicht installiert.",
+                 fg=RED, font=FONT_BOLD).pack(pady=20)
+            _lbl(self, "pip install matplotlib", fg=FG_DIM, font=FONT_MONO).pack()
+            return
+
+        pk_to_name = {m.pubkey: m.display_name for m in members}
+        def name(pk): return pk_to_name.get(pk, pk[:8] + "…")
+
+        # Farben passend zum App-Theme
+        DARK   = "#111318"
+        PANEL_ = "#191c24"
+        FG_    = "#dde2ee"
+        DIM_   = "#5a6080"
+        COLS   = ["#2ecc8f","#4d9de0","#e0a03a","#e05c6a","#a78bfa",
+                  "#5dcaa5","#f09595","#fac775","#85b7eb","#ed93b1"]
+
+        fig = Figure(figsize=(11, 7.5), facecolor=DARK, tight_layout=True)
+        fig.patch.set_facecolor(DARK)
+
+        def style_ax(ax, title):
+            ax.set_facecolor(PANEL_)
+            ax.set_title(title, color=FG_, fontsize=11, pad=8)
+            ax.tick_params(colors=DIM_, labelsize=9)
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#252a36")
+            ax.title.set_fontsize(10)
+
+        # ── 1. Ausgaben nach Kategorie ───────────────────────────────
+        ax1 = fig.add_subplot(2, 2, 1)
+        style_ax(ax1, "Ausgaben nach Kategorie")
+        from collections import defaultdict
+        by_cat = defaultdict(float)
+        for e in expenses:
+            by_cat[e.category] += e.amount
+        if by_cat:
+            cats   = list(by_cat.keys())
+            vals   = [by_cat[c] for c in cats]
+            colors = [COLS[i % len(COLS)] for i in range(len(cats))]
+            bars   = ax1.barh(cats, vals, color=colors, height=0.6)
+            ax1.set_xlabel(group_currency, color=DIM_, fontsize=9)
+            ax1.xaxis.label.set_color(DIM_)
+            for bar, val in zip(bars, vals):
+                ax1.text(bar.get_width() + max(vals)*0.01, bar.get_y() + bar.get_height()/2,
+                         f"{val:.0f}", va="center", color=FG_, fontsize=8)
+        else:
+            ax1.text(0.5, 0.5, "Keine Daten", transform=ax1.transAxes,
+                     ha="center", va="center", color=DIM_)
+
+        # ── 2. Saldo pro Person ──────────────────────────────────────
+        ax2 = fig.add_subplot(2, 2, 2)
+        style_ax(ax2, "Saldo pro Person")
+        from ledger import compute_balances
+        balances = compute_balances(expenses, settlements)
+        if balances:
+            sorted_b  = sorted(balances.items(), key=lambda x: x[1])
+            pks        = [name(pk) for pk, _ in sorted_b]
+            bals       = [b for _, b in sorted_b]
+            bar_colors = [COLS[0] if b >= 0 else "#e05c6a" for b in bals]
+            ax2.barh(pks, bals, color=bar_colors, height=0.6)
+            ax2.axvline(0, color=DIM_, linewidth=0.8, linestyle="--")
+            ax2.set_xlabel(group_currency, color=DIM_, fontsize=9)
+            for i, (b, pk) in enumerate(zip(bals, pks)):
+                ax2.text(b + (max(abs(v) for v in bals)*0.02 if b >= 0 else
+                              -max(abs(v) for v in bals)*0.02),
+                         i, f"{b:+.2f}", va="center",
+                         ha="left" if b >= 0 else "right",
+                         color=FG_, fontsize=8)
+        else:
+            ax2.text(0.5, 0.5, "Keine Daten", transform=ax2.transAxes,
+                     ha="center", va="center", color=DIM_)
+
+        # ── 3. Kumulierte Ausgaben über Zeit ─────────────────────────
+        ax3 = fig.add_subplot(2, 1, 2)
+        style_ax(ax3, "Kumulierte Ausgaben über Zeit")
+        if expenses:
+            import datetime
+            sorted_exp = sorted(expenses, key=lambda e: e.display_date())
+            dates  = [datetime.datetime.fromtimestamp(e.display_date()) for e in sorted_exp]
+            cumsum = []
+            total  = 0.0
+            for e in sorted_exp:
+                total += e.amount
+                cumsum.append(total)
+            ax3.plot(dates, cumsum, color=COLS[0], linewidth=2)
+            ax3.fill_between(dates, cumsum, alpha=0.15, color=COLS[0])
+            ax3.set_ylabel(group_currency, color=DIM_, fontsize=9)
+            ax3.yaxis.label.set_color(DIM_)
+            # Kategorie-Markierungen
+            cat_colors = {}
+            for i, cat in enumerate(set(e.category for e in sorted_exp)):
+                cat_colors[cat] = COLS[i % len(COLS)]
+            for e, d, cs in zip(sorted_exp, dates, cumsum):
+                ax3.scatter([d], [cs], color=cat_colors.get(e.category, DIM_),
+                            s=30, zorder=5)
+            # Legende
+            from matplotlib.patches import Patch
+            legend_elements = [Patch(facecolor=c, label=cat)
+                               for cat, c in cat_colors.items()]
+            ax3.legend(handles=legend_elements, facecolor=PANEL_, edgecolor=DIM_,
+                       labelcolor=FG_, fontsize=8, loc="upper left")
+            fig.autofmt_xdate(rotation=30, ha="right")
+        else:
+            ax3.text(0.5, 0.5, "Keine Daten", transform=ax3.transAxes,
+                     ha="center", va="center", color=DIM_)
+
+        canvas = FigureCanvasTkAgg(fig, master=self)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)
+
+        btn_row = tk.Frame(self, bg=BG)
+        btn_row.pack(fill="x", pady=6)
+        def save_png():
+            import tkinter.filedialog as fd2
+            path = fd2.asksaveasfilename(
+                title="Charts speichern", defaultextension=".png",
+                filetypes=[("PNG", "*.png"), ("Alle", "*.*")], parent=self)
+            if path:
+                fig.savefig(path, facecolor=DARK, dpi=150)
+                mb.showinfo("Gespeichert", f"Charts gespeichert:\n{path}", parent=self)
+        _ghost(btn_row, "Als PNG speichern", save_png).pack(side="right", padx=12)
+
+
+# ---------------------------------------------------------------------------
+# Export Dialog
+# ---------------------------------------------------------------------------
+
+class ExportDialog(tk.Toplevel):
+    """
+    Exportiert Ausgaben und Zahlungen als CSV oder PDF.
+    CSV: stdlib, keine Abhängigkeit.
+    PDF: fpdf2 (pip install fpdf2). Fallback: HTML-Datei.
+    """
+
+    def __init__(self, parent, expenses, settlements, members,
+                 group_currency, group_name):
+        super().__init__(parent)
+        self.title("Export")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.grab_set()
+        self.expenses    = expenses
+        self.settlements = settlements
+        self.members     = members
+        self.currency    = group_currency
+        self.group_name  = group_name
+        self.pk_to_name  = {m.pubkey: m.display_name for m in members}
+        self._build()
+        self.wait_window()
+
+    def _name(self, pk):
+        return self.pk_to_name.get(pk, pk[:8] + "…")
+
+    def _build(self):
+        pad = dict(padx=28)
+        _lbl(self, "EXPORT", fg=GREEN, font=FONT_LARGE).pack(
+            anchor="w", pady=(20, 2), **pad)
+        _div(self).pack(fill="x", padx=28, pady=8)
+
+        frm = tk.Frame(self, bg=BG, padx=28)
+        frm.pack(fill="x")
+
+        _lbl(frm, "INHALT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        self._incl_exp  = tk.BooleanVar(value=True)
+        self._incl_set  = tk.BooleanVar(value=True)
+        self._incl_debt = tk.BooleanVar(value=True)
+        for var, txt in [(self._incl_exp,  "Ausgaben"),
+                         (self._incl_set,  "Zahlungen"),
+                         (self._incl_debt, "Schuldenübersicht")]:
+            tk.Checkbutton(frm, text=txt, variable=var, bg=BG, fg=FG,
+                           selectcolor=BG, activebackground=BG,
+                           activeforeground=FG, font=FONT).pack(anchor="w")
+
+        _div(frm).pack(fill="x", pady=10)
+        _lbl(frm, "FORMAT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+
+        btn_row = tk.Frame(frm, bg=BG)
+        btn_row.pack(fill="x", pady=6)
+        _btn(btn_row, "CSV exportieren",  self._export_csv,  width=18).pack(
+            side="left", padx=(0, 8))
+        _btn(btn_row, "PDF exportieren",  self._export_pdf,
+             bg=BLUE, width=18).pack(side="left")
+
+        _lbl(frm, "PDF benötigt: pip install fpdf2",
+             fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", pady=(4, 0))
+
+        tk.Frame(self, bg=BG, height=16).pack()
+
+    def _export_csv(self):
+        import csv, tkinter.filedialog as fd2
+        path = fd2.asksaveasfilename(
+            title="CSV speichern", defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("Alle", "*.*")], parent=self)
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if self._incl_exp.get():
+                w.writerow(["Typ","Datum","Beschreibung","Kategorie",
+                             "Betrag","Währung","Bezahlt von","Anteile",
+                             "Original-Betrag","Original-Währung"])
+                for e in sorted(self.expenses, key=lambda x: x.display_date()):
+                    splits = "; ".join(
+                        f"{self._name(s.pubkey)}:{s.amount:.2f}"
+                        for s in e.splits)
+                    w.writerow([
+                        "Ausgabe",
+                        time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
+                        e.description, e.category,
+                        f"{e.amount:.2f}", e.currency,
+                        self._name(e.payer_pubkey), splits,
+                        e.original_amount or "", e.original_currency or "",
+                    ])
+            if self._incl_set.get():
+                w.writerow([])
+                w.writerow(["Typ","Datum","Von","An","Betrag","Währung","Notiz"])
+                for s in sorted(self.settlements, key=lambda x: x.display_date()):
+                    w.writerow([
+                        "Zahlung",
+                        time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
+                        self._name(s.from_pubkey), self._name(s.to_pubkey),
+                        f"{s.amount:.2f}", s.currency, s.note or "",
+                    ])
+            if self._incl_debt.get():
+                from ledger import get_settlements
+                w.writerow([])
+                w.writerow(["Schuldenübersicht","","","","","",""])
+                w.writerow(["Von","An","Betrag","Währung"])
+                for debt in get_settlements(self.expenses, self.settlements):
+                    w.writerow([self._name(debt.debtor), self._name(debt.creditor),
+                                f"{debt.amount:.2f}", self.currency])
+        mb.showinfo("Exportiert", "CSV gespeichert:" + path, parent=self)
+
+    def _export_pdf(self):
+        import tkinter.filedialog as fd2
+        try:
+            from fpdf import FPDF
+        except ImportError:
+            mb.showerror("fpdf2 fehlt",
+                         "Bitte installieren:\npip install fpdf2\n\n"
+                         "Alternativ: CSV exportieren.", parent=self)
+            return
+
+        path = fd2.asksaveasfilename(
+            title="PDF speichern", defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf"), ("Alle", "*.*")], parent=self)
+        if not path:
+            return
+
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+
+        # Titel
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 10, f"SplitP2P – {self.group_name}", ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(100, 100, 100)
+        pdf.cell(0, 6, f"Exportiert am {time.strftime('%d.%m.%Y %H:%M')}  "
+                       f"· Währung: {self.currency}", ln=True)
+        pdf.ln(4)
+
+        def section(title):
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.set_text_color(30, 158, 117)
+            pdf.cell(0, 8, title, ln=True)
+            pdf.set_text_color(0, 0, 0)
+            pdf.line(pdf.get_x(), pdf.get_y(),
+                     pdf.get_x() + pdf.epw, pdf.get_y())
+            pdf.ln(2)
+
+        def row(*cells, bold=False, color=(0,0,0)):
+            widths = [30, 55, 30, 25, 30, 35]
+            pdf.set_font("Helvetica", "B" if bold else "", 8)
+            pdf.set_text_color(*color)
+            for txt, w in zip(cells, widths):
+                pdf.cell(w, 6, str(txt)[:30], border=0)
+            pdf.ln()
+            pdf.set_text_color(0, 0, 0)
+
+        if self._incl_exp.get() and self.expenses:
+            section("Ausgaben")
+            row("Datum", "Beschreibung", "Kategorie", "Betrag", "Bezahlt von", "", bold=True,
+                color=(80,80,80))
+            for e in sorted(self.expenses, key=lambda x: x.display_date()):
+                row(
+                    time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
+                    e.description, e.category,
+                    f"{e.amount:.2f} {e.currency}",
+                    self._name(e.payer_pubkey), "",
+                )
+            total = sum(e.amount for e in self.expenses)
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.cell(0, 6, f"Gesamt: {total:.2f} {self.currency}", ln=True)
+            pdf.ln(4)
+
+        if self._incl_set.get() and self.settlements:
+            section("Erfasste Zahlungen")
+            row("Datum", "Von", "An", "Betrag", "", "", bold=True, color=(80,80,80))
+            for s in sorted(self.settlements, key=lambda x: x.display_date()):
+                row(
+                    time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
+                    self._name(s.from_pubkey), self._name(s.to_pubkey),
+                    f"{s.amount:.2f} {s.currency}", s.note or "", "",
+                )
+            pdf.ln(4)
+
+        if self._incl_debt.get():
+            from ledger import get_settlements
+            debts = get_settlements(self.expenses, self.settlements)
+            section("Offene Schulden")
+            if debts:
+                for d in debts:
+                    row(self._name(d.debtor), "→", self._name(d.creditor),
+                        f"{d.amount:.2f} {self.currency}", "", "")
+            else:
+                pdf.set_font("Helvetica", "", 9)
+                pdf.cell(0, 6, "Alle quitt.", ln=True)
+
+        pdf.output(path)
+        mb.showinfo("Exportiert", "PDF gespeichert:" + path, parent=self)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -845,6 +1198,10 @@ class App(tk.Tk):
         self._group_currency = "EUR"
         self._rates: dict    = {}
         self._network        = None
+        # Suche / Filter
+        self._search_text    = tk.StringVar()
+        self._filter_cat     = tk.StringVar(value='Alle')
+        self._filter_member  = tk.StringVar(value='Alle')
 
         self._build_ui()
         self._init_identity()
@@ -922,8 +1279,36 @@ class App(tk.Tk):
         toolbar.pack(fill="x")
         _lbl(toolbar, "AUSGABEN & ZAHLUNGEN",
              fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=16, pady=10).pack(side="left")
-        _ghost(toolbar, "+ Zahlung", self._record_settlement).pack(side="right", padx=4, pady=6)
-        _btn(toolbar, "+ Ausgabe", self._add_expense).pack(side="right", padx=8, pady=6)
+        _ghost(toolbar, "📊 Charts",  self._open_charts).pack(side="right", padx=4, pady=6)
+        _ghost(toolbar, "⬇ Export",   self._open_export).pack(side="right", padx=4, pady=6)
+        _ghost(toolbar, "+ Zahlung",  self._record_settlement).pack(side="right", padx=4, pady=6)
+        _btn(toolbar,   "+ Ausgabe",  self._add_expense).pack(side="right", padx=8, pady=6)
+        _div(main).pack(fill="x")
+
+        # ── Suchzeile ────────────────────────────────────────────
+        search_bar = tk.Frame(main, bg=PANEL, pady=5)
+        search_bar.pack(fill="x")
+        _lbl(search_bar, "🔍", fg=FG_DIM, font=FONT, bg=PANEL, padx=8).pack(side="left")
+        tk.Entry(search_bar, textvariable=self._search_text, font=FONT,
+                 bg=BORDER, fg=FG, insertbackground=GREEN, relief="flat",
+                 bd=4, width=22).pack(side="left", padx=(0, 10))
+        self._search_text.trace_add("write", lambda *_: self._apply_filters())
+
+        _lbl(search_bar, "Kategorie:", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
+        from models import CATEGORIES
+        cat_cb = _combobox(search_bar, self._filter_cat,
+                           ["Alle"] + CATEGORIES, width=16)
+        cat_cb.pack(side="left", padx=(2, 10))
+        self._filter_cat.trace_add("write", lambda *_: self._apply_filters())
+
+        _lbl(search_bar, "Mitglied:", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
+        self._member_filter_cb = _combobox(search_bar, self._filter_member, ["Alle"], width=14)
+        self._member_filter_cb.pack(side="left", padx=(2, 10))
+        self._filter_member.trace_add("write", lambda *_: self._apply_filters())
+
+        _ghost(search_bar, "✕ Zurücksetzen", self._reset_filters).pack(side="left")
+        self._result_count = _lbl(search_bar, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
+        self._result_count.pack(side="right", padx=10)
         _div(main).pack(fill="x")
 
         container = tk.Frame(main, bg=BG)
@@ -1379,21 +1764,58 @@ class App(tk.Tk):
                             "amount": s.amount})).pack(side="left", padx=6)
 
     def _render_events(self, expenses, settlements, members):
-        """Expenses und Settlements zeitlich sortiert zusammen anzeigen."""
+        """Expenses und Settlements – gefiltert – zeitlich sortiert anzeigen."""
         for w in self._event_list.winfo_children(): w.destroy()
         pk_to_name = {m.pubkey: m.display_name for m in members}
 
-        # Gemeinsame Liste, sortiert nach display_date absteigend
+        # Mitglied-Dropdown aktualisieren
+        names = ["Alle"] + [m.display_name for m in members]
+        self._member_filter_cb.configure(values=names)
+
+        # Suchbegriff + Filter auslesen
+        query   = self._search_text.get().lower().strip()
+        cat_f   = self._filter_cat.get()
+        mbr_f   = self._filter_member.get()
+        mbr_pk  = next((m.pubkey for m in members if m.display_name == mbr_f), None)
+
+        def matches_expense(e):
+            if cat_f and cat_f != "Alle" and e.category != cat_f: return False
+            if mbr_pk and mbr_pk != e.payer_pubkey and \
+               not any(s.pubkey == mbr_pk for s in e.splits): return False
+            if query and query not in e.description.lower() and \
+               query not in e.category.lower() and \
+               query not in (e.note or "").lower(): return False
+            return True
+
+        def matches_settlement(s):
+            if cat_f and cat_f != "Alle": return False
+            if mbr_pk and s.from_pubkey != mbr_pk and s.to_pubkey != mbr_pk: return False
+            if query:
+                n_from = pk_to_name.get(s.from_pubkey, "")
+                n_to   = pk_to_name.get(s.to_pubkey,   "")
+                if query not in (s.note or "").lower() and \
+                   query not in n_from.lower() and query not in n_to.lower(): return False
+            return True
+
         events = []
         for e in expenses:
-            events.append(("expense", e.display_date(), e))
+            if matches_expense(e):
+                events.append(("expense", e.display_date(), e))
         for s in settlements:
-            events.append(("settlement", s.display_date(), s))
+            if matches_settlement(s):
+                events.append(("settlement", s.display_date(), s))
         events.sort(key=lambda x: x[1], reverse=True)
 
+        total_all = len(expenses) + len(settlements)
+        if total_all > 0:
+            self._result_count.configure(
+                text=f"{len(events)} von {total_all}" if len(events) < total_all
+                     else "")
+
         if not events:
-            _lbl(self._event_list, "Noch keine Ausgaben.",
-                 fg=FG_DIM, font=FONT).pack(pady=40); return
+            msg = "Keine Treffer." if (query or cat_f != "Alle" or mbr_f != "Alle") \
+                  else "Noch keine Ausgaben."
+            _lbl(self._event_list, msg, fg=FG_DIM, font=FONT).pack(pady=40); return
 
         for etype, _, obj in events:
             if etype == "expense":
@@ -1558,6 +1980,42 @@ class App(tk.Tk):
                 joined_at=data.get("joined_at", int(time.time())),
             ))
             self._refresh()
+
+
+    # ── Filter-Helfer ────────────────────────────────────────────────
+
+    def _apply_filters(self):
+        """Wird bei jeder Änderung der Suchleiste aufgerufen."""
+        from storage import load_all_members
+        members     = load_all_members(self._db)
+        expenses    = self._load_expenses()
+        settlements = self._load_settlements()
+        self._render_events(expenses, settlements, members)
+
+    def _reset_filters(self):
+        self._search_text.set("")
+        self._filter_cat.set("Alle")
+        self._filter_member.set("Alle")
+
+    # ── Charts ───────────────────────────────────────────────────────
+
+    def _open_charts(self):
+        from storage import load_all_members
+        members     = load_all_members(self._db)
+        expenses    = self._load_expenses()
+        settlements = self._load_settlements()
+        ChartsWindow(self, expenses, settlements, members,
+                     self._group_currency, self._own_pubkey)
+
+    # ── Export ───────────────────────────────────────────────────────
+
+    def _open_export(self):
+        from storage import load_all_members
+        members     = load_all_members(self._db)
+        expenses    = self._load_expenses()
+        settlements = self._load_settlements()
+        ExportDialog(self, expenses, settlements, members,
+                     self._group_currency, self._group_name)
 
 
 # ---------------------------------------------------------------------------
