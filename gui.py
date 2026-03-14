@@ -2,16 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-GUI – Dezentrales Splitwise
-
-Beim Start: Gruppenpasswort eingeben.
-Alle Ausgaben werden mit diesem Passwort AES-verschlüsselt gespeichert.
-Verschiedene Gruppen (verschiedene Passwörter) sehen nichts voneinander.
+GUI – Dezentrales Splitwise mit Währungsunterstützung
 """
 
 import os
 import subprocess
 import sys
+import threading
 import time
 import tkinter as tk
 import tkinter.filedialog as fd
@@ -61,8 +58,18 @@ def _lbl(parent, text, fg=FG, font=FONT, **kw):
                     bg=kw.pop("bg", BG), font=font, **kw)
 
 
-def _div(parent):
-    return tk.Frame(parent, bg=BORDER, height=1)
+def _div(parent, **kw):
+    return tk.Frame(parent, bg=BORDER, height=1, **kw)
+
+
+def _combobox(parent, var, values, **kw):
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure("TCombobox", fieldbackground=PANEL, background=PANEL,
+                    foreground=FG, selectbackground=BORDER, arrowcolor=FG_DIM,
+                    selectforeground=FG)
+    return ttk.Combobox(parent, textvariable=var, values=values,
+                        state="readonly", font=FONT, **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -70,22 +77,18 @@ def _div(parent):
 # ---------------------------------------------------------------------------
 
 class GroupLoginDialog(tk.Toplevel):
-    """
-    Wird beim Start gezeigt. Erwartet Gruppenname + Passwort.
-    Das Passwort wird NICHT gespeichert — nur im RAM gehalten.
-    """
-
-    def __init__(self, parent, saved_group: str = ""):
+    def __init__(self, parent, saved: dict):
         super().__init__(parent)
         self.title("Gruppe wählen")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
         self.result: Optional[dict] = None
-        self._build(saved_group)
+        self._build(saved)
         self.wait_window()
 
-    def _build(self, saved_group):
+    def _build(self, saved):
+        from currency import SUPPORTED_CURRENCIES
         pad = dict(padx=28)
 
         _lbl(self, "GRUPPE BEITRETEN", fg=GREEN, font=FONT_LARGE).pack(
@@ -97,23 +100,27 @@ class GroupLoginDialog(tk.Toplevel):
         frm = tk.Frame(self, bg=BG, padx=28)
         frm.pack(fill="x")
 
-        _lbl(frm, "GRUPPENNAME (lokal, nur zur Anzeige)", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
-        self._name = tk.StringVar(value=saved_group)
+        _lbl(frm, "GRUPPENNAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        self._name = tk.StringVar(value=saved.get("group_name", ""))
         tk.Entry(frm, textvariable=self._name, font=FONT, bg=PANEL, fg=FG,
-                 insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=4)
+                 insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=(2, 8))
 
-        _lbl(frm, "GRUPPENPASSWORT", fg=FG_DIM, font=FONT_SMALL).pack(
-            anchor="w", pady=(10, 0))
+        _lbl(frm, "GRUPPENPASSWORT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._pw = tk.Entry(frm, show="●", font=FONT, bg=PANEL, fg=FG,
                             insertbackground=GREEN, relief="flat", bd=6)
-        self._pw.pack(fill="x", pady=4)
+        self._pw.pack(fill="x", pady=(2, 8))
         self._pw.bind("<Return>", lambda _: self._confirm())
 
+        # Gruppenwährung
+        _lbl(frm, "GRUPPENWÄHRUNG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        self._currency = tk.StringVar(value=saved.get("group_currency", "EUR"))
+        _combobox(frm, self._currency, SUPPORTED_CURRENCIES, width=10).pack(
+            anchor="w", pady=(2, 8))
+
         _lbl(frm,
-             "⚠  Das Passwort wird nicht gespeichert.\n"
-             "Alle Mitglieder müssen dasselbe Passwort eingeben.",
-             fg=FG_DIM, font=FONT_SMALL, justify="left").pack(
-            anchor="w", pady=(8, 0))
+             "⚠  Passwort wird nicht gespeichert. Alle Mitglieder\n"
+             "müssen dasselbe Passwort und dieselbe Währung nutzen.",
+             fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", pady=(4, 0))
 
         btn_row = tk.Frame(self, bg=BG, padx=28, pady=20)
         btn_row.pack(fill="x")
@@ -122,23 +129,20 @@ class GroupLoginDialog(tk.Toplevel):
     def _confirm(self):
         name = self._name.get().strip()
         pw   = self._pw.get().strip()
+        cur  = self._currency.get().strip()
         if not name:
-            mb.showerror("Fehler", "Gruppenname fehlt.", parent=self)
-            return
+            mb.showerror("Fehler", "Gruppenname fehlt.", parent=self); return
         if not pw:
-            mb.showerror("Fehler", "Passwort fehlt.", parent=self)
-            return
-        self.result = {"group_name": name, "password": pw}
+            mb.showerror("Fehler", "Passwort fehlt.", parent=self); return
+        self.result = {"group_name": name, "password": pw, "group_currency": cur}
         self.destroy()
 
 
 # ---------------------------------------------------------------------------
-# Anhang-Vorschau-Dialog
+# Anhang-Viewer
 # ---------------------------------------------------------------------------
 
 class AttachmentViewer(tk.Toplevel):
-    """Zeigt ein Bild oder öffnet PDF im System-Viewer."""
-
     def __init__(self, parent, sha256: str, filename: str):
         from storage import attachment_path
         path = attachment_path(sha256)
@@ -147,44 +151,33 @@ class AttachmentViewer(tk.Toplevel):
                          "Die Datei ist lokal nicht vorhanden.\n"
                          "(Noch nicht synchronisiert?)", parent=parent)
             return
-
-        # PDF: im System öffnen
         if filename.lower().endswith(".pdf"):
-            self._open_external(path)
-            return
-
-        # Bild: in Tkinter anzeigen
+            self._open_external(path); return
         super().__init__(parent)
         self.title(filename)
         self.configure(bg=BG)
         self.grab_set()
-        self._build(path, filename)
+        self._show_image(path, filename)
 
     def _open_external(self, path):
-        if sys.platform == "win32":
-            os.startfile(path)
-        elif sys.platform == "darwin":
-            subprocess.run(["open", path])
-        else:
-            subprocess.run(["xdg-open", path])
+        if sys.platform == "win32": os.startfile(path)
+        elif sys.platform == "darwin": subprocess.run(["open", path])
+        else: subprocess.run(["xdg-open", path])
 
-    def _build(self, path, filename):
+    def _show_image(self, path, filename):
         try:
             from PIL import Image, ImageTk
             img = Image.open(path)
             img.thumbnail((800, 600))
             photo = ImageTk.PhotoImage(img)
             lbl = tk.Label(self, image=photo, bg=BG)
-            lbl.image = photo  # ref halten
+            lbl.image = photo
             lbl.pack(padx=10, pady=10)
             _lbl(self, filename, fg=FG_DIM, font=FONT_SMALL).pack(pady=(0, 10))
         except ImportError:
-            # Pillow nicht installiert: extern öffnen
             self._open_external(path)
-            try:
-                self.destroy()
-            except Exception:
-                pass
+            try: self.destroy()
+            except Exception: pass
 
 
 # ---------------------------------------------------------------------------
@@ -192,21 +185,28 @@ class AttachmentViewer(tk.Toplevel):
 # ---------------------------------------------------------------------------
 
 class ExpenseDialog(tk.Toplevel):
-    def __init__(self, parent, members, own_pubkey: str, expense=None):
+    def __init__(self, parent, members, own_pubkey: str,
+                 group_currency: str, rates: dict,
+                 expense=None):
         super().__init__(parent)
-        self.title("Ausgabe bearbeiten" if expense else "Ausgabe hinzufügen")
+        self.title("Ausgabe bearbeiten" if expense else "Neue Ausgabe")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
-        self.members    = members
-        self.own_pubkey = own_pubkey
-        self.result     = None
-        self._attachment_path: Optional[str] = None
-        self._attachment_data: Optional[bytes] = None
+        self.members         = members
+        self.own_pubkey      = own_pubkey
+        self.group_currency  = group_currency
+        self.rates           = rates          # {target: rate} Basis = group_currency
+        self.result          = None
+        self._att_path: Optional[str]   = None
+        self._att_data: Optional[bytes] = None
+        self._existing_att   = getattr(expense, "attachment", None)
         self._build(expense)
         self.wait_window()
 
     def _build(self, expense):
+        from currency import SUPPORTED_CURRENCIES, convert, format_rate
+
         pad = dict(padx=24)
         _lbl(self, "AUSGABE BEARBEITEN" if expense else "NEUE AUSGABE",
              fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(20, 2), **pad)
@@ -221,35 +221,74 @@ class ExpenseDialog(tk.Toplevel):
         tk.Entry(frm, textvariable=self._desc, font=FONT, bg=PANEL, fg=FG,
                  insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=(2, 8))
 
-        # Betrag
+        # Betrag + Währung
         _lbl(frm, "BETRAG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         amt_row = tk.Frame(frm, bg=BG)
-        amt_row.pack(fill="x", pady=(2, 8))
-        self._amount = tk.StringVar(value=str(expense.amount) if expense else "")
-        tk.Entry(amt_row, textvariable=self._amount, font=FONT, bg=PANEL, fg=FG,
-                 insertbackground=GREEN, relief="flat", bd=6, width=14).pack(side="left")
-        _lbl(amt_row, "EUR", fg=FG_DIM, font=FONT_SMALL, bg=BG, padx=6).pack(side="left")
+        amt_row.pack(fill="x", pady=(2, 2))
+
+        default_amt = ""
+        default_cur = self.group_currency
+        if expense:
+            if expense.original_amount and expense.original_currency:
+                default_amt = str(expense.original_amount)
+                default_cur = expense.original_currency
+            else:
+                default_amt = str(expense.amount)
+
+        self._amount = tk.StringVar(value=default_amt)
+        self._input_currency = tk.StringVar(value=default_cur)
+
+        amt_entry = tk.Entry(amt_row, textvariable=self._amount, font=FONT,
+                             bg=PANEL, fg=FG, insertbackground=GREEN,
+                             relief="flat", bd=6, width=14)
+        amt_entry.pack(side="left")
+
+        _combobox(amt_row, self._input_currency, SUPPORTED_CURRENCIES, width=8).pack(
+            side="left", padx=6)
+
+        # Umrechnungs-Vorschau
+        self._conv_label = _lbl(frm, "", fg=AMBER, font=FONT_SMALL, bg=BG)
+        self._conv_label.pack(anchor="w", pady=(2, 6))
+
+        def _update_preview(*_):
+            try:
+                amt = float(self._amount.get().replace(",", "."))
+            except ValueError:
+                self._conv_label.configure(text="")
+                return
+            ic = self._input_currency.get()
+            if ic == self.group_currency:
+                self._conv_label.configure(text="")
+                return
+            converted = convert(amt, ic, self.group_currency, self.rates)
+            if converted is not None:
+                rate_str = format_rate(ic, self.group_currency, self.rates)
+                self._conv_label.configure(
+                    text=f"= {converted:.2f} {self.group_currency}  ({rate_str})")
+            else:
+                self._conv_label.configure(
+                    text=f"⚠ Kurs {ic}→{self.group_currency} nicht verfügbar",
+                    fg=RED)
+
+        self._amount.trace_add("write", _update_preview)
+        self._input_currency.trace_add("write", _update_preview)
+        _update_preview()
 
         # Bezahlt von
         _lbl(frm, "BEZAHLT VON", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._payer_var = tk.StringVar()
         payer_names = [m.display_name for m in self.members]
-        default = next(
+        default_payer = next(
             (m.display_name for m in self.members if m.pubkey == self.own_pubkey),
-            (payer_names[0] if payer_names else "")
+            payer_names[0] if payer_names else "",
         )
         if expense:
-            default = next(
+            default_payer = next(
                 (m.display_name for m in self.members if m.pubkey == expense.payer_pubkey),
-                default,
+                default_payer,
             )
-        self._payer_var.set(default)
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("TCombobox", fieldbackground=PANEL, background=PANEL,
-                        foreground=FG, selectbackground=BORDER, arrowcolor=FG_DIM)
-        ttk.Combobox(frm, textvariable=self._payer_var, values=payer_names,
-                     state="readonly", font=FONT).pack(fill="x", pady=(2, 8))
+        self._payer_var.set(default_payer)
+        _combobox(frm, self._payer_var, payer_names).pack(fill="x", pady=(2, 8))
 
         # Aufteilung
         _lbl(frm, "AUFTEILUNG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
@@ -273,26 +312,19 @@ class ExpenseDialog(tk.Toplevel):
             self._amount_vars[m.pubkey] = tk.StringVar(value="")
         self._update_splits()
 
-        # ── Dateianhang ───────────────────────────────────────────────
+        # Anhang
         _div(frm).pack(fill="x", pady=8)
         _lbl(frm, "DATEIANHANG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         att_row = tk.Frame(frm, bg=BG)
         att_row.pack(fill="x", pady=(2, 4))
-
         self._att_label = _lbl(att_row,
-            f"📎 {expense.attachment.filename} ({expense.attachment.size_str()})"
-            if (expense and expense.attachment) else "Kein Anhang",
-            fg=FG_DIM if not (expense and expense.attachment) else BLUE,
-            font=FONT_SMALL, bg=BG)
+            f"📎 {self._existing_att.filename} ({self._existing_att.size_str()})"
+            if self._existing_att else "Kein Anhang",
+            fg=BLUE if self._existing_att else FG_DIM, font=FONT_SMALL, bg=BG)
         self._att_label.pack(side="left")
-
         _ghost(att_row, "Datei wählen", self._pick_file).pack(side="left", padx=8)
-
-        if expense and expense.attachment:
-            _ghost(att_row, "Entfernen", self._remove_attachment).pack(side="left")
-            self._existing_attachment = expense.attachment
-        else:
-            self._existing_attachment = None
+        if self._existing_att:
+            _ghost(att_row, "Entfernen", self._remove_att).pack(side="left")
 
         # Buttons
         btn_row = tk.Frame(self, bg=BG, padx=24, pady=16)
@@ -304,7 +336,6 @@ class ExpenseDialog(tk.Toplevel):
         for w in self._split_widgets:
             w.destroy()
         self._split_widgets.clear()
-        mode = self._split_mode.get()
         for m in self.members:
             row = tk.Frame(self._split_frame, bg=BG)
             row.pack(fill="x", pady=1)
@@ -314,100 +345,113 @@ class ExpenseDialog(tk.Toplevel):
                            bg=BG, fg=FG, selectcolor=BG,
                            activebackground=BG, activeforeground=FG,
                            font=FONT, width=18, anchor="w").pack(side="left")
-            if mode == "custom":
+            if self._split_mode.get() == "custom":
                 tk.Entry(row, textvariable=self._amount_vars[m.pubkey],
                          font=FONT, bg=PANEL, fg=FG,
-                         insertbackground=GREEN, relief="flat", bd=4, width=10).pack(side="left", padx=6)
-                _lbl(row, "EUR", fg=FG_DIM, font=FONT_SMALL, bg=BG).pack(side="left")
+                         insertbackground=GREEN, relief="flat", bd=4, width=10).pack(
+                    side="left", padx=6)
+                _lbl(row, self.group_currency, fg=FG_DIM, font=FONT_SMALL, bg=BG).pack(side="left")
 
     def _pick_file(self):
         path = fd.askopenfilename(
             title="Anhang wählen",
-            filetypes=[
-                ("Bilder & PDFs", "*.jpg *.jpeg *.png *.gif *.webp *.pdf"),
-                ("Alle Dateien", "*.*"),
-            ],
+            filetypes=[("Bilder & PDFs", "*.jpg *.jpeg *.png *.gif *.webp *.pdf"),
+                       ("Alle Dateien", "*.*")],
             parent=self,
         )
         if not path:
             return
         with open(path, "rb") as f:
-            self._attachment_data = f.read()
-        self._attachment_path = path
+            self._att_data = f.read()
+        self._att_path = path
+        self._existing_att = None
         fname = os.path.basename(path)
-        size  = len(self._attachment_data)
-        size_str = f"{size/1024:.1f} KB" if size >= 1024 else f"{size} B"
-        self._att_label.configure(text=f"📎 {fname} ({size_str})", fg=BLUE)
-        self._existing_attachment = None
+        sz = len(self._att_data)
+        sz_str = f"{sz/1024:.1f} KB" if sz >= 1024 else f"{sz} B"
+        self._att_label.configure(text=f"📎 {fname} ({sz_str})", fg=BLUE)
 
-    def _remove_attachment(self):
-        self._attachment_path = None
-        self._attachment_data = None
-        self._existing_attachment = None
+    def _remove_att(self):
+        self._att_path = self._att_data = self._existing_att = None
         self._att_label.configure(text="Kein Anhang", fg=FG_DIM)
 
     def _save(self):
         from models import Expense, Attachment, split_equally, split_custom
         from crypto import hash_bytes, mime_type_from_path
         from storage import save_attachment
+        from currency import convert
 
         desc = self._desc.get().strip()
         if not desc:
-            mb.showerror("Fehler", "Beschreibung fehlt.", parent=self)
-            return
+            mb.showerror("Fehler", "Beschreibung fehlt.", parent=self); return
+
         try:
-            amount = float(self._amount.get().replace(",", "."))
-            if amount <= 0:
+            raw_amount = float(self._amount.get().replace(",", "."))
+            if raw_amount <= 0:
                 raise ValueError
         except ValueError:
-            mb.showerror("Fehler", "Ungültiger Betrag.", parent=self)
-            return
+            mb.showerror("Fehler", "Ungültiger Betrag.", parent=self); return
+
+        input_cur = self._input_currency.get()
+        original_amount   = None
+        original_currency = None
+
+        # Umrechnen falls nötig
+        if input_cur != self.group_currency:
+            converted = convert(raw_amount, input_cur, self.group_currency, self.rates)
+            if converted is None:
+                if not mb.askyesno(
+                    "Kurs fehlt",
+                    f"Kein Kurs für {input_cur}→{self.group_currency} verfügbar.\n"
+                    "Betrag unverändert übernehmen?",
+                    parent=self,
+                ):
+                    return
+                amount = raw_amount
+            else:
+                original_amount   = raw_amount
+                original_currency = input_cur
+                amount = converted
+        else:
+            amount = raw_amount
 
         payer = next((m for m in self.members if m.display_name == self._payer_var.get()), None)
         if not payer:
-            mb.showerror("Fehler", "Zahler nicht gefunden.", parent=self)
-            return
+            mb.showerror("Fehler", "Zahler nicht gefunden.", parent=self); return
 
         selected = [m for m in self.members if self._member_vars[m.pubkey].get()]
         if not selected:
-            mb.showerror("Fehler", "Mindestens ein Mitglied auswählen.", parent=self)
-            return
+            mb.showerror("Fehler", "Mindestens ein Mitglied auswählen.", parent=self); return
 
-        mode = self._split_mode.get()
-        if mode == "equal":
+        if self._split_mode.get() == "equal":
             splits = split_equally(amount, [m.pubkey for m in selected])
         else:
             try:
-                custom = {
-                    m.pubkey: float(self._amount_vars[m.pubkey].get().replace(",", "."))
-                    for m in selected
-                }
+                custom = {m.pubkey: float(self._amount_vars[m.pubkey].get().replace(",", "."))
+                          for m in selected}
             except ValueError:
-                mb.showerror("Fehler", "Individuelle Beträge ungültig.", parent=self)
-                return
+                mb.showerror("Fehler", "Individuelle Beträge ungültig.", parent=self); return
             splits = split_custom(custom)
 
-        # Anhang verarbeiten
+        # Anhang
         attachment = None
-        if self._attachment_data and self._attachment_path:
-            sha = hash_bytes(self._attachment_data)
-            save_attachment(self._attachment_data, sha)
-            attachment = Attachment(
-                sha256=sha,
-                filename=os.path.basename(self._attachment_path),
-                size=len(self._attachment_data),
-                mime_type=mime_type_from_path(self._attachment_path),
-            )
-        elif self._existing_attachment:
-            attachment = self._existing_attachment
+        if self._att_data and self._att_path:
+            sha = hash_bytes(self._att_data)
+            save_attachment(self._att_data, sha)
+            attachment = Attachment(sha256=sha, filename=os.path.basename(self._att_path),
+                                    size=len(self._att_data),
+                                    mime_type=mime_type_from_path(self._att_path))
+        elif self._existing_att:
+            attachment = self._existing_att
 
         self.result = {
             "description": desc,
             "amount": amount,
-            "currency": "EUR",
+            "currency": self.group_currency,
             "payer_pubkey": payer.pubkey,
             "splits": splits,
             "attachment": attachment,
+            "original_amount": original_amount,
+            "original_currency": original_currency,
         }
         self.destroy()
 
@@ -433,18 +477,15 @@ class AddMemberDialog(tk.Toplevel):
         _div(self).pack(fill="x", **pad)
         frm = tk.Frame(self, bg=BG, padx=24, pady=12)
         frm.pack(fill="x")
-
         _lbl(frm, "NAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._name = tk.Entry(frm, font=FONT, bg=PANEL, fg=FG,
                               insertbackground=GREEN, relief="flat", bd=6)
         self._name.pack(fill="x", pady=4)
-
-        _lbl(frm, "PUBLIC KEY (leer = neuer temporärer Key)", fg=FG_DIM, font=FONT_SMALL).pack(
+        _lbl(frm, "PUBLIC KEY (leer = temporärer Key)", fg=FG_DIM, font=FONT_SMALL).pack(
             anchor="w", pady=(8, 0))
         self._pk = tk.Entry(frm, font=FONT_MONO, bg=PANEL, fg=FG_MUTED,
                             insertbackground=GREEN, relief="flat", bd=6)
         self._pk.pack(fill="x", pady=4)
-
         btn_row = tk.Frame(self, bg=BG, padx=24, pady=16)
         btn_row.pack(fill="x")
         _ghost(btn_row, "Abbrechen", self.destroy).pack(side="right", padx=(6, 0))
@@ -453,10 +494,8 @@ class AddMemberDialog(tk.Toplevel):
     def _save(self):
         name = self._name.get().strip()
         if not name:
-            mb.showerror("Fehler", "Name fehlt.", parent=self)
-            return
-        pk = self._pk.get().strip() or None
-        self.result = {"name": name, "pubkey": pk}
+            mb.showerror("Fehler", "Name fehlt.", parent=self); return
+        self.result = {"name": name, "pubkey": self._pk.get().strip() or None}
         self.destroy()
 
 
@@ -467,18 +506,20 @@ class AddMemberDialog(tk.Toplevel):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.withdraw()  # erst nach Login zeigen
+        self.withdraw()
         self.title("SplitP2P")
         self.configure(bg=BG)
-        self.geometry("980x700")
-        self.minsize(720, 500)
+        self.geometry("1000x700")
+        self.minsize(740, 520)
 
-        self._db           = None
-        self._own_key      = None
-        self._own_pubkey   = ""
-        self._own_name     = ""
-        self._group_name   = ""
-        self._group_pw     = ""   # nur im RAM
+        self._db            = None
+        self._own_key       = None
+        self._own_pubkey    = ""
+        self._own_name      = ""
+        self._group_name    = ""
+        self._group_pw      = ""
+        self._group_currency = "EUR"
+        self._rates: dict[str, float] = {}
 
         self._build_ui()
         self._init_identity()
@@ -500,10 +541,8 @@ class App(tk.Tk):
 
         _lbl(hdr, "SplitP2P", fg=GREEN, font=("Segoe UI", 14, "bold"), bg=PANEL).pack(
             side="left", padx=16, pady=12)
-
         self._group_badge = _lbl(hdr, "", fg=AMBER, font=FONT_BOLD, bg=PANEL)
         self._group_badge.pack(side="left", padx=4)
-
         self._identity_label = _lbl(hdr, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
         self._identity_label.pack(side="left", padx=4)
 
@@ -526,27 +565,36 @@ class App(tk.Tk):
         self._debt_frame = tk.Frame(sb, bg=PANEL)
         self._debt_frame.pack(fill="x", padx=12, pady=6)
 
+        _div(sb).pack(fill="x", pady=8)
+
+        # Wechselkurse
+        _lbl(sb, "WECHSELKURSE", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(fill="x")
+        self._rates_frame = tk.Frame(sb, bg=PANEL)
+        self._rates_frame.pack(fill="x", padx=12, pady=4)
+        self._rates_age_label = _lbl(sb, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14)
+        self._rates_age_label.pack(fill="x")
+        _btn(sb, "↻ Aktualisieren", self._manual_refresh_rates,
+             bg=BORDER, fg=FG_MUTED, font=FONT_SMALL, width=18).pack(padx=12, pady=4)
+
     def _build_main(self, paned):
         main = tk.Frame(paned, bg=BG)
         paned.add(main, minsize=500)
 
         toolbar = tk.Frame(main, bg=PANEL)
         toolbar.pack(fill="x")
-        _lbl(toolbar, "AUSGABEN", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=16, pady=10).pack(side="left")
+        _lbl(toolbar, "AUSGABEN", fg=FG_DIM, font=FONT_SMALL, bg=PANEL,
+             padx=16, pady=10).pack(side="left")
         _btn(toolbar, "+ Ausgabe", self._add_expense).pack(side="right", padx=8, pady=6)
-
         _div(main).pack(fill="x")
 
         container = tk.Frame(main, bg=BG)
         container.pack(fill="both", expand=True)
-
         self._canvas = tk.Canvas(container, bg=BG, highlightthickness=0)
-        sb_scroll = tk.Scrollbar(container, orient="vertical", command=self._canvas.yview,
-                                 bg=PANEL, troughcolor=BG)
-        self._canvas.configure(yscrollcommand=sb_scroll.set)
-        sb_scroll.pack(side="right", fill="y")
+        sb2 = tk.Scrollbar(container, orient="vertical", command=self._canvas.yview,
+                           bg=PANEL, troughcolor=BG)
+        self._canvas.configure(yscrollcommand=sb2.set)
+        sb2.pack(side="right", fill="y")
         self._canvas.pack(side="left", fill="both", expand=True)
-
         self._expense_list = tk.Frame(self._canvas, bg=BG)
         self._win = self._canvas.create_window((0, 0), window=self._expense_list, anchor="nw")
         self._expense_list.bind("<Configure>", lambda e: self._canvas.configure(
@@ -561,14 +609,16 @@ class App(tk.Tk):
         self._statusbar.pack_propagate(False)
         self._total_label = _lbl(self._statusbar, "", fg=FG_MUTED, font=FONT_SMALL, bg=PANEL)
         self._total_label.pack(side="right", padx=16, pady=8)
+        self._rates_status = _lbl(self._statusbar, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
+        self._rates_status.pack(side="left", padx=16, pady=8)
 
     # ── Identität & Gruppe ────────────────────────────────────────────
 
     def _init_identity(self):
         from config_manager import ConfigManager
-        from crypto import generate_private_key, private_key_from_bytes, get_public_key_hex, private_key_to_bytes
-        from storage import init_db, save_member
-        from models import Member
+        from crypto import (generate_private_key, private_key_from_bytes,
+                            get_public_key_hex, private_key_to_bytes)
+        from storage import init_db
 
         self._cfg = ConfigManager("SplitP2P", "config.json")
         self._db  = init_db("splitp2p.db")
@@ -590,17 +640,23 @@ class App(tk.Tk):
             self._do_group_login()
 
     def _do_group_login(self):
-        saved_group = self._cfg.get("last_group", "")
-        dlg = GroupLoginDialog(self, saved_group)
+        saved = {
+            "group_name":     self._cfg.get("last_group", ""),
+            "group_currency": self._cfg.get("last_currency", "EUR"),
+        }
+        dlg = GroupLoginDialog(self, saved)
         if not dlg.result:
-            self.quit()
-            return
-        self._group_name = dlg.result["group_name"]
-        self._group_pw   = dlg.result["password"]
-        self._cfg.set("last_group", self._group_name)
+            self.quit(); return
+
+        self._group_name     = dlg.result["group_name"]
+        self._group_pw       = dlg.result["password"]
+        self._group_currency = dlg.result["group_currency"]
+        self._cfg.set("last_group",    self._group_name)
+        self._cfg.set("last_currency", self._group_currency)
         self._cfg.save()
 
-        self._group_badge.configure(text=f"[{self._group_name}]")
+        self._group_badge.configure(
+            text=f"[{self._group_name}  ·  {self._group_currency}]")
         self._identity_label.configure(
             text=f"{self._own_name}  ·  {self._own_pubkey[:12]}…")
 
@@ -611,11 +667,13 @@ class App(tk.Tk):
             save_member(self._db, Member(self._own_pubkey, self._own_name))
 
         self.deiconify()
+        self._load_rates_async()
         self._refresh()
 
     def _switch_group(self):
         self.withdraw()
         self._group_pw = ""
+        self._rates = {}
         self._do_group_login()
 
     def _open_settings(self, first_run=False):
@@ -625,26 +683,24 @@ class App(tk.Tk):
         dlg.resizable(False, False)
         dlg.grab_set()
 
-        _lbl(dlg, "IDENTITÄT", fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(20, 2), padx=24)
+        _lbl(dlg, "IDENTITÄT", fg=GREEN, font=FONT_LARGE).pack(
+            anchor="w", pady=(20, 2), padx=24)
         _div(dlg).pack(fill="x", padx=24)
-
         frm = tk.Frame(dlg, bg=BG, padx=24, pady=12)
         frm.pack(fill="x")
         _lbl(frm, "ANZEIGENAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         name_var = tk.StringVar(value=self._own_name)
         tk.Entry(frm, textvariable=name_var, font=FONT, bg=PANEL, fg=FG,
                  insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=4)
-
         if self._own_pubkey:
-            _lbl(frm, "DEIN PUBLIC KEY", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", pady=(8, 0))
+            _lbl(frm, "PUBLIC KEY", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", pady=(8, 0))
             _lbl(frm, self._own_pubkey, fg=FG_DIM, font=FONT_MONO,
                  wraplength=340, justify="left").pack(anchor="w", pady=2)
 
         def save():
             n = name_var.get().strip()
             if not n:
-                mb.showerror("Fehler", "Name darf nicht leer sein.", parent=dlg)
-                return
+                mb.showerror("Fehler", "Name darf nicht leer sein.", parent=dlg); return
             self._own_name = n
             self._cfg.set("display_name", n)
             self._cfg.save()
@@ -666,6 +722,64 @@ class App(tk.Tk):
         _btn(btn_row, "Speichern", save).pack(side="right")
         dlg.wait_window()
 
+    # ── Wechselkurse ──────────────────────────────────────────────────
+
+    def _load_rates_async(self):
+        """Lädt/prüft Kurse im Hintergrund, blockiert nicht die GUI."""
+        def _work():
+            from currency import get_rates, rates_age_str
+            rates = get_rates(self._db, self._group_currency)
+            self._rates = rates
+            age = rates_age_str(self._db, self._group_currency)
+            self.after(0, lambda: self._update_rates_ui(age))
+
+        threading.Thread(target=_work, daemon=True, name="rates-fetch").start()
+
+    def _manual_refresh_rates(self):
+        self._rates_status.configure(text="Kurse werden geholt…", fg=AMBER)
+
+        def _work():
+            from currency import force_refresh, rates_age_str, load_rates
+            ok  = force_refresh(self._db, self._group_currency)
+            self._rates = load_rates(self._db, self._group_currency)
+            age = rates_age_str(self._db, self._group_currency)
+            self.after(0, lambda: self._update_rates_ui(age, force=True, ok=ok))
+
+        threading.Thread(target=_work, daemon=True, name="rates-force").start()
+
+    def _update_rates_ui(self, age_str: str, force: bool = False, ok: bool = True):
+        self._rates_age_label.configure(text=f"Stand: {age_str}")
+        if force:
+            msg = f"✓ Kurse aktualisiert ({age_str})" if ok else "⚠ Online-Abruf fehlgeschlagen"
+            color = GREEN if ok else RED
+            self._rates_status.configure(text=msg, fg=color)
+        else:
+            self._rates_status.configure(text="", fg=FG_DIM)
+        self._render_rates_sidebar()
+
+    def _render_rates_sidebar(self):
+        for w in self._rates_frame.winfo_children():
+            w.destroy()
+        if not self._rates:
+            _lbl(self._rates_frame, "Keine Kurse",
+                 fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
+            return
+        # Zeige nur die häufigen Währungen
+        show = ["USD", "GBP", "CHF", "JPY", "CNY", "CAD", "SEK"]
+        for cur in show:
+            if cur == self._group_currency or cur not in self._rates:
+                continue
+            from currency import convert
+            rate = convert(1.0, cur, self._group_currency, self._rates)
+            if rate is None:
+                continue
+            row = tk.Frame(self._rates_frame, bg=PANEL)
+            row.pack(fill="x", pady=1)
+            _lbl(row, f"1 {cur}", fg=FG_MUTED, font=FONT_SMALL, bg=PANEL,
+                 width=7, anchor="w").pack(side="left")
+            _lbl(row, f"= {rate:.4f} {self._group_currency}",
+                 fg=FG, font=FONT_SMALL, bg=PANEL).pack(side="left", padx=4)
+
     # ── Mitglieder ────────────────────────────────────────────────────
 
     def _add_member(self):
@@ -675,11 +789,9 @@ class App(tk.Tk):
         from storage import save_member
         from models import Member
         from crypto import generate_private_key, get_public_key_hex
-
         pk = dlg.result["pubkey"]
         if not pk:
-            tmp = generate_private_key()
-            pk  = get_public_key_hex(tmp)
+            pk = get_public_key_hex(generate_private_key())
             mb.showinfo("Key generiert",
                         f"Temporärer Public Key für '{dlg.result['name']}':\n\n{pk}",
                         parent=self)
@@ -691,14 +803,10 @@ class App(tk.Tk):
     def _load_expenses(self):
         from storage import load_all_expense_blobs
         from crypto import decrypt_expense
-        expenses = []
-        for eid, blob in load_all_expense_blobs(self._db):
-            exp = decrypt_expense(blob, self._group_pw)
-            if exp is None:
-                # falsches Passwort oder Korruption
-                continue
-            expenses.append(exp)
-        return expenses
+        return [
+            exp for _, blob in load_all_expense_blobs(self._db)
+            if (exp := decrypt_expense(blob, self._group_pw)) is not None
+        ]
 
     def _save_expense(self, expense):
         from crypto import sign_expense, encrypt_expense
@@ -712,9 +820,9 @@ class App(tk.Tk):
         members = load_all_members(self._db)
         if not members:
             mb.showwarning("Keine Mitglieder",
-                           "Bitte erst Mitglieder zur Gruppe hinzufügen.", parent=self)
-            return
-        dlg = ExpenseDialog(self, members, self._own_pubkey)
+                           "Bitte erst Mitglieder hinzufügen.", parent=self); return
+        dlg = ExpenseDialog(self, members, self._own_pubkey,
+                            self._group_currency, self._rates)
         if not dlg.result:
             return
         from models import Expense
@@ -725,33 +833,29 @@ class App(tk.Tk):
     def _edit_expense(self, expense):
         from storage import load_all_members
         members = load_all_members(self._db)
-        dlg = ExpenseDialog(self, members, self._own_pubkey, expense)
+        dlg = ExpenseDialog(self, members, self._own_pubkey,
+                            self._group_currency, self._rates, expense)
         if not dlg.result:
             return
-        import time as _time
         from models import Expense
         updated = Expense(
             id=expense.id,
-            description=dlg.result["description"],
-            amount=dlg.result["amount"],
-            currency=dlg.result["currency"],
-            payer_pubkey=dlg.result["payer_pubkey"],
-            splits=dlg.result["splits"],
-            timestamp=int(_time.time()),
+            timestamp=int(time.time()),
             signature="",
-            attachment=dlg.result.get("attachment"),
+            **{k: dlg.result[k] for k in
+               ("description","amount","currency","payer_pubkey",
+                "splits","attachment","original_amount","original_currency")},
         )
         self._save_expense(updated)
         self._refresh()
 
     def _delete_expense(self, expense):
-        if not mb.askyesno("Löschen", f"'{expense.description}' wirklich löschen?", parent=self):
+        if not mb.askyesno("Löschen", f"'{expense.description}' löschen?", parent=self):
             return
-        import time as _time
         from crypto import sign_expense, encrypt_expense
         from storage import soft_delete_expense_blob
         expense.is_deleted = True
-        expense.timestamp  = int(_time.time())
+        expense.timestamp  = int(time.time())
         expense.signature  = sign_expense(expense, self._own_key)
         blob = encrypt_expense(expense, self._group_pw)
         soft_delete_expense_blob(self._db, expense.id, blob, expense.timestamp)
@@ -768,20 +872,19 @@ class App(tk.Tk):
         self._render_debts(expenses, members)
         total = sum(e.amount for e in expenses)
         self._total_label.configure(
-            text=f"Gesamt: {total:.2f} EUR  ·  {len(expenses)} Ausgaben")
+            text=f"Gesamt: {total:.2f} {self._group_currency}  ·  {len(expenses)} Ausgaben")
 
     def _render_members(self, members):
         for w in self._members_frame.winfo_children():
             w.destroy()
         if not members:
             _lbl(self._members_frame, "Noch keine Mitglieder",
-                 fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
-            return
+                 fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(anchor="w"); return
         for m in members:
             row = tk.Frame(self._members_frame, bg=PANEL)
             row.pack(fill="x", pady=1)
-            dot = GREEN if m.pubkey == self._own_pubkey else FG_DIM
-            _lbl(row, "●", fg=dot, font=("Segoe UI", 8), bg=PANEL).pack(side="left")
+            _lbl(row, "●", fg=GREEN if m.pubkey == self._own_pubkey else FG_DIM,
+                 font=("Segoe UI", 8), bg=PANEL).pack(side="left")
             _lbl(row, m.display_name, fg=FG, font=FONT_SMALL, bg=PANEL).pack(side="left", padx=4)
             if m.pubkey == self._own_pubkey:
                 _lbl(row, "(du)", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
@@ -792,8 +895,7 @@ class App(tk.Tk):
         pk_to_name = {m.pubkey: m.display_name for m in members}
         if not expenses:
             _lbl(self._expense_list, "Noch keine Ausgaben.",
-                 fg=FG_DIM, font=FONT).pack(pady=40)
-            return
+                 fg=FG_DIM, font=FONT).pack(pady=40); return
         for exp in reversed(expenses):
             self._render_row(exp, pk_to_name)
 
@@ -813,31 +915,36 @@ class App(tk.Tk):
         splits_txt = "  ".join(f"{name(s.pubkey)}: {s.amount:.2f}€" for s in exp.splits)
         _lbl(left, splits_txt, fg=FG_MUTED, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
 
-        # Anhang
+        # Original-Währungshinweis
+        if exp.original_amount and exp.original_currency:
+            _lbl(left,
+                 f"ursprünglich: {exp.original_amount:.2f} {exp.original_currency}",
+                 fg=AMBER, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
+
         if exp.attachment:
-            att = exp.attachment
             from storage import attachment_exists
-            exists = attachment_exists(att.sha256)
-            att_color = BLUE if exists else FG_DIM
-            att_text  = f"📎 {att.filename} ({att.size_str()})" + ("" if exists else "  ⚠ fehlt lokal")
-            att_btn = tk.Button(
-                left, text=att_text, fg=att_color, bg=PANEL,
+            exists = attachment_exists(exp.attachment.sha256)
+            tk.Button(
+                left,
+                text=f"📎 {exp.attachment.filename} ({exp.attachment.size_str()})"
+                     + ("" if exists else "  ⚠ fehlt lokal"),
+                fg=BLUE if exists else FG_DIM, bg=PANEL,
                 font=FONT_SMALL, relief="flat", bd=0, cursor="hand2",
                 activebackground=PANEL, activeforeground=FG,
-                command=lambda a=att: AttachmentViewer(self, a.sha256, a.filename),
-            )
-            att_btn.pack(anchor="w")
+                command=lambda a=exp.attachment:
+                    AttachmentViewer(self, a.sha256, a.filename),
+            ).pack(anchor="w")
 
         right = tk.Frame(row, bg=PANEL)
         right.pack(side="right")
         _lbl(right, f"{exp.amount:.2f} {exp.currency}",
              fg=GREEN, font=FONT_LARGE, bg=PANEL).pack(anchor="e")
 
-        btn_row = tk.Frame(right, bg=PANEL)
-        btn_row.pack(anchor="e")
+        btn_r = tk.Frame(right, bg=PANEL)
+        btn_r.pack(anchor="e")
         if exp.payer_pubkey == self._own_pubkey:
-            _ghost(btn_row, "✎", lambda e=exp: self._edit_expense(e)).pack(side="left", padx=2)
-        _ghost(btn_row, "✕", lambda e=exp: self._delete_expense(e)).pack(side="left", padx=2)
+            _ghost(btn_r, "✎", lambda e=exp: self._edit_expense(e)).pack(side="left", padx=2)
+        _ghost(btn_r, "✕", lambda e=exp: self._delete_expense(e)).pack(side="left", padx=2)
 
         _div(self._expense_list).pack(fill="x")
 
@@ -845,15 +952,14 @@ class App(tk.Tk):
         from ledger import get_settlements
         for w in self._debt_frame.winfo_children():
             w.destroy()
-        settlements = get_settlements(expenses)
-        pk_to_name  = {m.pubkey: m.display_name for m in members}
+        pk_to_name = {m.pubkey: m.display_name for m in members}
 
         def name(pk): return pk_to_name.get(pk, pk[:8] + "…")
 
+        settlements = get_settlements(expenses)
         if not settlements:
             _lbl(self._debt_frame, "Alle quitt ✓",
-                 fg=GREEN, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
-            return
+                 fg=GREEN, font=FONT_SMALL, bg=PANEL).pack(anchor="w"); return
         for s in settlements:
             is_me_d = s.debtor   == self._own_pubkey
             is_me_c = s.creditor == self._own_pubkey
@@ -863,7 +969,8 @@ class App(tk.Tk):
             _lbl(f, f"{name(s.debtor)} → {name(s.creditor)}",
                  fg=color, font=FONT_SMALL, bg=PANEL,
                  wraplength=180, justify="left").pack(anchor="w")
-            _lbl(f, f"{s.amount:.2f} EUR", fg=color, font=FONT_BOLD, bg=PANEL).pack(anchor="w")
+            _lbl(f, f"{s.amount:.2f} {self._group_currency}",
+                 fg=color, font=FONT_BOLD, bg=PANEL).pack(anchor="w")
 
 
 # ---------------------------------------------------------------------------

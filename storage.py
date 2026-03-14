@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE INDEX IF NOT EXISTS idx_expenses_ts ON expenses(timestamp);
 """
 
+# Exchange-Rate-Schema kommt aus currency.py
+from currency import RATES_DDL as _RATES_DDL
+_DDL = _DDL + "\n" + _RATES_DDL
+
 
 def init_db(db_path: str = "splitp2p.db") -> sqlite3.Connection:
     os.makedirs(STORAGE_DIR, exist_ok=True)

@@ -98,15 +98,17 @@ class Expense:
     """
     id: str
     description: str
-    amount: float
-    currency: str
+    amount: float              # Betrag in der Gruppenwährung (ggf. konvertiert)
+    currency: str              # Gruppenwährung
     payer_pubkey: str
-    splits: list[Split]
+    splits: list[Split]        # Anteile in Gruppenwährung
     timestamp: int
     signature: str
     is_deleted: bool = False
     note: str = ""
     attachment: Optional[Attachment] = None
+    original_amount: Optional[float] = None    # Originalbetrag (falls andere Währung)
+    original_currency: Optional[str] = None    # Originalwährung
 
     @classmethod
     def create(
@@ -118,6 +120,8 @@ class Expense:
         splits: list[Split],
         note: str = "",
         attachment: Optional[Attachment] = None,
+        original_amount: Optional[float] = None,
+        original_currency: Optional[str] = None,
     ) -> "Expense":
         return cls(
             id=str(uuid.uuid4()),
@@ -130,6 +134,8 @@ class Expense:
             signature="",
             note=note,
             attachment=attachment,
+            original_amount=original_amount,
+            original_currency=original_currency,
         )
 
     def canonical_bytes(self) -> bytes:
