@@ -1878,6 +1878,10 @@ class App(tk.Tk):
         self._group_salt     = b""  # 16 zufällige Bytes, mit Gruppe gespeichert
         self._group_currency = "EUR"
         self._lamport_clock  = 0    # lokale Lamport-Uhr
+        # Ledger-Cache: Salden + Settlements nur neu berechnen wenn noetig
+        self._ledger_cache_key = None
+        self._cached_balances  = {}
+        self._cached_debts     = []
         self._rates: dict    = {}
         self._network        = None
         # Aktivitäts-Log (in-memory, max. 500 Einträge)
@@ -2037,6 +2041,32 @@ class App(tk.Tk):
         """Naechsten Lamport-Timestamp berechnen: local = max(local, received) + 1."""
         self._lamport_clock = max(self._lamport_clock, received) + 1
         return self._lamport_clock
+
+    def _invalidate_cache(self) -> None:
+        """Ledger-Cache loeschen. Wird bei jeder Datenaenderung aufgerufen."""
+        self._ledger_cache_key = None
+
+    def _get_cached_ledger(
+            self,
+            expenses: list,
+            settlements: list,
+    ) -> tuple:
+        """
+        Gibt (balances, debts) zurueck.
+        Berechnet nur neu wenn sich der Cache-Key geaendert hat.
+        """
+        from ledger import ledger_cache_key, compute_balances, compute_settlements
+        key = ledger_cache_key(expenses, settlements)
+        if key != self._ledger_cache_key:
+            self._cached_balances  = compute_balances(expenses, settlements)
+            self._cached_debts     = compute_settlements(self._cached_balances)
+            self._ledger_cache_key = key
+            # Cache-Miss loggen (nur im Debug-Modus sichtbar)
+            import logging as _log
+            _log.getLogger(__name__).debug(
+                "Ledger cache miss: %d expenses + %d settlements",
+                len(expenses), len(settlements))
+        return self._cached_balances, self._cached_debts
 
     @staticmethod
     def _default_paths() -> dict:
@@ -2489,10 +2519,10 @@ class App(tk.Tk):
                 _lbl(row, "(du)", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
 
     def _render_balance(self, expenses, settlements, members):
-        from ledger import compute_balances, balance_summary
+        from ledger import balance_summary
         for w in self._balance_frame.winfo_children(): w.destroy()
-        balances = compute_balances(expenses, settlements)
-        info     = balance_summary(self._own_pubkey, balances)
+        balances, _ = self._get_cached_ledger(expenses, settlements)
+        info        = balance_summary(self._own_pubkey, balances)
         net = info["net"]
 
         if abs(net) < 0.01:
@@ -2516,12 +2546,11 @@ class App(tk.Tk):
             pass  # Detailed per-person breakdown kept in debt section
 
     def _render_debts(self, expenses, settlements, members):
-        from ledger import get_settlements
         for w in self._debt_frame.winfo_children(): w.destroy()
         pk_to_name = {m.pubkey: m.display_name for m in members}
         def name(pk): return pk_to_name.get(pk, pk[:8] + "…")
 
-        sugg = get_settlements(expenses, settlements)
+        _, sugg = self._get_cached_ledger(expenses, settlements)
         if not sugg:
             _lbl(self._debt_frame, "Alle quitt ✓",
                  fg=GREEN, font=FONT_SMALL, bg=PANEL).pack(anchor="w"); return

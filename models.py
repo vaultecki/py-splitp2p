@@ -233,8 +233,8 @@ class RecordedSettlement:
     amount: float
     currency: str
     timestamp: int      # CRDT-Uhr
-    lamport_clock: int = 0     # Lamport-Uhr - primaere CRDT-Ordnung
     signature: str      # Ed25519 ueber canonical_bytes(), signiert von from_pubkey
+    lamport_clock: int = 0     # Lamport-Uhr - primaere CRDT-Ordnung
     settlement_date: int = 0   # Anzeige-Datum (UTC-Tagesbeginn), 0 = timestamp
     is_deleted: bool = False
     note: str = ""

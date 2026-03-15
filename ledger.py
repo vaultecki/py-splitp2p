@@ -16,6 +16,28 @@ from models import Expense, RecordedSettlement, Member
 
 
 # ---------------------------------------------------------------------------
+# Cache-Key
+# ---------------------------------------------------------------------------
+
+def ledger_cache_key(
+        expenses: Sequence[Expense],
+        recorded: Sequence[RecordedSettlement] = (),
+) -> int:
+    """
+    Schneller Cache-Schluessel fuer den aktuellen Ledger-Zustand.
+
+    Berechnet einen Hash ueber (id, timestamp, is_deleted) aller Eintraege.
+    Aendert sich genau dann wenn sich der Inhalt aendert.
+    Nutzt Pythons eingebautes hash() - ausreichend fuer In-Process-Cache.
+    """
+    return hash(tuple(
+        (e.id, e.timestamp, e.is_deleted, e.lamport_clock) for e in expenses
+    ) + tuple(
+        (s.id, s.timestamp, s.is_deleted, s.lamport_clock) for s in recorded
+    ))
+
+
+# ---------------------------------------------------------------------------
 # Saldo-Berechnung
 # ---------------------------------------------------------------------------
 
