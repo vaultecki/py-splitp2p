@@ -124,28 +124,54 @@ class P2PNetwork:
             from libp2p import new_host
             from libp2p.pubsub import gossipsub
             from libp2p.pubsub.pubsub import Pubsub
+            import multiaddr
         except ImportError:
             logger.warning("libp2p not installed – offline mode")
             self.callbacks.on_status_changed(False, "offline-mode")
             return
 
-        self._host   = new_host()
-        gossip       = gossipsub.GossipSub(["/meshsub/1.1.0"])
+        # listen_addrs: zufälliger TCP-Port, alle Interfaces
+        listen_addrs = [multiaddr.Multiaddr("/ip4/0.0.0.0/tcp/0")]
+
+        # mDNS und Bootstrap direkt in new_host (ab py-libp2p 0.3+)
+        try:
+            self._host = new_host(
+                listen_addrs=listen_addrs,
+                enable_mDNS=True,
+                bootstrap=IPFS_BOOTSTRAP,
+            )
+            logger.info("Using new_host() with built-in mDNS + bootstrap")
+        except TypeError:
+            # Ältere API ohne diese Parameter
+            self._host = new_host()
+            logger.info("Using legacy new_host() – manual discovery fallback")
+
+        gossip = gossipsub.GossipSub(
+            protocols=["/meshsub/1.1.0"],
+            degree=6,
+            degree_low=4,
+            degree_high=12,
+        )
         self._pubsub = Pubsub(self._host, gossip)
 
-        async with self._host.run():
-            peer_id   = self._host.get_id().to_string()
+        async with self._host.run(listen_addrs=listen_addrs):
+            peer_id = self._host.get_id().to_string()
             self._running = True
             logger.info("P2P node started. PeerID: %s", peer_id)
 
             self._sub = await self._pubsub.subscribe(self.topic_id)
             self._host.set_stream_handler(FILE_PROTOCOL, self._file_serve_handler)
             self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
-            self._host.get_network().notify(self._PeerNotifee(self))
+
+            # Peer-Events registrieren (API je nach Version unterschiedlich)
+            try:
+                self._host.get_network().notify(self._PeerNotifee(self))
+            except Exception as e:
+                logger.debug("notify() not available: %s", e)
 
             self.callbacks.on_status_changed(True, peer_id)
 
-            # Discovery starten (parallel, Fehler sind nicht fatal)
+            # Fallback: manuelle Discovery für ältere py-libp2p-Versionen
             asyncio.create_task(self._setup_mdns())
             asyncio.create_task(self._connect_bootstrap())
 
