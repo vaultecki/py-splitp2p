@@ -227,6 +227,7 @@ class GroupSelectDialog(tk.Toplevel):
             btn_row = tk.Frame(self, bg=BG, padx=28)
             btn_row.pack(fill="x")
             _ghost(btn_row, "+ Neue Gruppe", self._new_group).pack(side="left")
+            _ghost(btn_row, "QR importieren", self._import_qr).pack(side="left", padx=6)
             _ghost(btn_row, "Entfernen", self._remove_group).pack(side="left", padx=6)
             _btn(btn_row, "ÖFFNEN", self._confirm).pack(side="right")
             tk.Frame(self, bg=BG, height=16).pack()
@@ -246,6 +247,24 @@ class GroupSelectDialog(tk.Toplevel):
             "currency": dlg.result["group_currency"],
         }
         self.result = dlg.result
+        self.destroy()
+
+    def _import_qr(self):
+        dlg = QRImportDialog(self)
+        if not dlg.result: return
+        r = dlg.result
+        self.groups[r["name"]] = {
+            "password": r["pw"],
+            "currency": r["currency"],
+            "salt":     r["salt"],
+        }
+        import os as _os
+        self.result = {
+            "group_name":     r["name"],
+            "password":       r["pw"],
+            "group_currency": r["currency"],
+            "group_salt":     bytes.fromhex(r["salt"]),
+        }
         self.destroy()
 
     def _remove_group(self):
@@ -271,6 +290,320 @@ class GroupSelectDialog(tk.Toplevel):
 # ---------------------------------------------------------------------------
 # Attachment Viewer
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# QR-Code Dialoge: Anzeigen + Importieren
+# ---------------------------------------------------------------------------
+
+# QR-Payload-Format (JSON, base64-kodiert):
+# {
+#   "v": 1,                        # Format-Version fuer spaeteren Wandel
+#   "name": "IslandTrip",          # Gruppenname
+#   "pw": "Island2026",            # Passwort (Klartext – QR-Code ist der Schluessel)
+#   "salt": "99cafd53...",         # Salt als Hex (16 Bytes = 32 Hex-Chars)
+#   "currency": "EUR"              # Gruppenwaehrung
+# }
+# Kodiert als base64(json) -> kompakter QR-Inhalt (~120-160 Bytes)
+
+import base64 as _b64
+
+
+def _encode_group_qr(name: str, password: str, salt: bytes,
+                     currency: str) -> str:
+    """Gruppeninfo als kompakten base64-JSON-String kodieren."""
+    import json as _json
+    payload = _json.dumps({
+        "v":        1,
+        "name":     name,
+        "pw":       password,
+        "salt":     salt.hex(),
+        "currency": currency,
+    }, separators=(",", ":"), ensure_ascii=False)
+    return _b64.b64encode(payload.encode()).decode()
+
+
+def _decode_group_qr(data: str) -> dict:
+    """QR-String dekodieren. Wirft ValueError bei ungueltigen Daten."""
+    import json as _json
+    try:
+        # Versuche zuerst base64
+        decoded = _b64.b64decode(data.strip()).decode()
+    except Exception:
+        # Fallback: direkt als JSON
+        decoded = data.strip()
+    result = _json.loads(decoded)
+    if result.get("v") != 1:
+        raise ValueError(f"Unbekannte QR-Version: {result.get('v')}")
+    for key in ("name", "pw", "salt", "currency"):
+        if key not in result:
+            raise ValueError(f"Feld '{key}' fehlt im QR-Code")
+    # Salt validieren
+    bytes.fromhex(result["salt"])
+    return result
+
+
+class QRShowDialog(tk.Toplevel):
+    """
+    Zeigt den Gruppen-QR-Code an.
+
+    Bevorzugt 'qrcode'-Library fuer ein echtes QR-Bild.
+    Fallback: base64-String zum manuellen Kopieren.
+    Zweiter Fallback: ASCII-QR im Textfeld.
+    """
+
+    def __init__(self, parent, group_name: str, password: str,
+                 salt: bytes, currency: str):
+        super().__init__(parent)
+        self.title(f"QR-Code – {group_name}")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.grab_set()
+        self._payload = _encode_group_qr(group_name, password, salt, currency)
+        self._build(group_name, currency)
+        self.wait_window()
+
+    def _build(self, group_name: str, currency: str):
+        pad = dict(padx=28)
+        _lbl(self, "GRUPPE BEITRETEN", fg=GREEN, font=FONT_LARGE).pack(
+            anchor="w", pady=(20, 2), **pad)
+        _lbl(self,
+             f"{group_name}  ·  {currency}\n"
+             "Diesen QR-Code scannen um der Gruppe beizutreten.",
+             fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", **pad)
+        _div(self).pack(fill="x", padx=28, pady=8)
+
+        frm = tk.Frame(self, bg=BG, padx=28)
+        frm.pack()
+
+        # Versuche QR-Bild zu rendern
+        qr_shown = False
+
+        # Versuch 1: qrcode + Pillow -> tkinter PhotoImage
+        try:
+            import qrcode
+            from PIL import Image, ImageTk
+            qr = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=6,
+                border=3,
+            )
+            qr.add_data(self._payload)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            img = img.resize((280, 280), Image.NEAREST)
+            photo = ImageTk.PhotoImage(img)
+            lbl = tk.Label(frm, image=photo, bg=BG, relief="flat", bd=0)
+            lbl.image = photo
+            lbl.pack(pady=8)
+            qr_shown = True
+        except ImportError:
+            pass
+
+        # Versuch 2: qrcode ASCII-Art im Textfeld
+        if not qr_shown:
+            try:
+                import qrcode
+                qr = qrcode.QRCode(
+                    version=None,
+                    error_correction=qrcode.constants.ERROR_CORRECT_M,
+                    box_size=1, border=2,
+                )
+                qr.add_data(self._payload)
+                qr.make(fit=True)
+                import io
+                f = io.StringIO()
+                qr.print_ascii(out=f)
+                ascii_qr = f.getvalue()
+                txt = tk.Text(frm, bg="white", fg="black",
+                              font=("Courier New", 4),
+                              width=60, height=40,
+                              relief="flat", bd=0,
+                              state="normal")
+                txt.insert("1.0", ascii_qr)
+                txt.configure(state="disabled")
+                txt.pack(pady=8)
+                qr_shown = True
+            except ImportError:
+                pass
+
+        if not qr_shown:
+            # Kein qrcode installiert -> Hinweis
+            _lbl(frm,
+                 "pip install qrcode[pil]\nfuer QR-Bild-Anzeige",
+                 fg=AMBER, font=FONT_SMALL, bg=BG, justify="center").pack(pady=8)
+
+        # Immer: kopierbarer String als Fallback
+        _lbl(frm, "BEITRITTS-CODE (kopieren & teilen)", fg=FG_DIM,
+             font=FONT_SMALL, bg=BG).pack(anchor="w", pady=(8, 2))
+        txt_frame = tk.Frame(frm, bg=BORDER, padx=1, pady=1)
+        txt_frame.pack(fill="x")
+        payload_txt = tk.Text(txt_frame, bg=PANEL, fg=FG,
+                              font=FONT_MONO, height=4, wrap="word",
+                              relief="flat", bd=4)
+        payload_txt.insert("1.0", self._payload)
+        payload_txt.configure(state="disabled")
+        payload_txt.pack(fill="x")
+
+        btn_row = tk.Frame(self, bg=BG, padx=28, pady=16)
+        btn_row.pack(fill="x")
+
+        def _copy():
+            self.clipboard_clear()
+            self.clipboard_append(self._payload)
+            _copy_btn.configure(text="Kopiert ✓")
+            self.after(2000, lambda: _copy_btn.configure(text="In Zwischenablage kopieren"))
+
+        _copy_btn = _ghost(btn_row, "In Zwischenablage kopieren", _copy)
+        _copy_btn.pack(side="left")
+        _btn(btn_row, "Schliessen", self.destroy,
+             bg=BORDER, fg=FG_MUTED).pack(side="right")
+
+
+class QRImportDialog(tk.Toplevel):
+    """
+    QR-Code einer bestehenden Gruppe importieren.
+
+    Drei Eingabewege:
+      1. Base64-String einfuegen (immer verfuegbar)
+      2. Kamerascan via OpenCV (falls cv2 installiert)
+      3. Bild-Datei auswaehlen und mit cv2/zxing dekodieren
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Gruppe per QR-Code beitreten")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.grab_set()
+        self.result: dict = None
+        self._build()
+        self.wait_window()
+
+    def _build(self):
+        pad = dict(padx=28)
+        _lbl(self, "QR-CODE EINLESEN", fg=GREEN, font=FONT_LARGE).pack(
+            anchor="w", pady=(20, 2), **pad)
+        _lbl(self,
+             "Beitritts-Code der Gruppe einfuegen oder Kamera/Datei nutzen.",
+             fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", **pad)
+        _div(self).pack(fill="x", padx=28, pady=8)
+
+        frm = tk.Frame(self, bg=BG, padx=28)
+        frm.pack(fill="x")
+
+        _lbl(frm, "BEITRITTS-CODE EINFUEGEN", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        self._text = tk.Text(frm, bg=PANEL, fg=FG, font=FONT_MONO,
+                             height=5, wrap="word",
+                             insertbackground=GREEN, relief="flat", bd=6)
+        self._text.pack(fill="x", pady=(2, 8))
+
+        # Status-Label
+        self._status = _lbl(frm, "", fg=FG_DIM, font=FONT_SMALL, bg=BG)
+        self._status.pack(anchor="w")
+
+        btn_row = tk.Frame(self, bg=BG, padx=28, pady=12)
+        btn_row.pack(fill="x")
+
+        # Kamera-Scan (nur wenn cv2 verfuegbar)
+        try:
+            import cv2 as _cv2
+            _ghost(btn_row, "📷 Kamera scannen",
+                   self._scan_camera).pack(side="left", padx=(0, 8))
+        except ImportError:
+            pass
+
+        # Bilddatei
+        _ghost(btn_row, "🖼 Bild waehlen", self._scan_file).pack(side="left", padx=(0, 8))
+        _ghost(btn_row, "Abbrechen", self.destroy).pack(side="right", padx=(6, 0))
+        _btn(btn_row, "Importieren", self._import_text).pack(side="right")
+
+    def _set_status(self, msg: str, color: str = FG_MUTED):
+        self._status.configure(text=msg, fg=color)
+        self.update_idletasks()
+
+    def _try_decode(self, data: str) -> bool:
+        """Dekodiert und validiert den QR-Payload. Gibt True bei Erfolg zurueck."""
+        try:
+            result = _decode_group_qr(data.strip())
+            self._set_status(
+                f"✓ Gruppe erkannt: {result['name']} ({result['currency']})",
+                GREEN)
+            self.result = result
+            self.after(600, self.destroy)
+            return True
+        except Exception as e:
+            self._set_status(f"Ungueltig: {e}", RED)
+            return False
+
+    def _import_text(self):
+        data = self._text.get("1.0", "end").strip()
+        if not data:
+            self._set_status("Kein Code eingegeben.", RED); return
+        self._try_decode(data)
+
+    def _scan_camera(self):
+        """OpenCV-Kamerascan in einem separaten Thread."""
+        import threading
+        self._set_status("Kamera wird geoeffnet...", AMBER)
+        threading.Thread(target=self._camera_thread, daemon=True).start()
+
+    def _camera_thread(self):
+        try:
+            import cv2
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                self.after(0, lambda: self._set_status(
+                    "Kamera nicht gefunden.", RED))
+                return
+            detector = cv2.QRCodeDetector()
+            self.after(0, lambda: self._set_status(
+                "Kamera aktiv – QR-Code vor die Kamera halten...", AMBER))
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                data, _, _ = detector.detectAndDecode(frame)
+                if data:
+                    cap.release()
+                    self.after(0, lambda d=data: self._try_decode(d))
+                    return
+                cv2.imshow("QR-Code scannen (ESC = Abbrechen)", frame)
+                if cv2.waitKey(1) & 0xFF == 27:  # ESC
+                    break
+            cap.release()
+            cv2.destroyAllWindows()
+            self.after(0, lambda: self._set_status("Scan abgebrochen.", FG_DIM))
+        except Exception as e:
+            self.after(0, lambda: self._set_status(f"Kamera-Fehler: {e}", RED))
+
+    def _scan_file(self):
+        """QR-Code aus Bilddatei lesen."""
+        path = fd.askopenfilename(
+            title="QR-Code-Bild waehlen",
+            filetypes=[("Bilder", "*.png *.jpg *.jpeg *.gif *.webp *.bmp"),
+                       ("Alle Dateien", "*.*")],
+            parent=self)
+        if not path: return
+        try:
+            import cv2
+            img = cv2.imread(path)
+            if img is None:
+                self._set_status("Bild konnte nicht geladen werden.", RED); return
+            detector = cv2.QRCodeDetector()
+            data, _, _ = detector.detectAndDecode(img)
+            if data:
+                self._try_decode(data)
+            else:
+                self._set_status("Kein QR-Code im Bild gefunden.", RED)
+        except ImportError:
+            self._set_status(
+                "cv2 (OpenCV) fuer Bild-Scan benoetigt:\npip install opencv-python",
+                AMBER)
+        except Exception as e:
+            self._set_status(f"Scan-Fehler: {e}", RED)
+
 
 class AttachmentViewer(tk.Toplevel):
     def __init__(self, parent, sha256: str, filename: str):
@@ -1588,6 +1921,8 @@ class App(tk.Tk):
 
         _ghost(hdr, "⚙ Einstellungen", self._open_settings).pack(side="right", padx=8)
         _ghost(hdr, "🔑 Gruppe wechseln", self._switch_group).pack(side="right", padx=4)
+        _ghost(hdr, "📤 QR anzeigen", self._show_qr).pack(side="right", padx=4)
+        _ghost(hdr, "📥 QR importieren", self._import_qr).pack(side="right", padx=4)
 
     def _build_sidebar(self, paned):
         sb = tk.Frame(paned, bg=PANEL, width=250)
@@ -1805,6 +2140,41 @@ class App(tk.Tk):
         self._net_dot.configure(fg=FG_DIM)
         self._net_label.configure(text="offline")
         self._do_group_select()
+
+    def _show_qr(self):
+        """QR-Code der aktuellen Gruppe anzeigen."""
+        if not self._group_name or not self._group_pw:
+            mb.showinfo("Keine Gruppe",
+                        "Zuerst eine Gruppe oeffnen.", parent=self)
+            return
+        if not self._group_salt:
+            mb.showwarning(
+                "Kein Salt",
+                "Diese Gruppe hat keinen Salt (alte Gruppe).\n"
+                "Bitte eine neue Gruppe erstellen.", parent=self)
+            return
+        QRShowDialog(self, self._group_name, self._group_pw,
+                     self._group_salt, self._group_currency)
+
+    def _import_qr(self):
+        """QR-Code einer anderen Gruppe einlesen."""
+        dlg = QRImportDialog(self)
+        if not dlg.result: return
+        r = dlg.result
+        # Gruppe in Config speichern
+        groups = self._cfg.get("groups", {})
+        groups[r["name"]] = {
+            "password": r["pw"],
+            "currency": r["currency"],
+            "salt":     r["salt"],
+        }
+        self._cfg.set("groups", groups)
+        self._cfg.save()
+        mb.showinfo(
+            "Gruppe importiert",
+            f"Gruppe '{r['name']}' wurde importiert.\n"
+            "Wechsle zur Gruppe ueber 'Gruppe wechseln'.",
+            parent=self)
 
     def _open_settings(self, first_run=False):
         dlg = tk.Toplevel(self)

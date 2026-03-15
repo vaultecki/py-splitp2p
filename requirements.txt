@@ -24,3 +24,9 @@ matplotlib>=3.7          # Diagramme im Charts-Fenster
 
 # ── PDF-Export ───────────────────────────────────────────────────────────
 fpdf2>=2.7               # PDF-Generierung; CSV-Export funktioniert ohne
+
+# ── QR-Code ──────────────────────────────────────────────────────────────
+qrcode[pil]>=7.4       # QR-Code anzeigen (Bild); Pillow bereits oben
+                       # Ohne dieses Paket: Fallback auf kopierbaren Text-String
+opencv-python>=4.8     # QR-Code scannen (Kamera + Bilddatei)
+                       # Ohne dieses Paket: nur Text-Import verfuegbar
