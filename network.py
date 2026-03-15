@@ -117,7 +117,7 @@ class P2PNetwork:
         except Exception as e:
             logger.error("P2P thread crashed: %s", e)
         finally:
-            self.callbacks.on_status_changed(online=False, peer_id="")
+            self.callbacks.on_status_changed(False, "")
 
     async def _run(self) -> None:
         try:
@@ -126,7 +126,7 @@ class P2PNetwork:
             from libp2p.pubsub.pubsub import Pubsub
         except ImportError:
             logger.warning("libp2p not installed – offline mode")
-            self.callbacks.on_status_changed(online=False, peer_id="offline-mode")
+            self.callbacks.on_status_changed(False, "offline-mode")
             return
 
         self._host   = new_host()
@@ -143,7 +143,7 @@ class P2PNetwork:
             self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
             self._host.get_network().notify(self._PeerNotifee(self))
 
-            self.callbacks.on_status_changed(online=True, peer_id=peer_id)
+            self.callbacks.on_status_changed(True, peer_id)
 
             # Discovery starten (parallel, Fehler sind nicht fatal)
             asyncio.create_task(self._setup_mdns())
