@@ -2325,6 +2325,7 @@ class App(tk.Tk):
                     "sync", f"History-Sync: +{n_exp} Ausgaben, +{n_set} Zahlungen"))
 
         self._network = P2PNetwork(self._group_pw, _CB(self))
+        self._network.set_group_salt(self._group_salt)
         self._network.start_in_thread()
 
     def _on_net_status(self, online, peer_id):

@@ -88,9 +88,11 @@ class NetworkCallbacks:
 class P2PNetwork:
     def __init__(self, group_password: str, callbacks: NetworkCallbacks):
         from crypto import group_topic_id
-        self.topic_id   = "splitp2p-" + group_topic_id(group_password)
-        self.callbacks  = callbacks
-        self._host      = None
+        self.topic_id      = "splitp2p-" + group_topic_id(group_password)
+        self.callbacks     = callbacks
+        self._group_pw     = group_password   # für Blob-Verifikation im Netz
+        self._group_salt    = b""              # wird von gui.py gesetzt
+        self._host         = None
         self._pubsub    = None
         self._sub       = None
         self._running   = False
@@ -196,6 +198,12 @@ class P2PNetwork:
         except Exception as e:
             logger.error("P2P run error: %s", e)
             self.callbacks.on_status_changed(False, "")
+
+    def set_group_salt(self, salt: bytes) -> None:
+        """Setzt den Gruppen-Salt für die Blob-Verifikation.
+        Muss vor dem ersten eingehenden Paket gesetzt sein.
+        Wird von gui.py nach dem Gruppen-Login aufgerufen."""
+        self._group_salt = salt
 
     def stop(self) -> None:
         self._running = False
@@ -336,6 +344,60 @@ class P2PNetwork:
             except Exception as e:
                 logger.error("Receive loop error: %s", e)
 
+    def _verify_and_decode_blob(self, blob: bytes,
+                                 ptype: str) -> bool:
+        """
+        Entschlüsselt den Blob und prüft die Ed25519-Signatur.
+        Gibt True zurück wenn gültig, False wenn verworfen.
+
+        Ablauf:
+          1. AES-GCM entschlüsseln → Expense/Settlement-Objekt
+          2. Ed25519-Signatur des Payers/Senders prüfen
+          3. Nur bei Erfolg: True → Callback wird aufgerufen
+
+        Warum hier und nicht im GUI-Callback:
+          Frühe Verifikation verhindert dass manipulierte Blobs
+          überhaupt die DB oder die UI erreichen. Jeder Peer im
+          Netz könnte sonst Müll-Pakete mit gültiger topic_id senden.
+        """
+        try:
+            from crypto import (decrypt_expense, verify_expense,
+                                decrypt_settlement, verify_settlement)
+        except ImportError:
+            return True  # crypto nicht verfügbar → kein Filter
+
+        try:
+            if ptype == "expense":
+                obj = decrypt_expense(blob, self._group_pw, self._group_salt)
+                if obj is None:
+                    logger.warning("Expense-Blob nicht entschlüsselbar "
+                                   "(falscher Key oder korrupt)")
+                    return False
+                if not verify_expense(obj):
+                    logger.warning("Ungültige Signatur auf Expense %s "
+                                   "– verworfen", obj.id[:8])
+                    return False
+                logger.debug("Expense %s verifiziert OK", obj.id[:8])
+                return True
+
+            elif ptype == "settlement":
+                obj = decrypt_settlement(blob, self._group_pw, self._group_salt)
+                if obj is None:
+                    logger.warning("Settlement-Blob nicht entschlüsselbar")
+                    return False
+                if not verify_settlement(obj):
+                    logger.warning("Ungültige Signatur auf Settlement %s "
+                                   "– verworfen", obj.id[:8])
+                    return False
+                logger.debug("Settlement %s verifiziert OK", obj.id[:8])
+                return True
+
+        except Exception as e:
+            logger.warning("Verifikation Fehler (%s): %s", ptype, e)
+            return False
+
+        return True  # member-Pakete: keine Blob-Signatur, kein Filter hier
+
     async def _dispatch(self, msg) -> None:
         try:
             packet = json.loads(msg.data.decode())
@@ -344,12 +406,19 @@ class P2PNetwork:
             return
 
         ptype = packet.get("type", "expense")
-        if ptype == "expense":
-            self.callbacks.on_expense_received(
-                packet["id"], bytes.fromhex(packet["blob"]))
-        elif ptype == "settlement":
-            self.callbacks.on_settlement_received(
-                packet["id"], bytes.fromhex(packet["blob"]))
+        try:
+            blob = bytes.fromhex(packet["blob"]) if "blob" in packet else b""
+        except ValueError:
+            logger.warning("Ungültiger hex-Blob in Paket")
+            return
+
+        if ptype in ("expense", "settlement"):
+            if not self._verify_and_decode_blob(blob, ptype):
+                return  # Signatur ungültig oder falscher Key – verwerfen
+            if ptype == "expense":
+                self.callbacks.on_expense_received(packet["id"], blob)
+            else:
+                self.callbacks.on_settlement_received(packet["id"], blob)
         elif ptype == "member":
             self.callbacks.on_member_received(packet["pubkey"], packet["data"])
         else:
@@ -567,12 +636,18 @@ class P2PNetwork:
                         self.callbacks.on_history_synced(n_exp, n_set)
                         return
                     try:
-                        pkt  = json.loads(line.decode())
-                        blob = bytes.fromhex(pkt["blob"])
-                        if pkt["type"] == "expense":
+                        pkt   = json.loads(line.decode())
+                        blob  = bytes.fromhex(pkt["blob"])
+                        ptype = pkt["type"]
+                        if ptype in ("expense", "settlement"):
+                            if not self._verify_and_decode_blob(blob, ptype):
+                                logger.warning("History: Paket verworfen "
+                                               "(Signatur ungültig)")
+                                continue
+                        if ptype == "expense":
                             self.callbacks.on_expense_received(pkt["id"], blob)
                             n_exp += 1
-                        elif pkt["type"] == "settlement":
+                        elif ptype == "settlement":
                             self.callbacks.on_settlement_received(pkt["id"], blob)
                             n_set += 1
                     except Exception as e:
