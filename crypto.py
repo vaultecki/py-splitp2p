@@ -137,13 +137,19 @@ def _group_aes_key(group_password: str, group_salt: bytes) -> bytes:
     )
 
 
-def group_topic_id(group_password: str) -> str:
+def group_topic_id(group_salt: bytes) -> str:
     """
-    Kurze Topic-ID für P2P-Routing (nicht umkehrbar).
-    Kein PBKDF2 nötig – Topic-ID ist kein Verschlüsselungsschlüssel,
-    sondern nur ein Routing-Bezeichner.
+    Topic-ID fuer P2P-Routing aus dem Gruppen-Salt.
+
+    Warum Salt statt Passwort:
+      - Salt ist zufaellig (128 Bit) -> Topic-ID nicht aus Passwort ratbar.
+      - Passwort bleibt als Hash nirgendwo exponiert.
+      - Salt IST der Gruppenbezeichner; Passwort IST der Krypto-Key.
+      - Salt wird im QR-Code geteilt, ist kein Geheimnis.
     """
-    return hashlib.sha256(group_password.encode()).hexdigest()[:16]
+    if not group_salt:
+        return "legacy-no-salt"  # Rueckwaertskompatibilitaet fuer alte Gruppen
+    return hashlib.sha256(group_salt).hexdigest()[:16]
 
 
 def encrypt_expense(expense: "Expense", group_password: str,

@@ -89,8 +89,7 @@ class NetworkCallbacks:
 
 class P2PNetwork:
     def __init__(self, group_password: str, callbacks: NetworkCallbacks):
-        from crypto import group_topic_id
-        self.topic_id      = "splitp2p-" + group_topic_id(group_password)
+        self.callbacks     = callbacks
         self.callbacks     = callbacks
         self._group_pw     = group_password   # für Blob-Verifikation im Netz
         self._group_salt    = b""              # wird von gui.py gesetzt
@@ -203,10 +202,15 @@ class P2PNetwork:
             self.callbacks.on_status_changed(False, "")
 
     def set_group_salt(self, salt: bytes) -> None:
-        """Setzt den Gruppen-Salt für die Blob-Verifikation.
-        Muss vor dem ersten eingehenden Paket gesetzt sein.
-        Wird von gui.py nach dem Gruppen-Login aufgerufen."""
+        """
+        Setzt den Gruppen-Salt und leitet daraus die Topic-ID ab.
+        Muss VOR start_in_thread() aufgerufen werden.
+        Topic-ID = SHA256(salt)[:16] - zufaellig, nicht aus Passwort ratbar.
+        """
+        from crypto import group_topic_id
         self._group_salt = salt
+        self.topic_id    = "splitp2p-" + group_topic_id(salt)
+        logger.info("Topic-ID gesetzt: %s", self.topic_id)
 
     def stop(self) -> None:
         self._running = False
