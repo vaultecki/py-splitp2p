@@ -88,7 +88,7 @@ class NetworkCallbacks:
 
 class P2PNetwork:
     def __init__(self, group_password: str, callbacks: NetworkCallbacks):
-        from currency import group_topic_id
+        from crypto import group_topic_id
         self.topic_id   = "splitp2p-" + group_topic_id(group_password)
         self.callbacks  = callbacks
         self._host      = None

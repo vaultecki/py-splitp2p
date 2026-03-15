@@ -129,7 +129,7 @@ class DatePickerFrame(tk.Frame):
 # Group Dialogs
 # ---------------------------------------------------------------------------
 
-class NewGroupDialog(tk.Toplevel):
+class NewGroupDialog(tk.Toplevel):  # _name_var statt _name wegen py3.14
     def __init__(self, parent, default_name=""):
         super().__init__(parent)
         self.title("Neue Gruppe")
@@ -154,8 +154,8 @@ class NewGroupDialog(tk.Toplevel):
         frm.pack(fill="x")
 
         _lbl(frm, "GRUPPENNAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
-        self._name = tk.StringVar(value=default_name)
-        tk.Entry(frm, textvariable=self._name, font=FONT, bg=PANEL, fg=FG,
+        self._name_var = tk.StringVar(value=default_name)
+        tk.Entry(frm, textvariable=self._name_var, font=FONT, bg=PANEL, fg=FG,
                  insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=(2, 8))
 
         _lbl(frm, "GEMEINSAMES GRUPPENPASSWORT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
@@ -174,7 +174,7 @@ class NewGroupDialog(tk.Toplevel):
         _btn(btn_row, "ERSTELLEN / BEITRETEN", self._confirm).pack(side="right")
 
     def _confirm(self):
-        name = self._name.get().strip()
+        name = self._name_var.get().strip()
         pw   = self._pw.get().strip()
         if not name:
             mb.showerror("Fehler", "Gruppenname fehlt.", parent=self); return
@@ -848,9 +848,9 @@ class AddMemberDialog(tk.Toplevel):
         frm = tk.Frame(self, bg=BG, padx=24, pady=12)
         frm.pack(fill="x")
         _lbl(frm, "NAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
-        self._name = tk.Entry(frm, font=FONT, bg=PANEL, fg=FG,
-                              insertbackground=GREEN, relief="flat", bd=6)
-        self._name.pack(fill="x", pady=4)
+        self._name_entry = tk.Entry(frm, font=FONT, bg=PANEL, fg=FG,
+                                    insertbackground=GREEN, relief="flat", bd=6)
+        self._name_entry.pack(fill="x", pady=4)
         _lbl(frm, "PUBLIC KEY (leer = temporärer Key)", fg=FG_DIM, font=FONT_SMALL).pack(
             anchor="w", pady=(8, 0))
         self._pk = tk.Entry(frm, font=FONT_MONO, bg=PANEL, fg=FG_MUTED,
@@ -862,7 +862,7 @@ class AddMemberDialog(tk.Toplevel):
         _btn(btn_row, "Hinzufügen", self._save).pack(side="right")
 
     def _save(self):
-        name = self._name.get().strip()
+        name = self._name_entry.get().strip()
         if not name:
             mb.showerror("Fehler", "Name fehlt.", parent=self); return
         self.result = {"name": name, "pubkey": self._pk.get().strip() or None}
@@ -2298,7 +2298,7 @@ class App(tk.Tk):
             def on_status_changed(self2, online, pid):
                 self2._app.after(0, lambda: self2._app._on_net_status(online, pid))
                 self2._app.after(0, lambda: self2._app._append_log(
-                    "net", f"Status: {'online' if online else 'offline'}"  
+                    "net", f"Status: {'online' if online else 'offline'}"
                            + (f"  id={pid[:16]}…" if online else "")))
             def on_file_received(self2, sha256):
                 self2._app.after(0, self2._app._refresh)
