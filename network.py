@@ -15,6 +15,12 @@ Drei Protokolle:
   /splitp2p/sync/1.0     – GossipSub (Expenses, Settlements, Members)
   /splitp2p/files/1.0    – Direkt-Stream: SHA-256-Anfrage → Binärdaten
   /splitp2p/history/1.0  – Direkt-Stream: Delta-Sync beim Peer-Connect
+
+NAT-Traversal-Stack (alle optional, graceful fallback):
+  AutoNAT           – Erkennt ob wir hinter NAT/Firewall sind
+  Circuit Relay v2  – Verbindungen über öffentliche IPFS-Relay-Nodes
+  Kademlia DHT      – Topic-ID im weltweiten DHT advertisen und suchen;
+                      findet Gruppenmitglieder ohne direktes Treffen
 """
 
 from __future__ import annotations
@@ -96,6 +102,10 @@ class P2PNetwork:
         #   {"cmd": "req_history"}
         #   {"cmd": "stop"}
         self._cmd_queue: _queue.SimpleQueue = _queue.SimpleQueue()
+        self._dht        = None
+        self._autonat    = None
+        self._relay      = None
+        self._behind_nat = True  # konservativ bis AutoNAT prüft
         os.makedirs("storage", exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -243,6 +253,73 @@ class P2PNetwork:
                 logger.debug("Bootstrap %s failed: %s", addr_str[-30:], e)
 
         logger.info("Bootstrap: %d/%d nodes reached", connected, len(IPFS_BOOTSTRAP))
+
+        # Nach Bootstrap: DHT + NAT-Traversal starten
+        await self._setup_nat_traversal()
+
+    async def _setup_nat_traversal(self) -> None:
+        """
+        Aktiviert AutoNAT, Circuit Relay v2 und Kademlia DHT.
+        Alle drei sind optional – fehlendes Modul → graceful skip.
+
+        AutoNAT:      erkennt ob wir direkt erreichbar sind.
+        Circuit Relay: falls NAT erkannt → Reservierung bei IPFS-Relay-Nodes.
+        Kademlia DHT: advertise + find topic_id im globalen Netz;
+                      Peers selber Gruppe finden sich ohne Bootstrap.
+        """
+        import trio
+
+        # ── Kademlia DHT ────────────────────────────────────────────
+        try:
+            from libp2p.kademlia.network import KademliaServer
+            self._dht = KademliaServer(self._host)
+            await self._dht.bootstrap(
+                [(peer_id, addr)
+                 for peer_id, addr in self._host.get_peerstore()
+                 .peer_ids()[:8]]
+            ) if hasattr(self._dht, 'bootstrap') else None
+            # Topic-ID im DHT advertisen (Peers selber Gruppe finden uns)
+            await self._dht.set(self.topic_id,
+                                self._host.get_id().to_string())
+            logger.info("Kademlia DHT aktiv, topic advertised")
+            # Andere Peers suchen die dieselbe Gruppe advertisen
+            result = await self._dht.get(self.topic_id)
+            if result:
+                logger.info("DHT: Gruppen-Peer gefunden: %s", str(result)[:40])
+        except ImportError:
+            logger.debug("libp2p.kademlia nicht verfügbar – DHT übersprungen")
+        except Exception as e:
+            logger.warning("Kademlia DHT Fehler: %s", e)
+
+        # ── AutoNAT ─────────────────────────────────────────────────
+        try:
+            from libp2p.autonat import AutoNATService
+            self._autonat = AutoNATService(self._host)
+            with trio.move_on_after(15):
+                reachability = await self._autonat.probe_reachability()
+            logger.info("AutoNAT: %s", reachability)
+            self._behind_nat = reachability != "public"
+        except ImportError:
+            logger.debug("libp2p.autonat nicht verfügbar – AutoNAT übersprungen")
+            self._behind_nat = True  # konservativ annehmen
+        except Exception as e:
+            logger.warning("AutoNAT Fehler: %s", e)
+            self._behind_nat = True
+
+        # ── Circuit Relay v2 (nur wenn hinter NAT) ──────────────────
+        if getattr(self, '_behind_nat', True):
+            try:
+                from libp2p.relay.circuit_v2 import CircuitRelayV2Client
+                self._relay = CircuitRelayV2Client(self._host)
+                # Reservierung bei einem der verbundenen Bootstrap-Peers
+                with trio.move_on_after(20):
+                    await self._relay.reserve()
+                logger.info("Circuit Relay v2: Reservierung aktiv")
+            except ImportError:
+                logger.debug("Circuit Relay v2 nicht verfügbar")
+            except Exception as e:
+                logger.warning("Circuit Relay v2 Fehler: %s", e)
+
 
     # ------------------------------------------------------------------
     # GossipSub – Empfangen
