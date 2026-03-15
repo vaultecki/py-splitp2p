@@ -1,7 +1,7 @@
 # SplitP2P
 
 Dezentraler Splitwise-Klon ohne zentralen Server.  
-Ausgaben werden lokal verschlüsselt gespeichert, automatisch zwischen Peers synchronisiert, Dateianhänge peer-to-peer übertragen und Schulden automatisch minimiert.
+Ausgaben werden lokal gespeichert, automatisch zwischen Peers synchronisiert, Dateianhänge peer-to-peer übertragen und Schulden automatisch minimiert.
 
 ---
 
