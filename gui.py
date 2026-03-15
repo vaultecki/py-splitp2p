@@ -2008,14 +2008,25 @@ class App(tk.Tk):
         self._refresh()
 
     def _edit_expense(self, expense):
+        # Nur der urspruengliche Eintraeger darf bearbeiten
+        if expense.payer_pubkey != self._own_pubkey:
+            mb.showerror(
+                "Keine Berechtigung",
+                "Nur der urspruengliche Eintraeger kann diese Ausgabe bearbeiten.",
+                parent=self)
+            return
         from storage import load_all_members
         dlg = ExpenseDialog(self, load_all_members(self._db),
                             self._own_pubkey, self._group_currency,
                             self._rates, expense)
         if not dlg.result: return
         from models import Expense
+        # payer_pubkey bleibt unveraenderlich – er ist Teil der Signatur.
+        # Wer den Public Key nicht hat, kann keinen gueltigen Edit signieren.
+        result = dlg.result
+        result['payer_pubkey'] = expense.payer_pubkey
         updated = Expense(id=expense.id, timestamp=int(time.time()),
-                          signature="", **dlg.result)
+                          signature="", **result)
         self._save_expense(updated)
         self._append_log('info',
             f"Ausgabe bearbeitet: '{updated.description}' "
@@ -2023,6 +2034,12 @@ class App(tk.Tk):
         self._refresh()
 
     def _delete_expense(self, expense):
+        if expense.payer_pubkey != self._own_pubkey:
+            mb.showerror(
+                "Keine Berechtigung",
+                "Nur der urspruengliche Eintraeger kann diese Ausgabe loeschen.",
+                parent=self)
+            return
         if not mb.askyesno("Löschen", f"'{expense.description}' löschen?", parent=self): return
         from crypto import sign_expense, encrypt_expense
         from storage import soft_delete_expense_blob
@@ -2265,7 +2282,10 @@ class App(tk.Tk):
         btn_r.pack(anchor="e")
         if exp.payer_pubkey == self._own_pubkey:
             _ghost(btn_r, "✎", lambda e=exp: self._edit_expense(e)).pack(side="left", padx=2)
-        _ghost(btn_r, "✕", lambda e=exp: self._delete_expense(e)).pack(side="left", padx=2)
+            _ghost(btn_r, "✕", lambda e=exp: self._delete_expense(e)).pack(side="left", padx=2)
+        else:
+            # Nur lesend: kein Edit/Delete fuer fremde Ausgaben
+            _lbl(btn_r, "(nur lesen)", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left", padx=4)
 
         _div(self._event_list).pack(fill="x")
 

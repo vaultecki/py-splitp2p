@@ -377,6 +377,32 @@ class P2PNetwork:
                     logger.warning("Ungültige Signatur auf Expense %s "
                                    "– verworfen", obj.id[:8])
                     return False
+                # Creator-Integritaet: payer_pubkey unveraenderlich.
+                # Ed25519-Signatur garantiert das bereits kryptografisch --
+                # ein Angreifer koennte obj.payer_pubkey nicht aendern ohne
+                # die Signatur zu brechen. Dieser Check ist Defense-in-Depth:
+                # Er fangt den Fall ab, dass jemand einen neuen Blob mit
+                # geaendertem payer_pubkey aber gueltigem eigenem Key signiert.
+                try:
+                    from storage import DB_PATH as _dbp
+                    import sqlite3 as _sq
+                    _c = _sq.connect(_dbp, check_same_thread=False)
+                    _r = _c.execute(
+                        "SELECT blob FROM expenses WHERE id = ? AND is_deleted = 0",
+                        (obj.id,)
+                    ).fetchone()
+                    _c.close()
+                    if _r:
+                        existing = decrypt_expense(
+                            bytes(_r[0]), self._group_pw, self._group_salt)
+                        if existing and existing.payer_pubkey != obj.payer_pubkey:
+                            logger.warning(
+                                "Expense %s: payer_pubkey geaendert – verworfen",
+                                obj.id[:8])
+                            return False
+                except Exception as _e:
+                    logger.debug("Creator-Check DB-Fehler: %s", _e)
+
                 logger.debug("Expense %s verifiziert OK", obj.id[:8])
                 return True
 
