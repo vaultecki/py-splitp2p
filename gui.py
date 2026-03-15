@@ -180,8 +180,10 @@ class NewGroupDialog(tk.Toplevel):  # _name_var statt _name wegen py3.14
             mb.showerror("Fehler", "Gruppenname fehlt.", parent=self); return
         if len(pw) < 4:
             mb.showerror("Fehler", "Passwort mind. 4 Zeichen.", parent=self); return
+        import os as _os
         self.result = {"group_name": name, "password": pw,
-                       "group_currency": self._currency.get()}
+                       "group_currency": self._currency.get(),
+                       "group_salt": _os.urandom(16)}
         self.destroy()
 
 
@@ -261,7 +263,8 @@ class GroupSelectDialog(tk.Toplevel):
             mb.showerror("Fehler", "Keine Gruppe ausgewählt.", parent=self); return
         info = self.groups[name]
         self.result = {"group_name": name, "password": info["password"],
-                       "group_currency": info.get("currency", "EUR")}
+                       "group_currency": info.get("currency", "EUR"),
+                       "group_salt": None}  # wird in _do_group_select aus Config geladen
         self.destroy()
 
 
@@ -1539,6 +1542,7 @@ class App(tk.Tk):
         self._own_name       = ""
         self._group_name     = ""
         self._group_pw       = ""
+        self._group_salt     = b""  # 16 zufällige Bytes, mit Gruppe gespeichert
         self._group_currency = "EUR"
         self._rates: dict    = {}
         self._network        = None
@@ -1756,8 +1760,16 @@ class App(tk.Tk):
         self._group_name     = dlg.result["group_name"]
         self._group_pw       = dlg.result["password"]
         self._group_currency = dlg.result["group_currency"]
+        # Salt: aus result (neue Gruppe) oder aus bestehender Config
+        raw_salt = dlg.result.get("group_salt")
+        if raw_salt is None:
+            # Bestehende Gruppe: salt aus Config laden
+            salt_hex = groups.get(self._group_name, {}).get("salt", "")
+            raw_salt = bytes.fromhex(salt_hex) if salt_hex else b""
+        self._group_salt = raw_salt
         groups[self._group_name] = {"password": self._group_pw,
-                                    "currency": self._group_currency}
+                                    "currency": self._group_currency,
+                                    "salt": self._group_salt.hex()}
         self._cfg.set("groups", groups)
         self._cfg.set("last_group", self._group_name)
         self._cfg.save()
@@ -1778,8 +1790,9 @@ class App(tk.Tk):
 
     def _switch_group(self):
         self.withdraw()
-        self._group_pw = ""
-        self._rates    = {}
+        self._group_pw   = ""
+        self._group_salt = b""
+        self._rates      = {}
         if self._network:
             self._network.stop()
             self._network = None
@@ -1939,19 +1952,19 @@ class App(tk.Tk):
         from storage import load_all_expense_blobs
         from crypto import decrypt_expense
         return [exp for _, blob in load_all_expense_blobs(self._db)
-                if (exp := decrypt_expense(blob, self._group_pw)) is not None]
+                if (exp := decrypt_expense(blob, self._group_pw, self._group_salt)) is not None]
 
     def _load_settlements(self):
         from storage import load_all_settlement_blobs
         from crypto import decrypt_settlement
         return [s for _, blob in load_all_settlement_blobs(self._db)
-                if (s := decrypt_settlement(blob, self._group_pw)) is not None]
+                if (s := decrypt_settlement(blob, self._group_pw, self._group_salt)) is not None]
 
     def _save_expense(self, expense):
         from crypto import sign_expense, encrypt_expense
         from storage import save_expense_blob
         expense.signature = sign_expense(expense, self._own_key)
-        blob = encrypt_expense(expense, self._group_pw)
+        blob = encrypt_expense(expense, self._group_pw, self._group_salt)
         save_expense_blob(self._db, expense.id, blob, expense.timestamp)
         if self._network:
             self._network.publish_expense(expense.id, blob, expense.timestamp)
@@ -1960,7 +1973,7 @@ class App(tk.Tk):
         from crypto import sign_settlement, encrypt_settlement
         from storage import save_settlement_blob
         settlement.signature = sign_settlement(settlement, self._own_key)
-        blob = encrypt_settlement(settlement, self._group_pw)
+        blob = encrypt_settlement(settlement, self._group_pw, self._group_salt)
         save_settlement_blob(self._db, settlement.id, blob, settlement.timestamp)
         if self._network:
             self._network.publish_settlement(settlement.id, blob, settlement.timestamp)
@@ -2004,7 +2017,7 @@ class App(tk.Tk):
         expense.is_deleted = True
         expense.timestamp  = int(time.time())
         expense.signature  = sign_expense(expense, self._own_key)
-        blob = encrypt_expense(expense, self._group_pw)
+        blob = encrypt_expense(expense, self._group_pw, self._group_salt)
         soft_delete_expense_blob(self._db, expense.id, blob, expense.timestamp)
         if self._network:
             self._network.publish_expense(expense.id, blob, expense.timestamp)
@@ -2040,7 +2053,7 @@ class App(tk.Tk):
         settlement.is_deleted = True
         settlement.timestamp  = int(time.time())
         settlement.signature  = sign_settlement(settlement, self._own_key)
-        blob = encrypt_settlement(settlement, self._group_pw)
+        blob = encrypt_settlement(settlement, self._group_pw, self._group_salt)
         soft_delete_settlement_blob(self._db, settlement.id, blob, settlement.timestamp)
         if self._network:
             self._network.publish_settlement(settlement.id, blob, settlement.timestamp)
@@ -2338,7 +2351,7 @@ class App(tk.Tk):
     def _on_net_expense(self, expense_id, blob):
         from storage import save_expense_blob
         from crypto import decrypt_expense
-        exp = decrypt_expense(blob, self._group_pw)
+        exp = decrypt_expense(blob, self._group_pw, self._group_salt)
         if exp is None: return
         if not save_expense_blob(self._db, exp.id, blob, exp.timestamp, exp.is_deleted):
             return
@@ -2351,7 +2364,7 @@ class App(tk.Tk):
     def _on_net_settlement(self, settlement_id, blob):
         from storage import save_settlement_blob
         from crypto import decrypt_settlement
-        s = decrypt_settlement(blob, self._group_pw)
+        s = decrypt_settlement(blob, self._group_pw, self._group_salt)
         if s is None: return
         if save_settlement_blob(self._db, s.id, blob, s.timestamp, s.is_deleted):
             self._refresh()

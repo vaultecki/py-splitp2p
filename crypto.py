@@ -9,9 +9,17 @@ Zwei Ebenen:
   2. AES-256-GCM – alle Ausgaben einer Gruppe werden mit dem
      Gruppenpasswort verschlüsselt (Vertraulichkeit zwischen Gruppen)
 
+Schlüsselableitung:
+  AES-Key: PBKDF2-HMAC-SHA256 (600_000 Iterationen, zufälliger 16-Byte-Salt
+           pro Gruppe). Der Salt wird beim Erstellen der Gruppe generiert und
+           zusammen mit Passwort und Topic-ID über den QR-Code geteilt.
+           Deutlich teurer als roher SHA256, verhindert Rainbow-Table-Angriffe.
+  Topic-ID: SHA256(passwort)[:16] – kein Salt nötig, nur zur P2P-Routing-
+            Identifikation, kein kryptografisches Geheimnis.
+
 Ablauf beim Speichern einer Ausgabe:
   expense  →  canonical JSON  →  Ed25519-Signatur
-  expense.to_dict()  →  AES-GCM(group_key)  →  verschlüsselter Blob in DB
+  expense.to_dict()  →  AES-GCM(pbkdf2_key)  →  verschlüsselter Blob in DB
 
 Ablauf beim Laden:
   verschlüsselter Blob  →  AES-GCM-Entschlüsselung  →  Expense.from_dict()
@@ -93,17 +101,53 @@ def verify_expense(expense: "Expense") -> bool:
 # AES-256-GCM – Gruppenverschlüsselung
 # ---------------------------------------------------------------------------
 
-def _group_aes_key(group_password: str) -> bytes:
-    """Leitet einen 32-Byte AES-Schlüssel aus dem Gruppenpasswort ab."""
-    return hashlib.sha256(group_password.encode("utf-8")).digest()
+# PBKDF2-Iterationen: 600_000 ist der OWASP-empfohlene Mindestwert (2024)
+# für PBKDF2-HMAC-SHA256. Das ergibt ~0.2s auf moderner Hardware –
+# akzeptabel beim App-Start, teuer für Brute-Force-Angriffe.
+_PBKDF2_ITERATIONS = 600_000
+
+
+def generate_group_salt() -> bytes:
+    """
+    Erzeugt einen kryptografisch sicheren 16-Byte-Salt für eine neue Gruppe.
+    Wird einmalig beim Erstellen der Gruppe generiert und über den
+    QR-Code an alle Mitglieder verteilt.
+    """
+    return os.urandom(16)
+
+
+def _group_aes_key(group_password: str, group_salt: bytes) -> bytes:
+    """
+    Leitet einen 32-Byte AES-Schlüssel via PBKDF2-HMAC-SHA256 ab.
+
+    group_salt: zufälliger 16-Byte-Salt, einmalig pro Gruppe generiert
+                und über QR-Code geteilt. Verhindert Rainbow-Table-Angriffe
+                und stärkt die Isolation zwischen Gruppen.
+
+    Warum PBKDF2 statt Scrypt:
+      PBKDF2 ist in der Python-Stdlib verfügbar (hashlib), Scrypt braucht
+      OpenSSL >= 1.1. Beide sind für diesen Use-Case ausreichend.
+    """
+    return hashlib.pbkdf2_hmac(
+        hash_name="sha256",
+        password=group_password.encode("utf-8"),
+        salt=group_salt,
+        iterations=_PBKDF2_ITERATIONS,
+        dklen=32,
+    )
 
 
 def group_topic_id(group_password: str) -> str:
-    """Kurze Topic-ID für P2P-Routing (nicht umkehrbar)."""
+    """
+    Kurze Topic-ID für P2P-Routing (nicht umkehrbar).
+    Kein PBKDF2 nötig – Topic-ID ist kein Verschlüsselungsschlüssel,
+    sondern nur ein Routing-Bezeichner.
+    """
     return hashlib.sha256(group_password.encode()).hexdigest()[:16]
 
 
-def encrypt_expense(expense: "Expense", group_password: str) -> bytes:
+def encrypt_expense(expense: "Expense", group_password: str,
+                    group_salt: bytes = b"") -> bytes:
     """
     Serialisiert und verschlüsselt eine Ausgabe mit dem Gruppenkey.
 
@@ -111,7 +155,7 @@ def encrypt_expense(expense: "Expense", group_password: str) -> bytes:
     Das Ergebnis ist ein undurchsichtiger Blob — ohne das Passwort
     sind weder Beschreibung, Betrag noch Beteiligte erkennbar.
     """
-    key  = _group_aes_key(group_password)
+    key  = _group_aes_key(group_password, group_salt)
     aes  = AESGCM(key)
     data = json.dumps(expense.to_dict(), ensure_ascii=False).encode()
     nonce = os.urandom(12)
@@ -119,7 +163,8 @@ def encrypt_expense(expense: "Expense", group_password: str) -> bytes:
     return nonce + ciphertext
 
 
-def decrypt_expense(blob: bytes, group_password: str) -> Optional["Expense"]:
+def decrypt_expense(blob: bytes, group_password: str,
+                    group_salt: bytes = b"") -> Optional["Expense"]:
     """
     Entschlüsselt einen Blob und gibt eine Expense zurück.
     Gibt None zurück wenn das Passwort falsch ist oder der Blob korrupt ist.
@@ -128,7 +173,7 @@ def decrypt_expense(blob: bytes, group_password: str) -> Optional["Expense"]:
     if len(blob) < 28:   # 12 nonce + mindestens 16 GCM-Tag
         return None
     try:
-        key   = _group_aes_key(group_password)
+        key   = _group_aes_key(group_password, group_salt)
         aes   = AESGCM(key)
         nonce = blob[:12]
         ct    = blob[12:]
@@ -193,22 +238,24 @@ def verify_settlement(settlement) -> bool:
         return False
 
 
-def encrypt_settlement(settlement, group_password: str) -> bytes:
+def encrypt_settlement(settlement, group_password: str,
+                       group_salt: bytes = b"") -> bytes:
     """Serialisiert und verschlüsselt eine Zahlung."""
-    key   = _group_aes_key(group_password)
+    key   = _group_aes_key(group_password, group_salt)
     aes   = AESGCM(key)
     data  = json.dumps(settlement.to_dict(), ensure_ascii=False).encode()
     nonce = os.urandom(12)
     return nonce + aes.encrypt(nonce, data, None)
 
 
-def decrypt_settlement(blob: bytes, group_password: str):
+def decrypt_settlement(blob: bytes, group_password: str,
+                       group_salt: bytes = b"") -> Optional["RecordedSettlement"]:
     """Entschlüsselt einen Settlement-Blob. None bei Fehler."""
     from models import RecordedSettlement
     if len(blob) < 28:
         return None
     try:
-        key  = _group_aes_key(group_password)
+        key  = _group_aes_key(group_password, group_salt)
         aes  = AESGCM(key)
         data = aes.decrypt(blob[:12], blob[12:], None)
         return RecordedSettlement.from_dict(json.loads(data))
