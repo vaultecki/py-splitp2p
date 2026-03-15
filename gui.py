@@ -1656,26 +1656,32 @@ class ActivityLogWindow(tk.Toplevel):
     added live via append().
     """
 
-    # Farbe pro Level
+    # Color per level
     LEVEL_COLOR = {
-        "info":  "#2ecc8f",   # green - own actions
-        "sync":  "#4d9de0",   # blau – P2P-Sync
-        "net":   "#a78bfa",   # lila – Netzwerk-Events
-        "warn":  "#e0a03a",   # amber – Warnungen
-        "recv":  "#5dcaa5",   # teal - received changes
+        "info":    "#2ecc8f",   # green  - own actions
+        "sync":    "#4d9de0",   # blue   - P2P sync
+        "net":     "#a78bfa",   # purple - network events
+        "warn":    "#e0a03a",   # amber  - warnings
+        "recv":    "#5dcaa5",   # teal   - received changes
+        "comment": "#e05c6a",   # red    - comments
+        "syscmt":  "#ba7517",   # amber  - system/auto comments
     }
 
     def __init__(self, parent, expenses, settlements, members,
-                 runtime_log, group_currency, own_pubkey):
+                 runtime_log, group_currency, own_pubkey,
+                 db=None, group_pw="", group_salt=b""):
         super().__init__(parent)
         self.title("Activity Log")
         self.configure(bg=BG)
-        self.geometry("780x560")
-        self.minsize(600, 400)
+        self.geometry("820x600")
+        self.minsize(640, 420)
 
-        self._own_pubkey = own_pubkey
-        self._currency   = group_currency
-        self._pk_to_name = {m.pubkey: m.display_name for m in members}
+        self._own_pubkey  = own_pubkey
+        self._currency    = group_currency
+        self._pk_to_name  = {m.pubkey: m.display_name for m in members}
+        self._db          = db
+        self._group_pw    = group_pw
+        self._group_salt  = group_salt
 
         self._build_chrome()
         self._populate(expenses, settlements, runtime_log)
@@ -1693,14 +1699,15 @@ class ActivityLogWindow(tk.Toplevel):
         _lbl(hdr, "ACTIVITY LOG", fg=GREEN, font=FONT_BOLD, bg=PANEL).pack(
             side="left", padx=14, pady=12)
 
-        # Filter-Buttons (Level)
+        # Level filter buttons
         filter_row = tk.Frame(hdr, bg=PANEL)
         filter_row.pack(side="right", padx=8)
-        self._filter_var = tk.StringVar(value="alle")
-        for val, label in [("alle", "All"),
-                            ("info", "Actions"),
-                            ("sync", "Sync"),
-                            ("net",  "Network")]:
+        self._filter_var = tk.StringVar(value="all")
+        for val, label in [("all",     "All"),
+                            ("info",    "Actions"),
+                            ("sync",    "Sync"),
+                            ("net",     "Network"),
+                            ("comment", "Comments")]:
             tk.Radiobutton(
                 filter_row, text=label, variable=self._filter_var,
                 value=val, command=self._apply_filter,
@@ -1711,7 +1718,7 @@ class ActivityLogWindow(tk.Toplevel):
 
         _div(self).pack(fill="x")
 
-        # Suchzeile
+        # Search bar
         search_bar = tk.Frame(self, bg=PANEL, pady=5)
         search_bar.pack(fill="x")
         _lbl(search_bar, "🔍", fg=FG_DIM, font=FONT, bg=PANEL, padx=8).pack(side="left")
@@ -1725,7 +1732,7 @@ class ActivityLogWindow(tk.Toplevel):
         _ghost(search_bar, "✕", self._clear_search).pack(side="right")
         _div(self).pack(fill="x")
 
-        # Scrollbares Log
+        # Scrollable log list
         container = tk.Frame(self, bg=BG)
         container.pack(fill="both", expand=True)
         self._canvas = tk.Canvas(container, bg=BG, highlightthickness=0)
@@ -1743,13 +1750,13 @@ class ActivityLogWindow(tk.Toplevel):
         self._canvas.bind_all("<MouseWheel>", lambda e: self._canvas.yview_scroll(
             int(-1*(e.delta/120)), "units"))
 
-        # Statuszeile
+        # Status bar
         status = tk.Frame(self, bg=PANEL, height=32)
         status.pack(fill="x", side="bottom")
         status.pack_propagate(False)
         self._status_lbl = _lbl(status, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
         self._status_lbl.pack(side="left", padx=12, pady=6)
-        _ghost(status, "Export (TXT)", self._export_txt).pack(side="right", padx=8)
+        _ghost(status, "Export TXT", self._export_txt).pack(side="right", padx=8)
 
     # ── Daten aufbereiten ───────────────────────────────────────────
 
@@ -1757,7 +1764,7 @@ class ActivityLogWindow(tk.Toplevel):
         """Combines all entries: persisted + runtime."""
         self._all_entries: list[tuple[int, str, str]] = []  # (ts, level, msg)
 
-        # Aus Expenses rekonstruieren
+        # Reconstruct from expenses
         for e in expenses:
             who = self._name(e.payer_pubkey)
             is_own = e.payer_pubkey == self._own_pubkey
@@ -1766,25 +1773,51 @@ class ActivityLogWindow(tk.Toplevel):
                 e.timestamp, lvl,
                 f"Expense {'added' if not e.is_deleted else 'deleted'}: "
                 f"'{e.description}'  {e.amount:.2f} {self._currency}  "
-                f"[{e.category}]  von {who}",
+                f"[{e.category}]  by {who}",
             ))
 
-        # Aus Settlements rekonstruieren
+        # Reconstruct from settlements
         for s in settlements:
             is_own = s.from_pubkey == self._own_pubkey
             lvl = "info" if is_own else "recv"
             self._all_entries.append((
                 s.timestamp, lvl,
-                f"Zahlung erfasst: {self._name(s.from_pubkey)} -> "
+                f"Payment recorded: {self._name(s.from_pubkey)} -> "
                 f"{self._name(s.to_pubkey)}  {s.amount:.2f} {self._currency}"
                 + ('  "' + s.note + '"' if s.note else ""),
             ))
+
+        # Comments (user + system) from DB
+        if self._db is not None:
+            try:
+                from storage import load_comments_for_expense
+                from crypto import decrypt_comment
+                # Collect all expense IDs
+                exp_map = {e.id: e.description for e in expenses}
+                for exp_id, exp_desc in exp_map.items():
+                    for _, blob in load_comments_for_expense(self._db, exp_id):
+                        c = decrypt_comment(blob, self._group_pw, self._group_salt)
+                        if c is None:
+                            continue
+                        is_own = c.author_pubkey == self._own_pubkey
+                        who    = self._pk_to_name.get(
+                            c.author_pubkey, c.author_pubkey[:10] + "…")
+                        lvl    = "syscmt" if c.kind == "system" else \
+                                 ("comment" if is_own else "recv")
+                        prefix = f"[{exp_desc[:30]}] "
+                        self._all_entries.append((
+                            c.timestamp, lvl,
+                            prefix + f"{who}: {c.text}",
+                        ))
+            except Exception as _ce:
+                import logging as _log
+                _log.getLogger(__name__).debug("Comment load error: %s", _ce)
 
         # Runtime entries (P2P events of this session)
         for ts, lvl, msg in runtime_log:
             self._all_entries.append((ts, lvl, msg))
 
-        # Chronologisch sortieren (neueste oben)
+        # Sort chronologically (newest first)
         self._all_entries.sort(key=lambda x: x[0], reverse=True)
 
         self._status_lbl.configure(
@@ -1801,7 +1834,7 @@ class ActivityLogWindow(tk.Toplevel):
 
         shown = 0
         for ts, lvl, msg in self._all_entries:
-            if level != "alle" and lvl != level:
+            if level != "all" and lvl != level:
                 continue
             if query and query not in msg.lower():
                 continue
@@ -1822,33 +1855,62 @@ class ActivityLogWindow(tk.Toplevel):
         self._canvas.yview_moveto(0)
 
     def _render_row(self, ts: int, level: str, msg: str):
-        color = self.LEVEL_COLOR.get(level, FG_MUTED)
+        color  = self.LEVEL_COLOR.get(level, FG_MUTED)
         ts_str = time.strftime("%d.%m.%Y  %H:%M:%S", time.localtime(ts))
+        query  = self._search_var.get().lower().strip()
 
         row = tk.Frame(self._inner, bg=PANEL, padx=12, pady=7)
         row.pack(fill="x", pady=1)
 
-        # Farbige Level-Pille
+        # Colored level pill
         pill = tk.Frame(row, bg=color, width=4)
         pill.pack(side="left", fill="y", padx=(0, 10))
 
         content = tk.Frame(row, bg=PANEL)
         content.pack(side="left", fill="x", expand=True)
 
-        # Timestamp + Level
+        # Timestamp + level badge
         meta = tk.Frame(content, bg=PANEL)
         meta.pack(fill="x")
         _lbl(meta, ts_str, fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
-        _lbl(meta, level.upper(), fg=color, font=FONT_SMALL, bg=PANEL,
+        # Human-readable level label
+        level_label = {
+            "info":    "ACTION",
+            "recv":    "RECEIVED",
+            "sync":    "SYNC",
+            "net":     "NETWORK",
+            "warn":    "WARN",
+            "comment": "COMMENT",
+            "syscmt":  "SYSTEM",
+        }.get(level, level.upper())
+        _lbl(meta, level_label, fg=color, font=FONT_SMALL, bg=PANEL,
              padx=6).pack(side="left")
 
-        # Message
-        _lbl(content, msg, fg=FG, font=FONT_SMALL, bg=PANEL,
-             wraplength=640, justify="left").pack(anchor="w", pady=(2, 0))
+        # Message text — highlight search matches
+        if query and query in msg.lower():
+            # Split message around match and render with highlight
+            msg_lower = msg.lower()
+            idx = msg_lower.find(query)
+            before = msg[:idx]
+            match  = msg[idx:idx+len(query)]
+            after  = msg[idx+len(query):]
+            msg_frame = tk.Frame(content, bg=PANEL)
+            msg_frame.pack(anchor="w", pady=(2, 0))
+            if before:
+                _lbl(msg_frame, before, fg=FG, font=FONT_SMALL,
+                     bg=PANEL).pack(side="left")
+            _lbl(msg_frame, match, fg=BG, font=FONT_BOLD,
+                 bg=AMBER).pack(side="left")
+            if after:
+                _lbl(msg_frame, after, fg=FG, font=FONT_SMALL,
+                     bg=PANEL).pack(side="left")
+        else:
+            _lbl(content, msg, fg=FG, font=FONT_SMALL, bg=PANEL,
+                 wraplength=640, justify="left").pack(anchor="w", pady=(2, 0))
 
         _div(self._inner).pack(fill="x")
 
-    # ── Live-Update ─────────────────────────────────────────────────
+    # -- Live update --
 
     def append(self, ts: int, level: str, msg: str) -> None:
         """Adds a new entry live (thread-safe via Tk.after)."""
@@ -1860,24 +1922,24 @@ class ActivityLogWindow(tk.Toplevel):
         # Only re-render if no active filter would hide this entry
         query = self._search_var.get().strip()
         flvl  = self._filter_var.get()
-        if not query and (flvl == "alle" or flvl == level):
+        if not query and (flvl == "all" or flvl == level):
             self._render_row(ts, level, msg)
 
-    # ── Filter / Search ─────────────────────────────────────────────
+    # -- Filter / search --
 
     def _apply_filter(self):
         self._render_all()
 
     def _clear_search(self):
         self._search_var.set("")
-        self._filter_var.set("alle")
+        self._filter_var.set("all")
 
-    # ── Export ──────────────────────────────────────────────────────
+    # -- Export --
 
     def _export_txt(self):
         path = fd.asksaveasfilename(
-            title="Log exportieren", defaultextension=".txt",
-            filetypes=[("Textdatei", "*.txt"), ("All", "*.*")],
+            title="Export log", defaultextension=".txt",
+            filetypes=[("Text file", "*.txt"), ("All", "*.*")],
             parent=self,
         )
         if not path:
@@ -1889,7 +1951,7 @@ class ActivityLogWindow(tk.Toplevel):
             for ts, lvl, msg in self._all_entries:
                 ts_str = time.strftime("%d.%m.%Y %H:%M:%S", time.localtime(ts))
                 f.write(f"[{ts_str}] [{lvl.upper():4s}]  {msg}\n")
-        mb.showinfo("Exported", "Log gespeichert:\n" + path, parent=self)
+        mb.showinfo("Exported", "Log saved:\n" + path, parent=self)
 
 
 class App(tk.Tk):
@@ -2928,6 +2990,9 @@ class App(tk.Tk):
             runtime_log=list(self._log),
             group_currency=self._group_currency,
             own_pubkey=self._own_pubkey,
+            db=self._db,
+            group_pw=self._group_pw,
+            group_salt=self._group_salt,
         )
 
     # ── P2P History-Sync ─────────────────────────────────────────────
@@ -2935,7 +3000,7 @@ class App(tk.Tk):
     def _on_history_synced(self, n_exp: int, n_set: int) -> None:
         import time as _t
         ts  = _t.strftime("%H:%M")
-        msg = f"Sync {ts}: +{n_exp} Ausgaben, +{n_set} Zahlungen"
+        msg = f"Sync {ts}: +{n_exp} expenses, +{n_set} payments"
         self._sync_label.configure(text=msg, fg=GREEN)
         self._refresh()
         # Reset status after 8s
@@ -2974,7 +3039,7 @@ class App(tk.Tk):
         ChartsWindow(self, expenses, settlements, members,
                      self._group_currency, self._own_pubkey)
 
-    # ── Export ───────────────────────────────────────────────────────
+    # -- Export --─
 
     def _open_export(self):
         from storage import load_all_members
