@@ -20,7 +20,7 @@ def _setup_logging():
         datefmt="%H:%M:%S",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler("thaOTP.log", encoding="utf-8"),
+            logging.FileHandler("splitp2p.log", encoding="utf-8"),
         ],
     )
     # Quiet noisy third-party loggers
@@ -30,7 +30,7 @@ def _setup_logging():
 
 if __name__ == "__main__":
     _setup_logging()
-    logging.getLogger(__name__).info("Starting ThaOTP")
+    logging.getLogger(__name__).info("Starting SplitP2P")
 
     from gui import run
     run()
