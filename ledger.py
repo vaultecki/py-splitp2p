@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Ledger Module – Schulden- und Saldenberechnung.
+Ledger Module – Debt and balance calculation.
 
-compute_balances()   berücksichtigt Ausgaben UND bereits erfasste Zahlungen.
-compute_settlements() minimiert verbleibende offene Beträge (Greedy).
+compute_balances()   accounts for expenses AND already recorded payments.
+compute_settlements() minimizes remaining open amounts (greedy).
 """
 
 from __future__ import annotations
@@ -24,11 +24,11 @@ def ledger_cache_key(
         recorded: Sequence[RecordedSettlement] = (),
 ) -> int:
     """
-    Schneller Cache-Schluessel fuer den aktuellen Ledger-Zustand.
+    Schneller Cache key for the current ledger state.
 
-    Berechnet einen Hash ueber (id, timestamp, is_deleted) aller Eintraege.
-    Aendert sich genau dann wenn sich der Inhalt aendert.
-    Nutzt Pythons eingebautes hash() - ausreichend fuer In-Process-Cache.
+    Computes a hash over (id, timestamp, is_deleted) of all entries.
+    Changes if and only if the content changes.
+    Uses Python's built-in hash() - sufficient for in-process caching.
     """
     return hash(tuple(
         (e.id, e.timestamp, e.is_deleted, e.lamport_clock) for e in expenses
@@ -46,14 +46,14 @@ def compute_balances(
     recorded: Sequence[RecordedSettlement] = (),
 ) -> dict[str, float]:
     """
-    Netto-Saldo jeder Person.
+    Net balance per person.
 
-    Positiver Saldo → Person bekommt noch Geld.
-    Negativer Saldo → Person schuldet noch Geld.
+    Positive balance -> person is owed money.
+    Negative balance -> person owes money.
 
-    Erfasste Ausgleichszahlungen (recorded) reduzieren offene Beträge:
-      from_pubkey hat bezahlt → Schuld sinkt → Saldo steigt
-      to_pubkey hat empfangen → Forderung sinkt → Saldo sinkt
+    Recorded settlements reduce open amounts:
+      from_pubkey paid -> debt decreases -> balance increases
+      to_pubkey received -> credit decreases -> balance decreases
     """
     balances: dict[str, float] = {}
 
@@ -78,10 +78,10 @@ def balance_summary(
     balances: dict[str, float],
 ) -> dict:
     """
-    Aufbereitet für die Sidebar:
-      owes_total    – Summe der Beträge die ich anderen schulde
-      owed_total    – Summe der Beträge die mir andere schulden
-      net           – Netto-Saldo (positiv = bekomme, negativ = schulde)
+    Summary for the sidebar:
+      owes_total    - sum of amounts I owe others
+      owed_total    - sum of amounts others owe me
+      net           - net balance (positive = owed to me, negative = I owe)
     """
     net = balances.get(own_pubkey, 0.0)
     owes  = sum(-b for pk, b in balances.items() if pk != own_pubkey and b < -0.005)
@@ -95,9 +95,9 @@ def balance_summary(
 
 @dataclass
 class Settlement:
-    """Empfohlene Ausgleichszahlung (nicht persistent – nur zur Anzeige)."""
-    debtor:   str    # pubkey – wer soll zahlen
-    creditor: str    # pubkey – wer soll empfangen
+    """Suggested settlement transfer (not persistent - display only)."""
+    debtor:   str    # pubkey - who should pay
+    creditor: str    # pubkey - who should receive
     amount:   float
 
     def __repr__(self) -> str:
@@ -105,7 +105,7 @@ class Settlement:
 
 
 def compute_settlements(balances: dict[str, float]) -> list[Settlement]:
-    """Greedy last-write-wins: minimiert Anzahl der nötigen Überweisungen."""
+    """Greedy: minimizes number of required transfers."""
     debtors  = sorted([(pk, -b) for pk, b in balances.items() if b < -0.005],
                       key=lambda x: -x[1])
     creditors = sorted([(pk,  b) for pk, b in balances.items() if b >  0.005],

@@ -4,7 +4,7 @@
 """
 Data Models
 
-Alle Domain-Objekte als Dataclasses, JSON-serialisierbar.
+All domain objects as dataclasses, JSON-serializable.
 """
 
 from __future__ import annotations
@@ -109,15 +109,15 @@ class Split:
 @dataclass
 class Expense:
     """
-    Eine Ausgabe.
+    An expense entry.
 
-    CRDT-Merge-Prioritaet (Lamport + Tiebreaker):
-      1. lamport_clock  - kausalitaetsbasiert, uhrzeit-unabhaengig
-      2. timestamp      - Wanduhr-Tiebreaker bei gleichem Lamport-Wert
-      3. payer_pubkey   - deterministischer letzter Tiebreaker (lexikografisch)
-    timestamp   : Wanduhr - nur fuer Anzeige + Tiebreaker
-    expense_date: Anzeige-Datum (vom Nutzer gewaehlt) - Unix-Tagesbeginn UTC
-                  0 = nicht gesetzt -> timestamp wird angezeigt
+    CRDT merge priority (Lamport + tiebreaker):
+      1. lamport_clock  - causality-based, clock-drift-independent
+      2. timestamp      - wall clock tiebreaker for equal Lamport values
+      3. payer_pubkey   - deterministic final tiebreaker (lexicographic)
+    timestamp   : wall clock - display + tiebreaker only
+    expense_date: user-chosen display date - Unix day start (UTC)
+                  0 = not set -> timestamp is shown
     """
     id: str
     description: str
@@ -127,9 +127,9 @@ class Expense:
     splits: list[Split]
     timestamp: int
     signature: str
-    lamport_clock: int = 0     # Lamport-Uhr - primaere CRDT-Ordnung
+    lamport_clock: int = 0     # Lamport clock - primary CRDT ordering
     category: str = "Allgemein"
-    expense_date: int = 0          # User-chosen display date (UTC day start)
+    expense_date: int = 0          # User-chosen display date, UTC midnight
     is_deleted: bool = False
     note: str = ""
     attachment: Optional[Attachment] = None
@@ -137,7 +137,7 @@ class Expense:
     original_currency: Optional[str] = None
 
     def display_date(self) -> int:
-        """Datum fuer die Anzeige: expense_date falls gesetzt, sonst timestamp."""
+        """Display date: expense_date if set, otherwise timestamp."""
         return self.expense_date if self.expense_date else self.timestamp
 
     @classmethod
@@ -219,23 +219,23 @@ class Expense:
 @dataclass
 class RecordedSettlement:
     """
-    Erfasst, dass `from_pubkey` an `to_pubkey` einen Betrag gezahlt hat.
+    Records that `from_pubkey` paid `to_pubkey` an amount.
 
-    Unterschied zur berechneten Settlement (ledger.py):
-      - Diese Klasse ist persistiert + signiert + CRDT-synchronisiert.
-      - Die berechnete Settlement ist nur eine Empfehlung.
+    Difference from computed Settlement (ledger.py):
+      - This class is persisted + signed + CRDT-synchronized.
+      - The computed settlement is only a suggestion.
 
-    CRDT: gleiche id, steigender timestamp -> last-write-wins.
+    CRDT: same id, increasing timestamp -> last-write-wins.
     """
     id: str
-    from_pubkey: str    # wer hat gezahlt
-    to_pubkey: str      # an wen
+    from_pubkey: str    # who paid
+    to_pubkey: str      # to whom
     amount: float
     currency: str
-    timestamp: int      # CRDT-Uhr
-    signature: str      # Ed25519 ueber canonical_bytes(), signiert von from_pubkey
-    lamport_clock: int = 0     # Lamport-Uhr - primaere CRDT-Ordnung
-    settlement_date: int = 0   # Anzeige-Datum (UTC-Tagesbeginn), 0 = timestamp
+    timestamp: int      # wall clock
+    signature: str      # Ed25519 over canonical_bytes(), signed by from_pubkey
+    lamport_clock: int = 0     # Lamport clock - primary CRDT ordering
+    settlement_date: int = 0   # display date (UTC day start), 0 = use timestamp
     is_deleted: bool = False
     note: str = ""
     original_amount: Optional[float] = None
@@ -264,7 +264,7 @@ class RecordedSettlement:
             currency=currency,
             timestamp=int(time.time()),
             signature="",
-            lamport_clock=0,  # wird in gui.py gesetzt
+            lamport_clock=0,  # set in gui.py before saving
             settlement_date=settlement_date,
             note=note,
             original_amount=original_amount,
@@ -321,29 +321,29 @@ def split_custom(amounts_by_pubkey: dict[str, float]) -> list[Split]:
 def split_by_percent(amount: float,
                      percentages_by_pubkey: dict[str, float]) -> list[Split]:
     """
-    Teilt einen Betrag nach Prozentwerten auf.
+    Split an amount by percentages.
 
     Args:
-        amount: Gesamtbetrag
-        percentages_by_pubkey: {pubkey: prozent}  - Summe sollte 100 ergeben.
-            Falls die Summe abweicht, wird proportional skaliert.
+        amount: total amount
+        percentages_by_pubkey: {pubkey: percent} - should sum to 100.
+            If the sum differs, values are scaled proportionally.
 
     Returns:
-        Liste von Splits in absoluten Betraegen.
-        Rundungsdifferenz wird auf den ersten Eintrag aufgeschlagen.
+        List of splits in absolute amounts.
+        Rounding difference is added to the first entry.
     """
     if not percentages_by_pubkey:
         return []
     total_pct = sum(percentages_by_pubkey.values())
     if total_pct <= 0:
         return []
-    # Normalisieren falls Summe != 100
+    # Normalize if sum != 100
     scale = 100.0 / total_pct
     splits = [
         Split(pubkey=pk, amount=round(amount * (pct * scale) / 100.0, 2))
         for pk, pct in percentages_by_pubkey.items()
     ]
-    # Rundungsfehler ausgleichen
+    # Compensate for rounding errors
     diff = round(amount - sum(s.amount for s in splits), 2)
     if diff:
         splits[0] = Split(splits[0].pubkey, round(splits[0].amount + diff, 2))

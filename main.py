@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-SplitP2P – Split payments
-Entry point: sets up logging, then launches the GUI.
+SplitP2P - Expense splitting without a central server.
+Entry point: configures logging, then starts the GUI.
 
 Usage:
     python main.py
@@ -23,14 +23,14 @@ def _setup_logging():
             logging.FileHandler("splitp2p.log", encoding="utf-8"),
         ],
     )
-    # Quiet noisy third-party loggers
-    for noisy in ("asyncio", "urllib3", "libp2p"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    # Silence noisy third-party loggers
+    for lib in ("asyncio", "urllib3", "libp2p", "trio"):
+        logging.getLogger(lib).setLevel(logging.WARNING)
 
 
 if __name__ == "__main__":
     _setup_logging()
-    logging.getLogger(__name__).info("Starting SplitP2P")
+    logging.getLogger(__name__).info("SplitP2P starting")
 
     from gui import run
     run()

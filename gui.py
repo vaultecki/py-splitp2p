@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-GUI – Dezentrales Splitwise
+GUI - Decentralized expense splitting
 """
 
 import os
@@ -79,8 +79,8 @@ def _combobox(parent, var, values, **kw):
 
 class DatePickerFrame(tk.Frame):
     """
-    Kompakter Datumsauswähler mit Spinboxen für Tag/Monat/Jahr.
-    get_date() → Unix-Timestamp (Mitternacht UTC des gewählten Tages)
+    Compact date picker with spinboxes for day/month/year.
+    get_date() -> Unix timestamp of selected day at 00:00 local time
     set_date(ts) setzt das Datum aus einem Unix-Timestamp.
     """
     def __init__(self, parent, initial_ts: int = 0, **kw):
@@ -106,7 +106,7 @@ class DatePickerFrame(tk.Frame):
                    width=5, **spin_kw).pack(side="left")
 
     def get_date(self) -> int:
-        """Unix-Timestamp des gewählten Tages um 00:00 Lokalzeit."""
+        """Unix timestamp of selected day at 00:00 local time."""
         import datetime
         try:
             d = int(self._day.get())
@@ -143,43 +143,43 @@ class NewGroupDialog(tk.Toplevel):  # _name_var statt _name wegen py3.14
     def _build(self, default_name):
         from currency import SUPPORTED_CURRENCIES
         pad = dict(padx=28)
-        _lbl(self, "NEUE GRUPPE", fg=GREEN, font=FONT_LARGE).pack(
+        _lbl(self, "NEW GROUP", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(24, 4), **pad)
         _lbl(self,
              "Das gemeinsame Passwort identifiziert die Gruppe im P2P-Netz\n"
-             "und verschlüsselt alle Ausgaben. Es wird einmalig gespeichert.",
+             "and encrypts all expenses. Stored once.",
              fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", **pad)
         _div(self).pack(fill="x", padx=28, pady=10)
         frm = tk.Frame(self, bg=BG, padx=28)
         frm.pack(fill="x")
 
-        _lbl(frm, "GRUPPENNAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "GROUP NAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._name_var = tk.StringVar(value=default_name)
         tk.Entry(frm, textvariable=self._name_var, font=FONT, bg=PANEL, fg=FG,
                  insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=(2, 8))
 
-        _lbl(frm, "GEMEINSAMES GRUPPENPASSWORT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "SHARED GROUP PASSWORD", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._pw = tk.Entry(frm, show="●", font=FONT, bg=PANEL, fg=FG,
                             insertbackground=GREEN, relief="flat", bd=6)
         self._pw.pack(fill="x", pady=(2, 8))
 
-        _lbl(frm, "WÄHRUNG DER GRUPPE", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "GROUP CURRENCY", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._currency = tk.StringVar(value="EUR")
         _combobox(frm, self._currency, SUPPORTED_CURRENCIES, width=10).pack(
             anchor="w", pady=(2, 8))
 
         btn_row = tk.Frame(self, bg=BG, padx=28, pady=20)
         btn_row.pack(fill="x")
-        _ghost(btn_row, "Abbrechen", self.destroy).pack(side="right", padx=(6, 0))
-        _btn(btn_row, "ERSTELLEN / BEITRETEN", self._confirm).pack(side="right")
+        _ghost(btn_row, "Cancel", self.destroy).pack(side="right", padx=(6, 0))
+        _btn(btn_row, "CREATE / JOIN", self._confirm).pack(side="right")
 
     def _confirm(self):
         name = self._name_var.get().strip()
         pw   = self._pw.get().strip()
         if not name:
-            mb.showerror("Fehler", "Gruppenname fehlt.", parent=self); return
+            mb.showerror("Error", "Group name is required.", parent=self); return
         if len(pw) < 4:
-            mb.showerror("Fehler", "Passwort mind. 4 Zeichen.", parent=self); return
+            mb.showerror("Error", "Password must be at least 4 characters.", parent=self); return
         import os as _os
         self.result = {"group_name": name, "password": pw,
                        "group_currency": self._currency.get(),
@@ -190,7 +190,7 @@ class NewGroupDialog(tk.Toplevel):  # _name_var statt _name wegen py3.14
 class GroupSelectDialog(tk.Toplevel):
     def __init__(self, parent, groups: dict, last_group: str):
         super().__init__(parent)
-        self.title("Gruppe wählen")
+        self.title("Select group")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
@@ -201,14 +201,14 @@ class GroupSelectDialog(tk.Toplevel):
 
     def _build(self, last_group):
         pad = dict(padx=28)
-        _lbl(self, "GRUPPE WÄHLEN", fg=GREEN, font=FONT_LARGE).pack(
+        _lbl(self, "SELECT GROUP", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(24, 4), **pad)
         _div(self).pack(fill="x", padx=28, pady=10)
         frm = tk.Frame(self, bg=BG, padx=28)
         frm.pack(fill="x")
 
         if self.groups:
-            _lbl(frm, "BEKANNTE GRUPPEN", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+            _lbl(frm, "KNOWN GROUPS", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
             self._selected = tk.StringVar(
                 value=last_group if last_group in self.groups else next(iter(self.groups)))
             inner = tk.Frame(frm, bg=BORDER, padx=1, pady=1)
@@ -226,10 +226,10 @@ class GroupSelectDialog(tk.Toplevel):
                      fg=FG_DIM, font=FONT_SMALL, bg=BG, padx=8).pack(side="right")
             btn_row = tk.Frame(self, bg=BG, padx=28)
             btn_row.pack(fill="x")
-            _ghost(btn_row, "+ Neue Gruppe", self._new_group).pack(side="left")
-            _ghost(btn_row, "QR importieren", self._import_qr).pack(side="left", padx=6)
-            _ghost(btn_row, "Entfernen", self._remove_group).pack(side="left", padx=6)
-            _btn(btn_row, "ÖFFNEN", self._confirm).pack(side="right")
+            _ghost(btn_row, "+ New group", self._new_group).pack(side="left")
+            _ghost(btn_row, "Import QR", self._import_qr).pack(side="left", padx=6)
+            _ghost(btn_row, "Remove", self._remove_group).pack(side="left", padx=6)
+            _btn(btn_row, "OPEN", self._confirm).pack(side="right")
             tk.Frame(self, bg=BG, height=16).pack()
         else:
             self._selected = tk.StringVar(value="")
@@ -269,7 +269,7 @@ class GroupSelectDialog(tk.Toplevel):
 
     def _remove_group(self):
         name = self._selected.get()
-        if name and mb.askyesno("Entfernen",
+        if name and mb.askyesno("Remove",
                                 f"Gruppe '{name}' aus der Liste entfernen?\n"
                                 "(Daten bleiben erhalten)", parent=self):
             self.groups.pop(name, None)
@@ -279,7 +279,7 @@ class GroupSelectDialog(tk.Toplevel):
     def _confirm(self):
         name = self._selected.get()
         if not name or name not in self.groups:
-            mb.showerror("Fehler", "Keine Gruppe ausgewählt.", parent=self); return
+            mb.showerror("Error", "No group selected.", parent=self); return
         info = self.groups[name]
         self.result = {"group_name": name, "password": info["password"],
                        "group_currency": info.get("currency", "EUR"),
@@ -296,22 +296,22 @@ class GroupSelectDialog(tk.Toplevel):
 # QR-Code Dialoge: Anzeigen + Importieren
 # ---------------------------------------------------------------------------
 
-# QR-Payload-Format (JSON, base64-kodiert):
+# QR payload format (JSON, base64-encoded):
 # {
-#   "v": 1,                        # Format-Version fuer spaeteren Wandel
-#   "name": "IslandTrip",          # Gruppenname
-#   "pw": "Island2026",            # Passwort (Klartext – QR-Code ist der Schluessel)
-#   "salt": "99cafd53...",         # Salt als Hex (16 Bytes = 32 Hex-Chars)
-#   "currency": "EUR"              # Gruppenwaehrung
+#   "v": 1,           # format version for future changes
+#   "name": "Trip",   # group name
+#   "pw": "pass123",  # password in plaintext (QR code is the key)
+#   "salt": "99ca..", # salt as hex (16 bytes = 32 hex chars)
+#   "currency": "EUR" # group currency
 # }
-# Kodiert als base64(json) -> kompakter QR-Inhalt (~120-160 Bytes)
+# Encoded as base64(json) -> compact QR content (~120-160 bytes)
 
 import base64 as _b64
 
 
 def _encode_group_qr(name: str, password: str, salt: bytes,
                      currency: str) -> str:
-    """Gruppeninfo als kompakten base64-JSON-String kodieren."""
+    """Encodes group info as a compact base64 JSON string."""
     import json as _json
     payload = _json.dumps({
         "v":        1,
@@ -324,7 +324,7 @@ def _encode_group_qr(name: str, password: str, salt: bytes,
 
 
 def _decode_group_qr(data: str) -> dict:
-    """QR-String dekodieren. Wirft ValueError bei ungueltigen Daten."""
+    """Decodes QR string. Raises ValueError for invalid data."""
     import json as _json
     try:
         # Versuche zuerst base64
@@ -365,11 +365,11 @@ class QRShowDialog(tk.Toplevel):
 
     def _build(self, group_name: str, currency: str):
         pad = dict(padx=28)
-        _lbl(self, "GRUPPE BEITRETEN", fg=GREEN, font=FONT_LARGE).pack(
+        _lbl(self, "JOIN GROUP", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(20, 2), **pad)
         _lbl(self,
              f"{group_name}  ·  {currency}\n"
-             "Diesen QR-Code scannen um der Gruppe beizutreten.",
+             "Scan this QR code to join the group.",
              fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", **pad)
         _div(self).pack(fill="x", padx=28, pady=8)
 
@@ -431,11 +431,11 @@ class QRShowDialog(tk.Toplevel):
         if not qr_shown:
             # Kein qrcode installiert -> Hinweis
             _lbl(frm,
-                 "pip install qrcode[pil]\nfuer QR-Bild-Anzeige",
+                 "pip install qrcode[pil]\nfor QR image display",
                  fg=AMBER, font=FONT_SMALL, bg=BG, justify="center").pack(pady=8)
 
         # Immer: kopierbarer String als Fallback
-        _lbl(frm, "BEITRITTS-CODE (kopieren & teilen)", fg=FG_DIM,
+        _lbl(frm, "JOIN CODE (copy & share)", fg=FG_DIM,
              font=FONT_SMALL, bg=BG).pack(anchor="w", pady=(8, 2))
         txt_frame = tk.Frame(frm, bg=BORDER, padx=1, pady=1)
         txt_frame.pack(fill="x")
@@ -452,12 +452,12 @@ class QRShowDialog(tk.Toplevel):
         def _copy():
             self.clipboard_clear()
             self.clipboard_append(self._payload)
-            _copy_btn.configure(text="Kopiert ✓")
-            self.after(2000, lambda: _copy_btn.configure(text="In Zwischenablage kopieren"))
+            _copy_btn.configure(text="Copied ✓")
+            self.after(2000, lambda: _copy_btn.configure(text="Copy to clipboard"))
 
-        _copy_btn = _ghost(btn_row, "In Zwischenablage kopieren", _copy)
+        _copy_btn = _ghost(btn_row, "Copy to clipboard", _copy)
         _copy_btn.pack(side="left")
-        _btn(btn_row, "Schliessen", self.destroy,
+        _btn(btn_row, "Close", self.destroy,
              bg=BORDER, fg=FG_MUTED).pack(side="right")
 
 
@@ -483,17 +483,17 @@ class QRImportDialog(tk.Toplevel):
 
     def _build(self):
         pad = dict(padx=28)
-        _lbl(self, "QR-CODE EINLESEN", fg=GREEN, font=FONT_LARGE).pack(
+        _lbl(self, "SCAN QR CODE", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(20, 2), **pad)
         _lbl(self,
-             "Beitritts-Code der Gruppe einfuegen oder Kamera/Datei nutzen.",
+             "Paste the group join code, or use camera / file.",
              fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", **pad)
         _div(self).pack(fill="x", padx=28, pady=8)
 
         frm = tk.Frame(self, bg=BG, padx=28)
         frm.pack(fill="x")
 
-        _lbl(frm, "BEITRITTS-CODE EINFUEGEN", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "PASTE JOIN CODE", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._text = tk.Text(frm, bg=PANEL, fg=FG, font=FONT_MONO,
                              height=5, wrap="word",
                              insertbackground=GREEN, relief="flat", bd=6)
@@ -509,14 +509,14 @@ class QRImportDialog(tk.Toplevel):
         # Kamera-Scan (nur wenn cv2 verfuegbar)
         try:
             import cv2 as _cv2
-            _ghost(btn_row, "📷 Kamera scannen",
+            _ghost(btn_row, "📷 Scan camera",
                    self._scan_camera).pack(side="left", padx=(0, 8))
         except ImportError:
             pass
 
         # Bilddatei
-        _ghost(btn_row, "🖼 Bild waehlen", self._scan_file).pack(side="left", padx=(0, 8))
-        _ghost(btn_row, "Abbrechen", self.destroy).pack(side="right", padx=(6, 0))
+        _ghost(btn_row, "🖼 Choose image", self._scan_file).pack(side="left", padx=(0, 8))
+        _ghost(btn_row, "Cancel", self.destroy).pack(side="right", padx=(6, 0))
         _btn(btn_row, "Importieren", self._import_text).pack(side="right")
 
     def _set_status(self, msg: str, color: str = FG_MUTED):
@@ -534,19 +534,19 @@ class QRImportDialog(tk.Toplevel):
             self.after(600, self.destroy)
             return True
         except Exception as e:
-            self._set_status(f"Ungueltig: {e}", RED)
+            self._set_status(f"Invalid: {e}", RED)
             return False
 
     def _import_text(self):
         data = self._text.get("1.0", "end").strip()
         if not data:
-            self._set_status("Kein Code eingegeben.", RED); return
+            self._set_status("No code entered.", RED); return
         self._try_decode(data)
 
     def _scan_camera(self):
         """OpenCV-Kamerascan in einem separaten Thread."""
         import threading
-        self._set_status("Kamera wird geoeffnet...", AMBER)
+        self._set_status("Opening camera...", AMBER)
         threading.Thread(target=self._camera_thread, daemon=True).start()
 
     def _camera_thread(self):
@@ -555,11 +555,11 @@ class QRImportDialog(tk.Toplevel):
             cap = cv2.VideoCapture(0)
             if not cap.isOpened():
                 self.after(0, lambda: self._set_status(
-                    "Kamera nicht gefunden.", RED))
+                    "Camera not found.", RED))
                 return
             detector = cv2.QRCodeDetector()
             self.after(0, lambda: self._set_status(
-                "Kamera aktiv – QR-Code vor die Kamera halten...", AMBER))
+                "Camera active - hold QR code in front of camera...", AMBER))
             while True:
                 ret, frame = cap.read()
                 if not ret:
@@ -574,9 +574,9 @@ class QRImportDialog(tk.Toplevel):
                     break
             cap.release()
             cv2.destroyAllWindows()
-            self.after(0, lambda: self._set_status("Scan abgebrochen.", FG_DIM))
+            self.after(0, lambda: self._set_status("Scan cancelled.", FG_DIM))
         except Exception as e:
-            self.after(0, lambda: self._set_status(f"Kamera-Fehler: {e}", RED))
+            self.after(0, lambda: self._set_status(f"Camera error: {e}", RED))
 
     def _scan_file(self):
         """QR-Code aus Bilddatei lesen."""
@@ -590,19 +590,19 @@ class QRImportDialog(tk.Toplevel):
             import cv2
             img = cv2.imread(path)
             if img is None:
-                self._set_status("Bild konnte nicht geladen werden.", RED); return
+                self._set_status("Could not load image.", RED); return
             detector = cv2.QRCodeDetector()
             data, _, _ = detector.detectAndDecode(img)
             if data:
                 self._try_decode(data)
             else:
-                self._set_status("Kein QR-Code im Bild gefunden.", RED)
+                self._set_status("No QR code found in image.", RED)
         except ImportError:
             self._set_status(
-                "cv2 (OpenCV) fuer Bild-Scan benoetigt:\npip install opencv-python",
+                "cv2 (OpenCV) required for image scanning:\npip install opencv-python",
                 AMBER)
         except Exception as e:
-            self._set_status(f"Scan-Fehler: {e}", RED)
+            self._set_status(f"Scan error: {e}", RED)
 
 
 class AttachmentViewer(tk.Toplevel):
@@ -654,11 +654,11 @@ class StorageSetupDialog(tk.Toplevel):
 
     def _build(self, defaults):
         pad = dict(padx=28)
-        _lbl(self, "SPEICHERORT", fg=GREEN, font=FONT_LARGE).pack(
+        _lbl(self, "STORAGE LOCATION", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(24, 4), **pad)
         _lbl(self,
-             "Wo sollen Datenbank und Dateianhänge gespeichert werden?\n"
-             "Die Einstellung kann später in den Einstellungen geändert werden.",
+             "Where should the database and attachments be stored?\n"
+             "This can be changed later in settings.",
              fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", **pad)
         _div(self).pack(fill="x", padx=28, pady=10)
         frm = tk.Frame(self, bg=BG, padx=28)
@@ -675,7 +675,7 @@ class StorageSetupDialog(tk.Toplevel):
                 p = fd.askdirectory(title="Ordner", parent=self) if d else \
                     fd.asksaveasfilename(title="Datenbankdatei", parent=self,
                         defaultextension=".db",
-                        filetypes=[("SQLite", "*.db"), ("Alle", "*.*")],
+                        filetypes=[("SQLite", "*.db"), ("All", "*.*")],
                         initialfile=os.path.basename(v.get()),
                         initialdir=os.path.dirname(os.path.abspath(v.get())))
                 if p: v.set(p)
@@ -683,23 +683,23 @@ class StorageSetupDialog(tk.Toplevel):
 
         self._db_path = tk.StringVar(value=defaults.get("db_path", ""))
         self._att_dir = tk.StringVar(value=defaults.get("storage_dir", ""))
-        path_row("DATENBANKDATEI (.db)", self._db_path)
-        path_row("ORDNER FÜR DATEIANHÄNGE", self._att_dir, is_dir=True)
+        path_row("DATABASE FILE (.db)", self._db_path)
+        path_row("ATTACHMENT FOLDER", self._att_dir, is_dir=True)
 
         btn_row = tk.Frame(self, bg=BG, padx=28, pady=20)
         btn_row.pack(fill="x")
-        _btn(btn_row, "WEITER", self._confirm).pack(side="right")
+        _btn(btn_row, "NEXT", self._confirm).pack(side="right")
 
     def _confirm(self):
         db_path = self._db_path.get().strip()
         att_dir = self._att_dir.get().strip()
         if not db_path or not att_dir:
-            mb.showerror("Fehler", "Beide Pfade müssen angegeben werden.", parent=self); return
+            mb.showerror("Error", "Both paths must be specified.", parent=self); return
         try:
             os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
             os.makedirs(att_dir, exist_ok=True)
         except OSError as e:
-            mb.showerror("Fehler", f"Ordner konnte nicht erstellt werden:\n{e}", parent=self); return
+            mb.showerror("Error", f"Could not create folder:\n{e}", parent=self); return
         self.result = {"db_path": db_path, "storage_dir": att_dir}
         self.destroy()
 
@@ -731,7 +731,7 @@ class ExpenseDialog(tk.Toplevel):
         from currency import SUPPORTED_CURRENCIES
 
         pad = dict(padx=24)
-        _lbl(self, "AUSGABE BEARBEITEN" if exp else "NEUE AUSGABE",
+        _lbl(self, "EDIT EXPENSE" if exp else "NEW EXPENSE",
              fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(20, 2), **pad)
         _div(self).pack(fill="x", **pad)
 
@@ -739,13 +739,13 @@ class ExpenseDialog(tk.Toplevel):
         frm.pack(fill="x")
 
         # Beschreibung
-        _lbl(frm, "BESCHREIBUNG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "DESCRIPTION", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._desc = tk.StringVar(value=exp.description if exp else "")
         tk.Entry(frm, textvariable=self._desc, font=FONT, bg=PANEL, fg=FG,
                  insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=(2, 8))
 
-        # Betrag + Währung
-        _lbl(frm, "BETRAG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        # Amount + currency
+        _lbl(frm, "AMOUNT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         amt_row = tk.Frame(frm, bg=BG)
         amt_row.pack(fill="x", pady=(2, 2))
 
@@ -784,26 +784,26 @@ class ExpenseDialog(tk.Toplevel):
                          f"({format_rate(ic, self.group_currency, self.rates)})")
             else:
                 self._conv_label.configure(
-                    text=f"⚠ Kurs {ic}→{self.group_currency} nicht verfügbar", fg=RED)
+                    text=f"⚠ rate {ic}->{self.group_currency} not available", fg=RED)
 
         self._amount.trace_add("write", _update_preview)
         self._input_currency.trace_add("write", _update_preview)
         _update_preview()
 
         # Datum
-        _lbl(frm, "DATUM", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "DATE", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         initial_ts = (exp.expense_date or exp.timestamp) if exp else int(time.time())
         self._date_picker = DatePickerFrame(frm, initial_ts=initial_ts, bg=BG)
         self._date_picker.pack(anchor="w", pady=(2, 8))
 
         # Kategorie
-        _lbl(frm, "KATEGORIE", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "CATEGORY", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._category = tk.StringVar(value=getattr(exp, "category", "Allgemein") if exp else "Allgemein")
         _combobox(frm, self._category, CATEGORIES, width=24).pack(
             anchor="w", pady=(2, 8))
 
         # Bezahlt von
-        _lbl(frm, "BEZAHLT VON", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "PAID BY", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._payer_var = tk.StringVar()
         payer_names = [m.display_name for m in self.members]
         default_payer = next(
@@ -817,13 +817,13 @@ class ExpenseDialog(tk.Toplevel):
         _combobox(frm, self._payer_var, payer_names).pack(fill="x", pady=(2, 8))
 
         # Aufteilung
-        _lbl(frm, "AUFTEILUNG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "SPLIT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._split_mode = tk.StringVar(value="equal")
         mode_row = tk.Frame(frm, bg=BG)
         mode_row.pack(anchor="w")
-        for val, txt in [("equal", "Gleich"),
-                         ("custom", "Individuell"),
-                         ("percent", "Prozent %")]:
+        for val, txt in [("equal", "Equal"),
+                         ("custom", "Custom"),
+                         ("percent", "Percent %")]:
             tk.Radiobutton(mode_row, text=txt, variable=self._split_mode, value=val,
                            bg=BG, fg=FG_MUTED, selectcolor=BG,
                            activebackground=BG, activeforeground=FG,
@@ -844,22 +844,22 @@ class ExpenseDialog(tk.Toplevel):
 
         # Anhang
         _div(frm).pack(fill="x", pady=8)
-        _lbl(frm, "DATEIANHANG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "ATTACHMENT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         att_row = tk.Frame(frm, bg=BG)
         att_row.pack(fill="x", pady=(2, 4))
         self._att_label = _lbl(att_row,
             f"📎 {self._existing_att.filename} ({self._existing_att.size_str()})"
-            if self._existing_att else "Kein Anhang",
+            if self._existing_att else "No attachment",
             fg=BLUE if self._existing_att else FG_DIM, font=FONT_SMALL, bg=BG)
         self._att_label.pack(side="left")
-        _ghost(att_row, "Datei wählen", self._pick_file).pack(side="left", padx=8)
+        _ghost(att_row, "Choose file", self._pick_file).pack(side="left", padx=8)
         if self._existing_att:
-            _ghost(att_row, "Entfernen", self._remove_att).pack(side="left")
+            _ghost(att_row, "Remove", self._remove_att).pack(side="left")
 
         btn_row = tk.Frame(self, bg=BG, padx=24, pady=16)
         btn_row.pack(fill="x")
-        _ghost(btn_row, "Abbrechen", self.destroy).pack(side="right", padx=(6, 0))
-        _btn(btn_row, "Speichern", self._save).pack(side="right")
+        _ghost(btn_row, "Cancel", self.destroy).pack(side="right", padx=(6, 0))
+        _btn(btn_row, "Save", self._save).pack(side="right")
 
     def _update_splits(self):
         for w in self._split_widgets: w.destroy()
@@ -906,7 +906,7 @@ class ExpenseDialog(tk.Toplevel):
 
     def _pick_file(self):
         path = fd.askopenfilename(
-            title="Anhang wählen",
+            title="Choose attachment",
             filetypes=[("Bilder & PDFs", "*.jpg *.jpeg *.png *.gif *.webp *.pdf"),
                        ("Alle Dateien", "*.*")], parent=self)
         if not path: return
@@ -922,7 +922,7 @@ class ExpenseDialog(tk.Toplevel):
 
     def _remove_att(self):
         self._att_path = self._att_data = self._existing_att = None
-        self._att_label.configure(text="Kein Anhang", fg=FG_DIM)
+        self._att_label.configure(text="No attachment", fg=FG_DIM)
 
     def _save(self):
         from models import Expense, Attachment, split_equally, split_custom
@@ -932,21 +932,21 @@ class ExpenseDialog(tk.Toplevel):
 
         desc = self._desc.get().strip()
         if not desc:
-            mb.showerror("Fehler", "Beschreibung fehlt.", parent=self); return
+            mb.showerror("Error", "Description is required.", parent=self); return
         try:
             raw_amount = float(self._amount.get().replace(",", "."))
             if raw_amount <= 0: raise ValueError
         except ValueError:
-            mb.showerror("Fehler", "Ungültiger Betrag.", parent=self); return
+            mb.showerror("Error", "Invalid amount.", parent=self); return
 
         input_cur = self._input_currency.get()
         original_amount = original_currency = None
         if input_cur != self.group_currency:
             converted = convert(raw_amount, input_cur, self.group_currency, self.rates)
             if converted is None:
-                if not mb.askyesno("Kurs fehlt",
-                    f"Kein Kurs für {input_cur}→{self.group_currency}.\n"
-                    "Betrag unverändert übernehmen?", parent=self): return
+                if not mb.askyesno("Rate missing",
+                    f"No rate for {input_cur}->{self.group_currency}.\n"
+                    "Use amount unchanged?", parent=self): return
                 amount = raw_amount
             else:
                 original_amount, original_currency = raw_amount, input_cur
@@ -956,11 +956,11 @@ class ExpenseDialog(tk.Toplevel):
 
         payer = next((m for m in self.members if m.display_name == self._payer_var.get()), None)
         if not payer:
-            mb.showerror("Fehler", "Zahler nicht gefunden.", parent=self); return
+            mb.showerror("Error", "Zahler nicht gefunden.", parent=self); return
 
         selected = [m for m in self.members if self._member_vars[m.pubkey].get()]
         if not selected:
-            mb.showerror("Fehler", "Mind. ein Mitglied auswählen.", parent=self); return
+            mb.showerror("Error", "Select at least one member.", parent=self); return
 
         mode = self._split_mode.get()
         if mode == "equal":
@@ -974,12 +974,12 @@ class ExpenseDialog(tk.Toplevel):
                     raise ValueError("0%")
                 if abs(total_pct - 100) > 0.01:
                     if not mb.askyesno(
-                        "Summe ≠ 100 %",
-                        f"Die Prozentwerte ergeben {total_pct:.1f} %,\n"
-                        "nicht 100 %. Proportional aufteilen?",
+                        "Sum != 100%",
+                        f"Percentages sum to {total_pct:.1f}%,\n"
+                        "not 100%. Split proportionally?",
                         parent=self): return
             except ValueError:
-                mb.showerror("Fehler", "Prozentwerte ungültig.", parent=self); return
+                mb.showerror("Error", "Percentages are invalid.", parent=self); return
             from models import split_by_percent
             splits = split_by_percent(amount, pcts)
         else:
@@ -987,7 +987,7 @@ class ExpenseDialog(tk.Toplevel):
                 custom = {m.pubkey: float(self._amount_vars[m.pubkey].get().replace(",", "."))
                           for m in selected}
             except ValueError:
-                mb.showerror("Fehler", "Individuelle Beträge ungültig.", parent=self); return
+                mb.showerror("Error", "Individual amounts are invalid.", parent=self); return
             splits = split_custom(custom)
 
         attachment = None
@@ -1037,7 +1037,7 @@ class SettlementDialog(tk.Toplevel):
         from currency import SUPPORTED_CURRENCIES
 
         pad = dict(padx=24)
-        _lbl(self, "ZAHLUNG ERFASSEN", fg=PURPLE, font=FONT_LARGE).pack(
+        _lbl(self, "RECORD PAYMENT", fg=PURPLE, font=FONT_LARGE).pack(
             anchor="w", pady=(20, 2), **pad)
         _lbl(self, "Wer hat wem wie viel gezahlt?",
              fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", **pad)
@@ -1056,16 +1056,16 @@ class SettlementDialog(tk.Toplevel):
              if m.pubkey == prefill.get("to_pubkey", "")),
             member_names[-1] if len(member_names) > 1 else member_names[0] if member_names else "")
 
-        _lbl(frm, "VON (wer hat gezahlt)", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "FROM (who paid)", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._from_var = tk.StringVar(value=default_from)
         _combobox(frm, self._from_var, member_names).pack(fill="x", pady=(2, 8))
 
-        _lbl(frm, "AN (wer hat empfangen)", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "TO (who received)", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._to_var = tk.StringVar(value=default_to)
         _combobox(frm, self._to_var, member_names).pack(fill="x", pady=(2, 8))
 
-        # Betrag + Währung
-        _lbl(frm, "BETRAG", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        # Amount + currency
+        _lbl(frm, "AMOUNT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         amt_row = tk.Frame(frm, bg=BG)
         amt_row.pack(fill="x", pady=(2, 2))
         self._amount = tk.StringVar(
@@ -1095,53 +1095,53 @@ class SettlementDialog(tk.Toplevel):
                          f"({format_rate(ic, self.group_currency, self.rates)})")
             else:
                 self._conv_label.configure(
-                    text=f"⚠ Kurs {ic}→{self.group_currency} nicht verfügbar", fg=RED)
+                    text=f"⚠ rate {ic}->{self.group_currency} not available", fg=RED)
 
         self._amount.trace_add("write", _preview)
         self._input_currency.trace_add("write", _preview)
 
         # Datum
-        _lbl(frm, "DATUM", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "DATE", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._date_picker = DatePickerFrame(frm, initial_ts=int(time.time()), bg=BG)
         self._date_picker.pack(anchor="w", pady=(2, 8))
 
         # Notiz
-        _lbl(frm, "NOTIZ (optional)", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "NOTE (optional)", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._note = tk.StringVar()
         tk.Entry(frm, textvariable=self._note, font=FONT, bg=PANEL, fg=FG,
                  insertbackground=PURPLE, relief="flat", bd=6).pack(fill="x", pady=(2, 8))
 
         btn_row = tk.Frame(self, bg=BG, padx=24, pady=16)
         btn_row.pack(fill="x")
-        _ghost(btn_row, "Abbrechen", self.destroy).pack(side="right", padx=(6, 0))
-        _btn(btn_row, "Speichern", self._save, bg=PURPLE).pack(side="right")
+        _ghost(btn_row, "Cancel", self.destroy).pack(side="right", padx=(6, 0))
+        _btn(btn_row, "Save", self._save, bg=PURPLE).pack(side="right")
 
     def _save(self):
         from currency import convert
         frm_name = self._from_var.get()
         to_name  = self._to_var.get()
         if frm_name == to_name:
-            mb.showerror("Fehler", "Von und An müssen verschieden sein.", parent=self); return
+            mb.showerror("Error", "From and To must be different.", parent=self); return
 
         frm_m = next((m for m in self.members if m.display_name == frm_name), None)
         to_m  = next((m for m in self.members if m.display_name == to_name),  None)
         if not frm_m or not to_m:
-            mb.showerror("Fehler", "Mitglied nicht gefunden.", parent=self); return
+            mb.showerror("Error", "Member not found.", parent=self); return
 
         try:
             raw = float(self._amount.get().replace(",", "."))
             if raw <= 0: raise ValueError
         except ValueError:
-            mb.showerror("Fehler", "Ungültiger Betrag.", parent=self); return
+            mb.showerror("Error", "Invalid amount.", parent=self); return
 
         input_cur = self._input_currency.get()
         orig_amount = orig_currency = None
         if input_cur != self.group_currency:
             converted = convert(raw, input_cur, self.group_currency, self.rates)
             if converted is None:
-                if not mb.askyesno("Kurs fehlt",
-                    f"Kein Kurs {input_cur}→{self.group_currency}.\n"
-                    "Betrag unverändert?", parent=self): return
+                if not mb.askyesno("Rate missing",
+                    f"Kein Kurs {input_cur}->{self.group_currency}.\n"
+                    "Use amount unchanged?", parent=self): return
                 amount = raw
             else:
                 orig_amount, orig_currency = raw, input_cur
@@ -1169,7 +1169,7 @@ class SettlementDialog(tk.Toplevel):
 class AddMemberDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Mitglied hinzufügen")
+        self.title("Add Member")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
@@ -1179,7 +1179,7 @@ class AddMemberDialog(tk.Toplevel):
 
     def _build(self):
         pad = dict(padx=24)
-        _lbl(self, "MITGLIED", fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(20, 2), **pad)
+        _lbl(self, "MEMBER", fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(20, 2), **pad)
         _div(self).pack(fill="x", **pad)
         frm = tk.Frame(self, bg=BG, padx=24, pady=12)
         frm.pack(fill="x")
@@ -1187,20 +1187,20 @@ class AddMemberDialog(tk.Toplevel):
         self._name_entry = tk.Entry(frm, font=FONT, bg=PANEL, fg=FG,
                                     insertbackground=GREEN, relief="flat", bd=6)
         self._name_entry.pack(fill="x", pady=4)
-        _lbl(frm, "PUBLIC KEY (leer = temporärer Key)", fg=FG_DIM, font=FONT_SMALL).pack(
+        _lbl(frm, "PUBLIC KEY (leave empty for temporary key)", fg=FG_DIM, font=FONT_SMALL).pack(
             anchor="w", pady=(8, 0))
         self._pk = tk.Entry(frm, font=FONT_MONO, bg=PANEL, fg=FG_MUTED,
                             insertbackground=GREEN, relief="flat", bd=6)
         self._pk.pack(fill="x", pady=4)
         btn_row = tk.Frame(self, bg=BG, padx=24, pady=16)
         btn_row.pack(fill="x")
-        _ghost(btn_row, "Abbrechen", self.destroy).pack(side="right", padx=(6, 0))
-        _btn(btn_row, "Hinzufügen", self._save).pack(side="right")
+        _ghost(btn_row, "Cancel", self.destroy).pack(side="right", padx=(6, 0))
+        _btn(btn_row, "Add", self._save).pack(side="right")
 
     def _save(self):
         name = self._name_entry.get().strip()
         if not name:
-            mb.showerror("Fehler", "Name fehlt.", parent=self); return
+            mb.showerror("Error", "Name is required.", parent=self); return
         self.result = {"name": name, "pubkey": self._pk.get().strip() or None}
         self.destroy()
 
@@ -1219,7 +1219,7 @@ class ChartsWindow(tk.Toplevel):
     Drei Diagramme in einem Fenster:
       1. Ausgaben nach Kategorie (Balken)
       2. Saldo pro Person (Balken, positiv/negativ)
-      3. Kumulierte Ausgaben über Zeit (Linie)
+      3. Cumulative expenses over time (line chart)
 
     Nutzt matplotlib mit dem TkAgg-Backend.
     Falls matplotlib nicht installiert ist: Fehlermeldung mit Installationshinweis.
@@ -1239,7 +1239,7 @@ class ChartsWindow(tk.Toplevel):
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from matplotlib.figure import Figure
         except ImportError:
-            _lbl(self, "matplotlib nicht installiert.",
+            _lbl(self, "matplotlib not installed.",
                  fg=RED, font=FONT_BOLD).pack(pady=20)
             _lbl(self, "pip install matplotlib", fg=FG_DIM, font=FONT_MONO).pack()
             return
@@ -1268,7 +1268,7 @@ class ChartsWindow(tk.Toplevel):
 
         # ── 1. Ausgaben nach Kategorie ───────────────────────────────
         ax1 = fig.add_subplot(3, 2, 1)
-        style_ax(ax1, "Ausgaben nach Kategorie")
+        style_ax(ax1, "Expenses by Category")
         from collections import defaultdict
         by_cat = defaultdict(float)
         for e in expenses:
@@ -1284,12 +1284,12 @@ class ChartsWindow(tk.Toplevel):
                 ax1.text(bar.get_width() + max(vals)*0.01, bar.get_y() + bar.get_height()/2,
                          f"{val:.0f}", va="center", color=FG_, fontsize=8)
         else:
-            ax1.text(0.5, 0.5, "Keine Daten", transform=ax1.transAxes,
+            ax1.text(0.5, 0.5, "No data", transform=ax1.transAxes,
                      ha="center", va="center", color=DIM_)
 
         # ── 2. Saldo pro Person ──────────────────────────────────────
         ax2 = fig.add_subplot(3, 2, 2)
-        style_ax(ax2, "Saldo pro Person")
+        style_ax(ax2, "Balance per Person")
         from ledger import compute_balances
         balances = compute_balances(expenses, settlements)
         if balances:
@@ -1307,12 +1307,12 @@ class ChartsWindow(tk.Toplevel):
                          ha="left" if b >= 0 else "right",
                          color=FG_, fontsize=8)
         else:
-            ax2.text(0.5, 0.5, "Keine Daten", transform=ax2.transAxes,
+            ax2.text(0.5, 0.5, "No data", transform=ax2.transAxes,
                      ha="center", va="center", color=DIM_)
 
-        # ── 3. Kumulierte Ausgaben über Zeit ─────────────────────────
+        # -- 3. Cumulative expenses over time ─────────────────────────
         ax3 = fig.add_subplot(3, 1, 2)
-        style_ax(ax3, "Kumulierte Ausgaben über Zeit")
+        style_ax(ax3, "Cumulative Expenses over Time")
         if expenses:
             import datetime
             sorted_exp = sorted(expenses, key=lambda e: e.display_date())
@@ -1341,12 +1341,12 @@ class ChartsWindow(tk.Toplevel):
                        labelcolor=FG_, fontsize=8, loc="upper left")
             fig.autofmt_xdate(rotation=30, ha="right")
         else:
-            ax3.text(0.5, 0.5, "Keine Daten", transform=ax3.transAxes,
+            ax3.text(0.5, 0.5, "No data", transform=ax3.transAxes,
                      ha="center", va="center", color=DIM_)
 
         # ── 4. Saldo-Verlauf pro Person ─────────────────────────────
         ax4 = fig.add_subplot(3, 1, 3)
-        style_ax(ax4, "Saldo-Verlauf pro Person über Zeit")
+        style_ax(ax4, "Balance History per Person over Time")
         if expenses:
             import datetime
             from ledger import compute_balances
@@ -1384,7 +1384,7 @@ class ChartsWindow(tk.Toplevel):
                            labelcolor=FG_, fontsize=8, loc="best")
                 fig.autofmt_xdate(rotation=30, ha="right")
         else:
-            ax4.text(0.5, 0.5, "Keine Daten", transform=ax4.transAxes,
+            ax4.text(0.5, 0.5, "No data", transform=ax4.transAxes,
                      ha="center", va="center", color=DIM_)
 
         canvas = FigureCanvasTkAgg(fig, master=self)
@@ -1396,12 +1396,12 @@ class ChartsWindow(tk.Toplevel):
         def save_png():
             import tkinter.filedialog as fd2
             path = fd2.asksaveasfilename(
-                title="Charts speichern", defaultextension=".png",
-                filetypes=[("PNG", "*.png"), ("Alle", "*.*")], parent=self)
+                title="Save charts", defaultextension=".png",
+                filetypes=[("PNG", "*.png"), ("All", "*.*")], parent=self)
             if path:
                 fig.savefig(path, facecolor=DARK, dpi=150)
-                mb.showinfo("Gespeichert", f"Charts gespeichert:\n{path}", parent=self)
-        _ghost(btn_row, "Als PNG speichern", save_png).pack(side="right", padx=12)
+                mb.showinfo("Saved", f"Charts gespeichert:\n{path}", parent=self)
+        _ghost(btn_row, "Save as PNG", save_png).pack(side="right", padx=12)
 
 
 # ---------------------------------------------------------------------------
@@ -1411,7 +1411,7 @@ class ChartsWindow(tk.Toplevel):
 class ExportDialog(tk.Toplevel):
     """
     Exportiert Ausgaben und Zahlungen als CSV oder PDF.
-    CSV: stdlib, keine Abhängigkeit.
+    CSV: stdlib, no extra dependencies.
     PDF: fpdf2 (pip install fpdf2). Fallback: HTML-Datei.
     """
 
@@ -1443,13 +1443,13 @@ class ExportDialog(tk.Toplevel):
         frm = tk.Frame(self, bg=BG, padx=28)
         frm.pack(fill="x")
 
-        _lbl(frm, "INHALT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "CONTENT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._incl_exp  = tk.BooleanVar(value=True)
         self._incl_set  = tk.BooleanVar(value=True)
         self._incl_debt = tk.BooleanVar(value=True)
-        for var, txt in [(self._incl_exp,  "Ausgaben"),
-                         (self._incl_set,  "Zahlungen"),
-                         (self._incl_debt, "Schuldenübersicht")]:
+        for var, txt in [(self._incl_exp,  "Expenses"),
+                         (self._incl_set,  "Payments"),
+                         (self._incl_debt, "Debt summary")]:
             tk.Checkbutton(frm, text=txt, variable=var, bg=BG, fg=FG,
                            selectcolor=BG, activebackground=BG,
                            activeforeground=FG, font=FONT).pack(anchor="w")
@@ -1459,12 +1459,12 @@ class ExportDialog(tk.Toplevel):
 
         btn_row = tk.Frame(frm, bg=BG)
         btn_row.pack(fill="x", pady=6)
-        _btn(btn_row, "CSV exportieren",  self._export_csv,  width=18).pack(
+        _btn(btn_row, "Export CSV",  self._export_csv,  width=18).pack(
             side="left", padx=(0, 8))
-        _btn(btn_row, "PDF exportieren",  self._export_pdf,
+        _btn(btn_row, "Export PDF",  self._export_pdf,
              bg=BLUE, width=18).pack(side="left")
 
-        _lbl(frm, "PDF benötigt: pip install fpdf2",
+        _lbl(frm, "PDF requires: pip install fpdf2",
              fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", pady=(4, 0))
 
         tk.Frame(self, bg=BG, height=16).pack()
@@ -1473,21 +1473,21 @@ class ExportDialog(tk.Toplevel):
         import csv, tkinter.filedialog as fd2
         path = fd2.asksaveasfilename(
             title="CSV speichern", defaultextension=".csv",
-            filetypes=[("CSV", "*.csv"), ("Alle", "*.*")], parent=self)
+            filetypes=[("CSV", "*.csv"), ("All", "*.*")], parent=self)
         if not path:
             return
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if self._incl_exp.get():
-                w.writerow(["Typ","Datum","Beschreibung","Kategorie",
-                             "Betrag","Währung","Bezahlt von","Anteile",
-                             "Original-Betrag","Original-Währung"])
+                w.writerow(["Type","Datum","Beschreibung","Kategorie",
+                             "Betrag","Currency","Paid by","Splits",
+                             "Original amount","Original currency"])
                 for e in sorted(self.expenses, key=lambda x: x.display_date()):
                     splits = "; ".join(
                         f"{self._name(s.pubkey)}:{s.amount:.2f}"
                         for s in e.splits)
                     w.writerow([
-                        "Ausgabe",
+                        "Expense",
                         time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
                         e.description, e.category,
                         f"{e.amount:.2f}", e.currency,
@@ -1496,10 +1496,10 @@ class ExportDialog(tk.Toplevel):
                     ])
             if self._incl_set.get():
                 w.writerow([])
-                w.writerow(["Typ","Datum","Von","An","Betrag","Währung","Notiz"])
+                w.writerow(["Type","Datum","From","An","Betrag","Currency","Note"])
                 for s in sorted(self.settlements, key=lambda x: x.display_date()):
                     w.writerow([
-                        "Zahlung",
+                        "Payment",
                         time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
                         self._name(s.from_pubkey), self._name(s.to_pubkey),
                         f"{s.amount:.2f}", s.currency, s.note or "",
@@ -1507,26 +1507,26 @@ class ExportDialog(tk.Toplevel):
             if self._incl_debt.get():
                 from ledger import get_settlements
                 w.writerow([])
-                w.writerow(["Schuldenübersicht","","","","","",""])
-                w.writerow(["Von","An","Betrag","Währung"])
+                w.writerow(["Debt summary","","","","","",""])
+                w.writerow(["From","An","Betrag","Currency"])
                 for debt in get_settlements(self.expenses, self.settlements):
                     w.writerow([self._name(debt.debtor), self._name(debt.creditor),
                                 f"{debt.amount:.2f}", self.currency])
-        mb.showinfo("Exportiert", "CSV gespeichert:" + path, parent=self)
+        mb.showinfo("Exported", "CSV gespeichert:" + path, parent=self)
 
     def _export_pdf(self):
         import tkinter.filedialog as fd2
         try:
             from fpdf import FPDF
         except ImportError:
-            mb.showerror("fpdf2 fehlt",
-                         "Bitte installieren:\npip install fpdf2\n\n"
-                         "Alternativ: CSV exportieren.", parent=self)
+            mb.showerror("fpdf2 missing",
+                         "Please install:\npip install fpdf2\n\n"
+                         "Alternative: export CSV.", parent=self)
             return
 
         path = fd2.asksaveasfilename(
             title="PDF speichern", defaultextension=".pdf",
-            filetypes=[("PDF", "*.pdf"), ("Alle", "*.*")], parent=self)
+            filetypes=[("PDF", "*.pdf"), ("All", "*.*")], parent=self)
         if not path:
             return
 
@@ -1541,7 +1541,7 @@ class ExportDialog(tk.Toplevel):
         pdf.set_font("Helvetica", "", 9)
         pdf.set_text_color(100, 100, 100)
         pdf.cell(0, 6, f"Exportiert am {time.strftime('%d.%m.%Y %H:%M')}  "
-                       f"· Währung: {self.currency}", ln=True)
+                       f"· Currency: {self.currency}", ln=True)
         pdf.ln(4)
 
         def section(title):
@@ -1563,8 +1563,8 @@ class ExportDialog(tk.Toplevel):
             pdf.set_text_color(0, 0, 0)
 
         if self._incl_exp.get() and self.expenses:
-            section("Ausgaben")
-            row("Datum", "Beschreibung", "Kategorie", "Betrag", "Bezahlt von", "", bold=True,
+            section("Expenses")
+            row("Datum", "Beschreibung", "Kategorie", "Betrag", "Paid by", "", bold=True,
                 color=(80,80,80))
             for e in sorted(self.expenses, key=lambda x: x.display_date()):
                 row(
@@ -1575,12 +1575,12 @@ class ExportDialog(tk.Toplevel):
                 )
             total = sum(e.amount for e in self.expenses)
             pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(0, 6, f"Gesamt: {total:.2f} {self.currency}", ln=True)
+            pdf.cell(0, 6, f"Total: {total:.2f} {self.currency}", ln=True)
             pdf.ln(4)
 
         if self._incl_set.get() and self.settlements:
-            section("Erfasste Zahlungen")
-            row("Datum", "Von", "An", "Betrag", "", "", bold=True, color=(80,80,80))
+            section("Recorded payments")
+            row("Datum", "From", "An", "Betrag", "", "", bold=True, color=(80,80,80))
             for s in sorted(self.settlements, key=lambda x: x.display_date()):
                 row(
                     time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
@@ -1595,14 +1595,14 @@ class ExportDialog(tk.Toplevel):
             section("Offene Schulden")
             if debts:
                 for d in debts:
-                    row(self._name(d.debtor), "→", self._name(d.creditor),
+                    row(self._name(d.debtor), "->", self._name(d.creditor),
                         f"{d.amount:.2f} {self.currency}", "", "")
             else:
                 pdf.set_font("Helvetica", "", 9)
-                pdf.cell(0, 6, "Alle quitt.", ln=True)
+                pdf.cell(0, 6, "All settled.", ln=True)
 
         pdf.output(path)
-        mb.showinfo("Exportiert", "PDF gespeichert:" + path, parent=self)
+        mb.showinfo("Exported", "PDF gespeichert:" + path, parent=self)
 
 
 
@@ -1612,31 +1612,31 @@ class ExportDialog(tk.Toplevel):
 
 class ActivityLogWindow(tk.Toplevel):
     """
-    Zeigt alle Änderungen an der Gruppe chronologisch an.
+    Shows all group changes in chronological order.
 
     Quellen:
       1. Persistente Ereignisse  – aus Expenses + Settlements rekonstruiert
-         (wer hat wann was hinzugefügt / bearbeitet / gelöscht)
+         (who added/edited/deleted what and when)
       2. Laufzeit-Ereignisse     – P2P-Sync, Peer-Verbindungen, Dateiempfang
-         (nur für die aktuelle Session, nicht persistent)
+         (current session only, not persisted)
 
-    Das Fenster kann offen bleiben; neue Laufzeit-Einträge werden
-    per append() live hinzugefügt.
+    The window can stay open; new runtime entries are
+    added live via append().
     """
 
     # Farbe pro Level
     LEVEL_COLOR = {
-        "info":  "#2ecc8f",   # grün – eigene Aktionen
+        "info":  "#2ecc8f",   # green - own actions
         "sync":  "#4d9de0",   # blau – P2P-Sync
         "net":   "#a78bfa",   # lila – Netzwerk-Events
         "warn":  "#e0a03a",   # amber – Warnungen
-        "recv":  "#5dcaa5",   # türkis – empfangene Änderungen
+        "recv":  "#5dcaa5",   # teal - received changes
     }
 
     def __init__(self, parent, expenses, settlements, members,
                  runtime_log, group_currency, own_pubkey):
         super().__init__(parent)
-        self.title("Änderungsprotokoll")
+        self.title("Activity Log")
         self.configure(bg=BG)
         self.geometry("780x560")
         self.minsize(600, 400)
@@ -1658,17 +1658,17 @@ class ActivityLogWindow(tk.Toplevel):
         hdr = tk.Frame(self, bg=PANEL, height=46)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        _lbl(hdr, "ÄNDERUNGSPROTOKOLL", fg=GREEN, font=FONT_BOLD, bg=PANEL).pack(
+        _lbl(hdr, "ACTIVITY LOG", fg=GREEN, font=FONT_BOLD, bg=PANEL).pack(
             side="left", padx=14, pady=12)
 
         # Filter-Buttons (Level)
         filter_row = tk.Frame(hdr, bg=PANEL)
         filter_row.pack(side="right", padx=8)
         self._filter_var = tk.StringVar(value="alle")
-        for val, label in [("alle", "Alle"),
-                            ("info", "Aktionen"),
+        for val, label in [("alle", "All"),
+                            ("info", "Actions"),
                             ("sync", "Sync"),
-                            ("net",  "Netzwerk")]:
+                            ("net",  "Network")]:
             tk.Radiobutton(
                 filter_row, text=label, variable=self._filter_var,
                 value=val, command=self._apply_filter,
@@ -1717,12 +1717,12 @@ class ActivityLogWindow(tk.Toplevel):
         status.pack_propagate(False)
         self._status_lbl = _lbl(status, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
         self._status_lbl.pack(side="left", padx=12, pady=6)
-        _ghost(status, "Exportieren (TXT)", self._export_txt).pack(side="right", padx=8)
+        _ghost(status, "Export (TXT)", self._export_txt).pack(side="right", padx=8)
 
     # ── Daten aufbereiten ───────────────────────────────────────────
 
     def _populate(self, expenses, settlements, runtime_log):
-        """Alle Einträge – persistent + Laufzeit – zusammenführen."""
+        """Combines all entries: persisted + runtime."""
         self._all_entries: list[tuple[int, str, str]] = []  # (ts, level, msg)
 
         # Aus Expenses rekonstruieren
@@ -1732,7 +1732,7 @@ class ActivityLogWindow(tk.Toplevel):
             lvl = "info" if is_own else "recv"
             self._all_entries.append((
                 e.timestamp, lvl,
-                f"Ausgabe {'hinzugefügt' if not e.is_deleted else 'gelöscht'}: "
+                f"Expense {'added' if not e.is_deleted else 'deleted'}: "
                 f"'{e.description}'  {e.amount:.2f} {self._currency}  "
                 f"[{e.category}]  von {who}",
             ))
@@ -1743,12 +1743,12 @@ class ActivityLogWindow(tk.Toplevel):
             lvl = "info" if is_own else "recv"
             self._all_entries.append((
                 s.timestamp, lvl,
-                f"Zahlung erfasst: {self._name(s.from_pubkey)} → "
+                f"Zahlung erfasst: {self._name(s.from_pubkey)} -> "
                 f"{self._name(s.to_pubkey)}  {s.amount:.2f} {self._currency}"
                 + ('  "' + s.note + '"' if s.note else ""),
             ))
 
-        # Laufzeit-Einträge (P2P-Events dieser Session)
+        # Runtime entries (P2P events of this session)
         for ts, lvl, msg in runtime_log:
             self._all_entries.append((ts, lvl, msg))
 
@@ -1756,11 +1756,11 @@ class ActivityLogWindow(tk.Toplevel):
         self._all_entries.sort(key=lambda x: x[0], reverse=True)
 
         self._status_lbl.configure(
-            text=f"{len(self._all_entries)} Einträge gesamt")
+            text=f"{len(self._all_entries)} entries total")
         self._render_all()
 
     def _render_all(self):
-        """Alle Einträge (gefiltert) neu zeichnen."""
+        """Re-renders all entries with current filter applied."""
         for w in self._inner.winfo_children():
             w.destroy()
 
@@ -1778,11 +1778,11 @@ class ActivityLogWindow(tk.Toplevel):
 
         total = len(self._all_entries)
         self._count_lbl.configure(
-            text=f"{shown} von {total}" if shown < total else "")
+            text=f"{shown} of {total}" if shown < total else "")
 
         if shown == 0:
             _lbl(self._inner,
-                 "Keine Einträge." if total else "Noch keine Aktivität.",
+                 "No entries." if total else "No activity yet.",
                  fg=FG_DIM, font=FONT).pack(pady=30)
 
         # Scroll to top
@@ -1819,13 +1819,13 @@ class ActivityLogWindow(tk.Toplevel):
     # ── Live-Update ─────────────────────────────────────────────────
 
     def append(self, ts: int, level: str, msg: str) -> None:
-        """Fügt einen neuen Eintrag live hinzu (thread-safe via Tk.after)."""
+        """Adds a new entry live (thread-safe via Tk.after)."""
         self._all_entries.insert(0, (ts, level, msg))
         if len(self._all_entries) > 500:
             self._all_entries.pop()
         self._status_lbl.configure(
-            text=f"{len(self._all_entries)} Einträge gesamt")
-        # Nur neu zeichnen wenn kein aktiver Filter läuft
+            text=f"{len(self._all_entries)} entries total")
+        # Only re-render if no active filter would hide this entry
         query = self._search_var.get().strip()
         flvl  = self._filter_var.get()
         if not query and (flvl == "alle" or flvl == level):
@@ -1845,19 +1845,19 @@ class ActivityLogWindow(tk.Toplevel):
     def _export_txt(self):
         path = fd.asksaveasfilename(
             title="Log exportieren", defaultextension=".txt",
-            filetypes=[("Textdatei", "*.txt"), ("Alle", "*.*")],
+            filetypes=[("Textdatei", "*.txt"), ("All", "*.*")],
             parent=self,
         )
         if not path:
             return
         with open(path, "w", encoding="utf-8") as f:
-            f.write(f"SplitP2P – Änderungsprotokoll\n")
+            f.write("SplitP2P - Activity Log\n")
             f.write(f"Exportiert: {time.strftime('%d.%m.%Y %H:%M:%S')}\n")
             f.write("=" * 60 + "\n\n")
             for ts, lvl, msg in self._all_entries:
                 ts_str = time.strftime("%d.%m.%Y %H:%M:%S", time.localtime(ts))
                 f.write(f"[{ts_str}] [{lvl.upper():4s}]  {msg}\n")
-        mb.showinfo("Exportiert", "Log gespeichert:\n" + path, parent=self)
+        mb.showinfo("Exported", "Log gespeichert:\n" + path, parent=self)
 
 
 class App(tk.Tk):
@@ -1875,7 +1875,7 @@ class App(tk.Tk):
         self._own_name       = ""
         self._group_name     = ""
         self._group_pw       = ""
-        self._group_salt     = b""  # 16 zufällige Bytes, mit Gruppe gespeichert
+        self._group_salt     = b""  # 16 random bytes, stored with group config
         self._group_currency = "EUR"
         self._lamport_clock  = 0    # lokale Lamport-Uhr
         # Ledger-Cache: Salden + Settlements nur neu berechnen wenn noetig
@@ -1884,7 +1884,7 @@ class App(tk.Tk):
         self._cached_debts     = []
         self._rates: dict    = {}
         self._network        = None
-        # Aktivitäts-Log (in-memory, max. 500 Einträge)
+        # Activity log (in-memory, max 500 entries)
         self._log: list[tuple[int,str,str]] = []  # (ts, level, msg)
         self._log_window = None
         # Suche / Filter
@@ -1923,24 +1923,24 @@ class App(tk.Tk):
         self._net_label = _lbl(net_f, "offline", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
         self._net_label.pack(side="left", padx=(3, 0))
 
-        _ghost(hdr, "⚙ Einstellungen", self._open_settings).pack(side="right", padx=8)
-        _ghost(hdr, "🔑 Gruppe wechseln", self._switch_group).pack(side="right", padx=4)
-        _ghost(hdr, "📤 QR anzeigen", self._show_qr).pack(side="right", padx=4)
-        _ghost(hdr, "📥 QR importieren", self._import_qr).pack(side="right", padx=4)
+        _ghost(hdr, "⚙ Settings", self._open_settings).pack(side="right", padx=8)
+        _ghost(hdr, "🔑 Switch group", self._switch_group).pack(side="right", padx=4)
+        _ghost(hdr, "📤 Show QR", self._show_qr).pack(side="right", padx=4)
+        _ghost(hdr, "📥 Import QR", self._import_qr).pack(side="right", padx=4)
 
     def _build_sidebar(self, paned):
         sb = tk.Frame(paned, bg=PANEL, width=250)
         sb.pack_propagate(False)
         paned.add(sb, minsize=200)
 
-        _lbl(sb, "MITGLIEDER", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14, pady=8).pack(fill="x")
+        _lbl(sb, "MEMBERS", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14, pady=8).pack(fill="x")
         _div(sb).pack(fill="x")
         self._members_frame = tk.Frame(sb, bg=PANEL)
         self._members_frame.pack(fill="x", padx=12, pady=6)
-        _btn(sb, "+ Mitglied", self._add_member, width=20).pack(padx=12, pady=4)
+        _btn(sb, "+ Member", self._add_member, width=20).pack(padx=12, pady=4)
 
         _div(sb).pack(fill="x", pady=8)
-        _lbl(sb, "MEIN SALDO", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(fill="x")
+        _lbl(sb, "MY BALANCE", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(fill="x")
         self._balance_frame = tk.Frame(sb, bg=PANEL)
         self._balance_frame.pack(fill="x", padx=12, pady=6)
 
@@ -1948,25 +1948,25 @@ class App(tk.Tk):
 
         debt_hdr = tk.Frame(sb, bg=PANEL)
         debt_hdr.pack(fill="x")
-        _lbl(debt_hdr, "OFFENE SCHULDEN", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(side="left")
-        _ghost(debt_hdr, "+ Zahlung", self._record_settlement).pack(side="right", padx=6)
+        _lbl(debt_hdr, "OPEN DEBTS", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(side="left")
+        _ghost(debt_hdr, "+ Payment", self._record_settlement).pack(side="right", padx=6)
         self._debt_frame = tk.Frame(sb, bg=PANEL)
         self._debt_frame.pack(fill="x", padx=12, pady=6)
 
         _div(sb).pack(fill="x", pady=8)
-        _lbl(sb, "WECHSELKURSE", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(fill="x")
+        _lbl(sb, "EXCHANGE RATES", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(fill="x")
         self._rates_frame = tk.Frame(sb, bg=PANEL)
         self._rates_frame.pack(fill="x", padx=12, pady=4)
         self._rates_age_label = _lbl(sb, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14)
         self._rates_age_label.pack(fill="x")
-        _btn(sb, "↻ Aktualisieren", self._manual_refresh_rates,
+        _btn(sb, "↻ Refresh", self._manual_refresh_rates,
              bg=BORDER, fg=FG_MUTED, font=FONT_SMALL, width=20).pack(padx=12, pady=4)
 
         _div(sb).pack(fill="x", pady=8)
         _lbl(sb, "P2P SYNC", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(fill="x")
-        self._sync_label = _lbl(sb, "kein Sync", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14)
+        self._sync_label = _lbl(sb, "no sync", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14)
         self._sync_label.pack(fill="x")
-        _btn(sb, "⟳ History abrufen", self._manual_history_sync,
+        _btn(sb, "⟳ Fetch history", self._manual_history_sync,
              bg=BORDER, fg=FG_MUTED, font=FONT_SMALL, width=20).pack(padx=12, pady=4)
 
     def _build_main(self, paned):
@@ -1975,13 +1975,13 @@ class App(tk.Tk):
 
         toolbar = tk.Frame(main, bg=PANEL)
         toolbar.pack(fill="x")
-        _lbl(toolbar, "AUSGABEN & ZAHLUNGEN",
+        _lbl(toolbar, "EXPENSES & PAYMENTS",
              fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=16, pady=10).pack(side="left")
         _ghost(toolbar, "📋 Log",     self._open_log).pack(side="right", padx=4, pady=6)
         _ghost(toolbar, "📊 Charts",  self._open_charts).pack(side="right", padx=4, pady=6)
         _ghost(toolbar, "⬇ Export",   self._open_export).pack(side="right", padx=4, pady=6)
-        _ghost(toolbar, "+ Zahlung",  self._record_settlement).pack(side="right", padx=4, pady=6)
-        _btn(toolbar,   "+ Ausgabe",  self._add_expense).pack(side="right", padx=8, pady=6)
+        _ghost(toolbar, "+ Payment",  self._record_settlement).pack(side="right", padx=4, pady=6)
+        _btn(toolbar,   "+ Expense",  self._add_expense).pack(side="right", padx=8, pady=6)
         _div(main).pack(fill="x")
 
         # ── Suchzeile ────────────────────────────────────────────
@@ -1993,19 +1993,19 @@ class App(tk.Tk):
                  bd=4, width=22).pack(side="left", padx=(0, 10))
         self._search_text.trace_add("write", lambda *_: self._apply_filters())
 
-        _lbl(search_bar, "Kategorie:", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
+        _lbl(search_bar, "Category:", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
         from models import CATEGORIES
         cat_cb = _combobox(search_bar, self._filter_cat,
-                           ["Alle"] + CATEGORIES, width=16)
+                           ["All"] + CATEGORIES, width=16)
         cat_cb.pack(side="left", padx=(2, 10))
         self._filter_cat.trace_add("write", lambda *_: self._apply_filters())
 
-        _lbl(search_bar, "Mitglied:", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
-        self._member_filter_cb = _combobox(search_bar, self._filter_member, ["Alle"], width=14)
+        _lbl(search_bar, "Member:", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
+        self._member_filter_cb = _combobox(search_bar, self._filter_member, ["All"], width=14)
         self._member_filter_cb.pack(side="left", padx=(2, 10))
         self._filter_member.trace_add("write", lambda *_: self._apply_filters())
 
-        _ghost(search_bar, "✕ Zurücksetzen", self._reset_filters).pack(side="left")
+        _ghost(search_bar, "✕ Reset", self._reset_filters).pack(side="left")
         self._result_count = _lbl(search_bar, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
         self._result_count.pack(side="right", padx=10)
         _div(main).pack(fill="x")
@@ -2035,7 +2035,7 @@ class App(tk.Tk):
         self._rates_status = _lbl(self._statusbar, "", fg=FG_DIM, font=FONT_SMALL, bg=PANEL)
         self._rates_status.pack(side="left", padx=16, pady=8)
 
-    # ── Identität & Gruppe ───────────────────────────────────────────
+    # -- Identity & group --
 
     def _next_lamport(self, received: int = 0) -> int:
         """Naechsten Lamport-Timestamp berechnen: local = max(local, received) + 1."""
@@ -2174,14 +2174,14 @@ class App(tk.Tk):
     def _show_qr(self):
         """QR-Code der aktuellen Gruppe anzeigen."""
         if not self._group_name or not self._group_pw:
-            mb.showinfo("Keine Gruppe",
-                        "Zuerst eine Gruppe oeffnen.", parent=self)
+            mb.showinfo("No group",
+                        "Please open a group first.", parent=self)
             return
         if not self._group_salt:
             mb.showwarning(
-                "Kein Salt",
-                "Diese Gruppe hat keinen Salt (alte Gruppe).\n"
-                "Bitte eine neue Gruppe erstellen.", parent=self)
+                "No salt",
+                "This group has no salt (old group).\n"
+                "Please create a new group.", parent=self)
             return
         QRShowDialog(self, self._group_name, self._group_pw,
                      self._group_salt, self._group_currency)
@@ -2201,7 +2201,7 @@ class App(tk.Tk):
         self._cfg.set("groups", groups)
         self._cfg.save()
         mb.showinfo(
-            "Gruppe importiert",
+            "Group imported",
             f"Gruppe '{r['name']}' wurde importiert.\n"
             "Wechsle zur Gruppe ueber 'Gruppe wechseln'.",
             parent=self)
@@ -2213,12 +2213,12 @@ class App(tk.Tk):
         dlg.resizable(False, False)
         dlg.grab_set()
 
-        _lbl(dlg, "IDENTITÄT", fg=GREEN, font=FONT_LARGE).pack(
+        _lbl(dlg, "IDENTITY", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(20, 2), padx=24)
         _div(dlg).pack(fill="x", padx=24)
         frm = tk.Frame(dlg, bg=BG, padx=24, pady=12)
         frm.pack(fill="x")
-        _lbl(frm, "ANZEIGENAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        _lbl(frm, "DISPLAY NAME", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         name_var = tk.StringVar(value=self._own_name)
         tk.Entry(frm, textvariable=name_var, font=FONT, bg=PANEL, fg=FG,
                  insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=4)
@@ -2229,7 +2229,7 @@ class App(tk.Tk):
 
         if not first_run:
             _div(dlg).pack(fill="x", padx=24, pady=(12, 0))
-            _lbl(dlg, "SPEICHERORT", fg=GREEN, font=FONT_LARGE).pack(
+            _lbl(dlg, "STORAGE LOCATION", fg=GREEN, font=FONT_LARGE).pack(
                 anchor="w", pady=(12, 2), padx=24)
             _div(dlg).pack(fill="x", padx=24)
             sfrm = tk.Frame(dlg, bg=BG, padx=24, pady=8)
@@ -2246,7 +2246,7 @@ class App(tk.Tk):
                     p = fd.askdirectory(title="Ordner", parent=dlg) if d else \
                         fd.asksaveasfilename(title="Datenbankdatei", parent=dlg,
                             defaultextension=".db",
-                            filetypes=[("SQLite", "*.db"), ("Alle", "*.*")],
+                            filetypes=[("SQLite", "*.db"), ("All", "*.*")],
                             initialfile=os.path.basename(v.get()),
                             initialdir=os.path.dirname(os.path.abspath(v.get())))
                     if p: v.set(p)
@@ -2254,15 +2254,15 @@ class App(tk.Tk):
 
             db_var  = tk.StringVar(value=self._cfg.get("db_path", ""))
             att_var = tk.StringVar(value=self._cfg.get("storage_dir", ""))
-            _path_row("DATENBANKDATEI",  db_var)
-            _path_row("ANHANG-ORDNER",   att_var, is_dir=True)
-            _lbl(sfrm, "⚠  Änderungen wirksam beim nächsten Start. Daten bitte manuell verschieben.",
+            _path_row("DATABASE FILE",  db_var)
+            _path_row("ATTACHMENT FOLDER",   att_var, is_dir=True)
+            _lbl(sfrm, "⚠  Changes take effect on next start. Please move data files manually.",
                  fg=AMBER, font=FONT_SMALL, justify="left", wraplength=340).pack(anchor="w")
 
         def save():
             n = name_var.get().strip()
             if not n:
-                mb.showerror("Fehler", "Name darf nicht leer sein.", parent=dlg); return
+                mb.showerror("Error", "Name must not be empty.", parent=dlg); return
             self._own_name = n
             self._cfg.set("display_name", n); self._cfg.save()
             from storage import save_member
@@ -2283,8 +2283,8 @@ class App(tk.Tk):
         btn_row = tk.Frame(dlg, bg=BG, padx=24, pady=16)
         btn_row.pack(fill="x")
         if not first_run:
-            _ghost(btn_row, "Abbrechen", dlg.destroy).pack(side="right", padx=(6, 0))
-        _btn(btn_row, "Speichern", save).pack(side="right")
+            _ghost(btn_row, "Cancel", dlg.destroy).pack(side="right", padx=(6, 0))
+        _btn(btn_row, "Save", save).pack(side="right")
         dlg.wait_window()
 
     # ── Wechselkurse ────────────────────────────────────────────────
@@ -2298,7 +2298,7 @@ class App(tk.Tk):
         threading.Thread(target=_work, daemon=True, name="rates-fetch").start()
 
     def _manual_refresh_rates(self):
-        self._rates_status.configure(text="Kurse werden geholt…", fg=AMBER)
+        self._rates_status.configure(text="Fetching rates...", fg=AMBER)
         def _work():
             from currency import force_refresh, rates_age_str, load_rates
             ok = force_refresh(self._db, self._group_currency)
@@ -2311,7 +2311,7 @@ class App(tk.Tk):
         self._rates_age_label.configure(text=f"Stand: {age_str}")
         if force:
             self._rates_status.configure(
-                text=f"✓ Kurse aktualisiert ({age_str})" if ok else "⚠ Online-Abruf fehlgeschlagen",
+                text=f"✓ Kurse aktualisiert ({age_str})" if ok else "⚠ Online fetch failed",
                 fg=GREEN if ok else RED)
         else:
             self._rates_status.configure(text="", fg=FG_DIM)
@@ -2343,8 +2343,8 @@ class App(tk.Tk):
         pk = dlg.result["pubkey"]
         if not pk:
             pk = get_public_key_hex(generate_private_key())
-            mb.showinfo("Key generiert",
-                        f"Temporärer Public Key für '{dlg.result['name']}':\n\n{pk}",
+            mb.showinfo("Key generated",
+                        f"Temporary public key for '{dlg.result['name']}':\n\n{pk}",
                         parent=self)
         m = Member(pubkey=pk, display_name=dlg.result["name"])
         save_member(self._db, m)
@@ -2394,8 +2394,8 @@ class App(tk.Tk):
         from storage import load_all_members
         members = load_all_members(self._db)
         if not members:
-            mb.showwarning("Keine Mitglieder",
-                           "Bitte erst Mitglieder hinzufügen.", parent=self); return
+            mb.showwarning("No members",
+                           "Please add members first.", parent=self); return
         dlg = ExpenseDialog(self, members, self._own_pubkey,
                             self._group_currency, self._rates)
         if not dlg.result: return
@@ -2403,7 +2403,7 @@ class App(tk.Tk):
         exp = Expense.create(**dlg.result)
         self._save_expense(exp)
         self._append_log('info',
-            f"Ausgabe hinzugefügt: '{exp.description}' "
+            f"Expense added: '{exp.description}' "
             f"{exp.amount:.2f} {exp.currency}")
         self._refresh()
 
@@ -2411,8 +2411,8 @@ class App(tk.Tk):
         # Nur der urspruengliche Eintraeger darf bearbeiten
         if expense.payer_pubkey != self._own_pubkey:
             mb.showerror(
-                "Keine Berechtigung",
-                "Nur der urspruengliche Eintraeger kann diese Ausgabe bearbeiten.",
+                "Permission denied",
+                "Only the original creator can edit this expense.",
                 parent=self)
             return
         from storage import load_all_members
@@ -2429,18 +2429,18 @@ class App(tk.Tk):
                           signature="", **result)
         self._save_expense(updated)
         self._append_log('info',
-            f"Ausgabe bearbeitet: '{updated.description}' "
+            f"Expense edited: '{updated.description}' "
             f"{updated.amount:.2f} {updated.currency}")
         self._refresh()
 
     def _delete_expense(self, expense):
         if expense.payer_pubkey != self._own_pubkey:
             mb.showerror(
-                "Keine Berechtigung",
-                "Nur der urspruengliche Eintraeger kann diese Ausgabe loeschen.",
+                "Permission denied",
+                "Only the original creator can delete this expense.",
                 parent=self)
             return
-        if not mb.askyesno("Löschen", f"'{expense.description}' löschen?", parent=self): return
+        if not mb.askyesno("Delete", f"Delete '{expense.description}'?", parent=self): return
         from crypto import sign_expense, encrypt_expense
         from storage import soft_delete_expense_blob
         expense.is_deleted = True
@@ -2450,7 +2450,7 @@ class App(tk.Tk):
         soft_delete_expense_blob(self._db, expense.id, blob, expense.timestamp)
         if self._network:
             self._network.publish_expense(expense.id, blob, expense.timestamp)
-        self._append_log('info', f"Ausgabe gelöscht: '{expense.description}'")
+        self._append_log('info', f"Expense deleted: '{expense.description}'")
         self._refresh()
 
     # ── Ausgleichszahlungen ─────────────────────────────────────────
@@ -2459,8 +2459,8 @@ class App(tk.Tk):
         from storage import load_all_members
         members = load_all_members(self._db)
         if len(members) < 2:
-            mb.showwarning("Zu wenige Mitglieder",
-                           "Mind. 2 Mitglieder nötig.", parent=self); return
+            mb.showwarning("Too few members",
+                           "At least 2 members required.", parent=self); return
         dlg = SettlementDialog(self, members, self._own_pubkey,
                                self._group_currency, self._rates, prefill)
         if not dlg.result: return
@@ -2470,13 +2470,13 @@ class App(tk.Tk):
         from storage import load_all_members
         _m = {m.pubkey: m.display_name for m in load_all_members(self._db)}
         self._append_log('info',
-            f"Zahlung erfasst: {_m.get(rs.from_pubkey, rs.from_pubkey[:8])} "
-            f"→ {_m.get(rs.to_pubkey, rs.to_pubkey[:8])} "
+            f"Payment recorded: {_m.get(rs.from_pubkey, rs.from_pubkey[:8])} "
+            f"-> {_m.get(rs.to_pubkey, rs.to_pubkey[:8])} "
             f"{rs.amount:.2f} {rs.currency}")
         self._refresh()
 
     def _delete_settlement(self, settlement):
-        if not mb.askyesno("Löschen", "Zahlung löschen?", parent=self): return
+        if not mb.askyesno("Delete", "Delete payment?", parent=self): return
         from crypto import sign_settlement, encrypt_settlement
         from storage import soft_delete_settlement_blob
         settlement.is_deleted = True
@@ -2507,7 +2507,7 @@ class App(tk.Tk):
     def _render_members(self, members):
         for w in self._members_frame.winfo_children(): w.destroy()
         if not members:
-            _lbl(self._members_frame, "Noch keine Mitglieder",
+            _lbl(self._members_frame, "No members yet",
                  fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(anchor="w"); return
         for m in members:
             row = tk.Frame(self._members_frame, bg=PANEL)
@@ -2516,7 +2516,7 @@ class App(tk.Tk):
                  font=("Segoe UI", 8), bg=PANEL).pack(side="left")
             _lbl(row, m.display_name, fg=FG, font=FONT_SMALL, bg=PANEL).pack(side="left", padx=4)
             if m.pubkey == self._own_pubkey:
-                _lbl(row, "(du)", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
+                _lbl(row, "(you)", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
 
     def _render_balance(self, expenses, settlements, members):
         from ledger import balance_summary
@@ -2526,7 +2526,7 @@ class App(tk.Tk):
         net = info["net"]
 
         if abs(net) < 0.01:
-            _lbl(self._balance_frame, "Alles quitt ✓",
+            _lbl(self._balance_frame, "All settled ✓",
                  fg=GREEN, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
             return
 
@@ -2535,10 +2535,10 @@ class App(tk.Tk):
         _lbl(self._balance_frame, f"{sign}{net:.2f} {self._group_currency}",
              fg=color, font=FONT_BOLD, bg=PANEL).pack(anchor="w")
         _lbl(self._balance_frame,
-             "du bekommst noch" if net > 0 else "du schuldest noch",
+             "you are owed" if net > 0 else "you owe",
              fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
 
-        # Aufschlüsselung pro Person
+        # Breakdown per person
         pk_to_name = {m.pubkey: m.display_name for m in members}
         for pk, bal in balances.items():
             if pk == self._own_pubkey or abs(bal) < 0.01: continue
@@ -2552,7 +2552,7 @@ class App(tk.Tk):
 
         _, sugg = self._get_cached_ledger(expenses, settlements)
         if not sugg:
-            _lbl(self._debt_frame, "Alle quitt ✓",
+            _lbl(self._debt_frame, "All settled ✓",
                  fg=GREEN, font=FONT_SMALL, bg=PANEL).pack(anchor="w"); return
 
         for s in sugg:
@@ -2561,7 +2561,7 @@ class App(tk.Tk):
             color = RED if is_me_d else (GREEN if is_me_c else FG_MUTED)
             f = tk.Frame(self._debt_frame, bg=PANEL)
             f.pack(fill="x", pady=2)
-            _lbl(f, f"{name(s.debtor)} → {name(s.creditor)}",
+            _lbl(f, f"{name(s.debtor)} -> {name(s.creditor)}",
                  fg=color, font=FONT_SMALL, bg=PANEL,
                  wraplength=180, justify="left").pack(anchor="w")
             amt_row = tk.Frame(f, bg=PANEL)
@@ -2569,7 +2569,7 @@ class App(tk.Tk):
             _lbl(amt_row, f"{s.amount:.2f} {self._group_currency}",
                  fg=color, font=FONT_BOLD, bg=PANEL).pack(side="left")
             if is_me_d:
-                _ghost(amt_row, "✓ bezahlt",
+                _ghost(amt_row, "✓ paid",
                        lambda s=s: self._record_settlement(
                            {"from_pubkey": s.debtor, "to_pubkey": s.creditor,
                             "amount": s.amount})).pack(side="left", padx=6)
@@ -2580,7 +2580,7 @@ class App(tk.Tk):
         pk_to_name = {m.pubkey: m.display_name for m in members}
 
         # Mitglied-Dropdown aktualisieren
-        names = ["Alle"] + [m.display_name for m in members]
+        names = ["All"] + [m.display_name for m in members]
         self._member_filter_cb.configure(values=names)
 
         # Suchbegriff + Filter auslesen
@@ -2590,7 +2590,7 @@ class App(tk.Tk):
         mbr_pk  = next((m.pubkey for m in members if m.display_name == mbr_f), None)
 
         def matches_expense(e):
-            if cat_f and cat_f != "Alle" and e.category != cat_f: return False
+            if cat_f and cat_f != "All" and e.category != cat_f: return False
             if mbr_pk and mbr_pk != e.payer_pubkey and \
                not any(s.pubkey == mbr_pk for s in e.splits): return False
             if query and query not in e.description.lower() and \
@@ -2599,7 +2599,7 @@ class App(tk.Tk):
             return True
 
         def matches_settlement(s):
-            if cat_f and cat_f != "Alle": return False
+            if cat_f and cat_f != "All": return False
             if mbr_pk and s.from_pubkey != mbr_pk and s.to_pubkey != mbr_pk: return False
             if query:
                 n_from = pk_to_name.get(s.from_pubkey, "")
@@ -2620,12 +2620,12 @@ class App(tk.Tk):
         total_all = len(expenses) + len(settlements)
         if total_all > 0:
             self._result_count.configure(
-                text=f"{len(events)} von {total_all}" if len(events) < total_all
+                text=f"{len(events)} of {total_all}" if len(events) < total_all
                      else "")
 
         if not events:
-            msg = "Keine Treffer." if (query or cat_f != "Alle" or mbr_f != "Alle") \
-                  else "Noch keine Ausgaben."
+            msg = "No results." if (query or cat_f != "All" or mbr_f != "All") \
+                  else "No expenses yet."
             _lbl(self._event_list, msg, fg=FG_DIM, font=FONT).pack(pady=40); return
 
         for etype, _, obj in events:
@@ -2657,7 +2657,7 @@ class App(tk.Tk):
         _lbl(left, splits_txt, fg=FG_MUTED, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
 
         if exp.original_amount and exp.original_currency:
-            _lbl(left, f"ursprünglich: {exp.original_amount:.2f} {exp.original_currency}",
+            _lbl(left, f"originally: {exp.original_amount:.2f} {exp.original_currency}",
                  fg=AMBER, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
 
         if exp.attachment:
@@ -2684,7 +2684,7 @@ class App(tk.Tk):
             _ghost(btn_r, "✕", lambda e=exp: self._delete_expense(e)).pack(side="left", padx=2)
         else:
             # Nur lesend: kein Edit/Delete fuer fremde Ausgaben
-            _lbl(btn_r, "(nur lesen)", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left", padx=4)
+            _lbl(btn_r, "(read only)", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left", padx=4)
 
         _div(self._event_list).pack(fill="x")
 
@@ -2704,7 +2704,7 @@ class App(tk.Tk):
         if s.note:
             _lbl(left, s.note, fg=FG_DIM, font=FONT_SMALL, bg=BG).pack(anchor="w")
         if s.original_amount and s.original_currency:
-            _lbl(left, f"ursprünglich: {s.original_amount:.2f} {s.original_currency}",
+            _lbl(left, f"originally: {s.original_amount:.2f} {s.original_currency}",
                  fg=AMBER, font=FONT_SMALL, bg=BG).pack(anchor="w")
 
         right = tk.Frame(row, bg=BG)
@@ -2778,7 +2778,7 @@ class App(tk.Tk):
         if not self._network: return
         n = self._network.peer_count
         self._net_label.configure(
-            text=f"online  {n} Peer{'s' if n != 1 else ''}" if n else "online  keine Peers")
+            text=f"online  {n} peer{'s' if n != 1 else ''}" if n else "online  no peers")
 
     def _on_net_expense(self, expense_id, blob):
         from storage import save_expense_blob, delete_attachment_if_unreferenced
@@ -2801,7 +2801,7 @@ class App(tk.Tk):
                 if deleted:
                     self._append_log(
                         'sync',
-                        f"Anhang per Sync geloescht: {exp.attachment.filename}")
+                        f"Attachment deleted via sync: {exp.attachment.filename}")
         elif exp.attachment:
             # Neue/aktualisierte Ausgabe: fehlenden Anhang vom Peer anfordern.
             from storage import attachment_exists
@@ -2836,11 +2836,11 @@ class App(tk.Tk):
             self._refresh()
 
 
-    # ── Aktivitäts-Log ───────────────────────────────────────────────
+    # -- Activity log --
 
     def _append_log(self, level: str, msg: str) -> None:
         """
-        Fügt einen Eintrag in den In-Memory-Log ein.
+        Appends an entry to the in-memory log.
         level: 'info' | 'sync' | 'net' | 'warn'
         Aktualisiert das Log-Fenster falls es offen ist.
         """
@@ -2852,7 +2852,7 @@ class App(tk.Tk):
             self._log_window.append(int(_t.time()), level, msg)
 
     def _open_log(self) -> None:
-        """Öffnet das Log-Fenster (oder bringt es nach vorne)."""
+        """Opens the log window (or brings it to front)."""
         from storage import load_all_members
         members     = load_all_members(self._db)
         expenses    = self._load_expenses()
@@ -2879,21 +2879,21 @@ class App(tk.Tk):
         msg = f"Sync {ts}: +{n_exp} Ausgaben, +{n_set} Zahlungen"
         self._sync_label.configure(text=msg, fg=GREEN)
         self._refresh()
-        # Status nach 8s zurücksetzen
+        # Reset status after 8s
         self.after(8000, lambda: self._sync_label.configure(
-            text="letzter Sync: " + ts, fg=FG_DIM))
+            text="last sync: " + ts, fg=FG_DIM))
 
     def _manual_history_sync(self) -> None:
         if not self._network or not self._network.is_online:
-            mb.showinfo("Offline", "Kein P2P-Netz verbunden.", parent=self)
+            mb.showinfo("Offline", "No P2P network connected.", parent=self)
             return
-        self._sync_label.configure(text="Sync läuft…", fg=AMBER)
+        self._sync_label.configure(text="Syncing...", fg=AMBER)
         self._network.request_history_from_all()
 
     # ── Filter-Helfer ────────────────────────────────────────────────
 
     def _apply_filters(self):
-        """Wird bei jeder Änderung der Suchleiste aufgerufen."""
+        """Called on every search bar change."""
         from storage import load_all_members
         members     = load_all_members(self._db)
         expenses    = self._load_expenses()
@@ -2902,8 +2902,8 @@ class App(tk.Tk):
 
     def _reset_filters(self):
         self._search_text.set("")
-        self._filter_cat.set("Alle")
-        self._filter_member.set("Alle")
+        self._filter_cat.set("All")
+        self._filter_member.set("All")
 
     # ── Charts ───────────────────────────────────────────────────────
 

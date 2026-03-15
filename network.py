@@ -2,23 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Network Layer – P2P Expense Synchronisation
+Network Layer - P2P Expense Sync
 
 py-libp2p nutzt trio als Async-Backend (ab ~0.2).
-Dieser Code läuft daher in einem Daemon-Thread mit trio.run().
+This code runs in a daemon thread via trio.run().
 
 Thread-Kommunikation:
-  tkinter  →  Trio   : queue.SimpleQueue (outgoing packets + commands)
-  Trio     →  tkinter: callbacks.on_*()  (werden in tkinter via root.after gerufen)
+  tkinter  ->  Trio   : queue.SimpleQueue (outgoing packets + commands)
+  Trio     ->  tkinter: callbacks.on_*()  (werden in tkinter via root.after gerufen)
 
 Drei Protokolle:
   /splitp2p/sync/1.0     – GossipSub (Expenses, Settlements, Members)
-  /splitp2p/files/1.0    – Direkt-Stream: SHA-256-Anfrage → Binärdaten
+  /splitp2p/files/1.0    - direct stream: SHA-256 request -> binary data
   /splitp2p/history/1.0  – Direkt-Stream: Delta-Sync beim Peer-Connect
 
 NAT-Traversal-Stack (alle optional, graceful fallback):
   AutoNAT           – Erkennt ob wir hinter NAT/Firewall sind
-  Circuit Relay v2  – Verbindungen über öffentliche IPFS-Relay-Nodes
+  Circuit Relay v2  - connections via public IPFS relay nodes
   Kademlia DHT      – Topic-ID im weltweiten DHT advertisen und suchen;
                       findet Gruppenmitglieder ohne direktes Treffen
 """
@@ -91,14 +91,14 @@ class P2PNetwork:
     def __init__(self, group_password: str, callbacks: NetworkCallbacks):
         self.callbacks     = callbacks
         self.callbacks     = callbacks
-        self._group_pw     = group_password   # für Blob-Verifikation im Netz
+        self._group_pw     = group_password   # for blob verification
         self._group_salt    = b""              # wird von gui.py gesetzt
         self._host         = None
         self._pubsub    = None
         self._sub       = None
         self._running   = False
         self._peers: set[str] = set()
-        # Thread-safe queue: tkinter → trio
+        # Thread-safe queue: tkinter -> trio
         # Items: dicts mit "cmd" key:
         #   {"cmd": "publish",  "data": bytes}
         #   {"cmd": "req_file", "sha256": str}
@@ -108,8 +108,11 @@ class P2PNetwork:
         self._dht        = None
         self._autonat    = None
         self._relay      = None
-        self._behind_nat = True  # konservativ bis AutoNAT prüft
-        os.makedirs("storage", exist_ok=True)
+        self._behind_nat = True  # assume worst case until AutoNAT checks
+        # Storage dir is configured via storage.configure_paths() before start
+        # Do NOT hardcode "storage" here - use the configured path
+        from storage import STORAGE_DIR
+        os.makedirs(STORAGE_DIR, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -141,13 +144,13 @@ class P2PNetwork:
             from libp2p.pubsub.pubsub import Pubsub
             from libp2p.utils.address_validation import get_available_interfaces
         except ImportError as e:
-            logger.warning("libp2p not installed – offline mode (%s)", e)
+            logger.warning("libp2p not installed - offline mode (%s)", e)
             self.callbacks.on_status_changed(False, "offline-mode")
             return
 
         import trio
 
-        # listen_addrs: Port 0 → OS wählt freien Port
+        # listen_addrs: port 0 -> OS picks a free port
         try:
             listen_addrs = get_available_interfaces(0)
         except Exception:
@@ -177,7 +180,7 @@ class P2PNetwork:
             async with self._host.run(listen_addrs=listen_addrs):
                 peer_id = self._host.get_id().to_string()
                 self._running = True
-                logger.info("P2P node started. PeerID: %s", peer_id)
+                logger.info("P2P node started, peer ID: %s", peer_id)
 
                 self._sub = await self._pubsub.subscribe(self.topic_id)
                 self._host.set_stream_handler(FILE_PROTOCOL,    self._file_serve_handler)
@@ -203,14 +206,14 @@ class P2PNetwork:
 
     def set_group_salt(self, salt: bytes) -> None:
         """
-        Setzt den Gruppen-Salt und leitet daraus die Topic-ID ab.
-        Muss VOR start_in_thread() aufgerufen werden.
-        Topic-ID = SHA256(salt)[:16] - zufaellig, nicht aus Passwort ratbar.
+        Sets the group salt and derives the topic ID from it.
+        Must be called BEFORE start_in_thread().
+        Topic ID = SHA256(salt)[:16] - random, not guessable from password.
         """
         from crypto import group_topic_id
         self._group_salt = salt
         self.topic_id    = "splitp2p-" + group_topic_id(salt)
-        logger.info("Topic-ID gesetzt: %s", self.topic_id)
+        logger.info("Topic ID set: %s", self.topic_id)
 
     def stop(self) -> None:
         self._running = False
@@ -263,7 +266,7 @@ class P2PNetwork:
                 with trio.move_on_after(10):
                     await self._host.connect(peer_info)
                     connected += 1
-                    logger.info("Bootstrap: %s", addr_str.split("/")[-1][:16])
+                    logger.info("Bootstrap connected: %s", addr_str.split("/")[-1][:16])
             except Exception as e:
                 logger.debug("Bootstrap %s failed: %s", addr_str[-30:], e)
 
@@ -275,10 +278,10 @@ class P2PNetwork:
     async def _setup_nat_traversal(self) -> None:
         """
         Aktiviert AutoNAT, Circuit Relay v2 und Kademlia DHT.
-        Alle drei sind optional – fehlendes Modul → graceful skip.
+        Alle drei sind optional – fehlendes Modul -> graceful skip.
 
         AutoNAT:      erkennt ob wir direkt erreichbar sind.
-        Circuit Relay: falls NAT erkannt → Reservierung bei IPFS-Relay-Nodes.
+        Circuit Relay: falls NAT erkannt -> Reservierung bei IPFS-Relay-Nodes.
         Kademlia DHT: advertise + find topic_id im globalen Netz;
                       Peers selber Gruppe finden sich ohne Bootstrap.
         """
@@ -296,15 +299,15 @@ class P2PNetwork:
             # Topic-ID im DHT advertisen (Peers selber Gruppe finden uns)
             await self._dht.set(self.topic_id,
                                 self._host.get_id().to_string())
-            logger.info("Kademlia DHT aktiv, topic advertised")
+            logger.info("Kademlia DHT active, topic advertised")
             # Andere Peers suchen die dieselbe Gruppe advertisen
             result = await self._dht.get(self.topic_id)
             if result:
-                logger.info("DHT: Gruppen-Peer gefunden: %s", str(result)[:40])
+                logger.info("DHT: group peer found: %s", str(result)[:40])
         except ImportError:
-            logger.debug("libp2p.kademlia nicht verfügbar – DHT übersprungen")
+            logger.debug("libp2p.kademlia not available - DHT skipped")
         except Exception as e:
-            logger.warning("Kademlia DHT Fehler: %s", e)
+            logger.warning("Kademlia DHT error: %s", e)
 
         # ── AutoNAT ─────────────────────────────────────────────────
         try:
@@ -312,13 +315,13 @@ class P2PNetwork:
             self._autonat = AutoNATService(self._host)
             with trio.move_on_after(15):
                 reachability = await self._autonat.probe_reachability()
-            logger.info("AutoNAT: %s", reachability)
+            logger.info("AutoNAT reachability: %s", reachability)
             self._behind_nat = reachability != "public"
         except ImportError:
-            logger.debug("libp2p.autonat nicht verfügbar – AutoNAT übersprungen")
-            self._behind_nat = True  # konservativ annehmen
+            logger.debug("libp2p.autonat not available - AutoNAT skipped")
+            self._behind_nat = True  # assume worst case
         except Exception as e:
-            logger.warning("AutoNAT Fehler: %s", e)
+            logger.warning("AutoNAT error: %s", e)
             self._behind_nat = True
 
         # ── Circuit Relay v2 (nur wenn hinter NAT) ──────────────────
@@ -329,11 +332,11 @@ class P2PNetwork:
                 # Reservierung bei einem der verbundenen Bootstrap-Peers
                 with trio.move_on_after(20):
                     await self._relay.reserve()
-                logger.info("Circuit Relay v2: Reservierung aktiv")
+                logger.info("Circuit Relay v2: reservation active")
             except ImportError:
-                logger.debug("Circuit Relay v2 nicht verfügbar")
+                logger.debug("Circuit Relay v2 not available")
             except Exception as e:
-                logger.warning("Circuit Relay v2 Fehler: %s", e)
+                logger.warning("Circuit Relay v2 error: %s", e)
 
 
     # ------------------------------------------------------------------
@@ -354,42 +357,42 @@ class P2PNetwork:
     def _verify_and_decode_blob(self, blob: bytes,
                                  ptype: str) -> bool:
         """
-        Entschlüsselt den Blob und prüft die Ed25519-Signatur.
-        Gibt True zurück wenn gültig, False wenn verworfen.
+        Decrypts the blob and verifies the Ed25519 signature.
+        Returns True if valid, False if rejected.
 
         Ablauf:
-          1. AES-GCM entschlüsseln → Expense/Settlement-Objekt
-          2. Ed25519-Signatur des Payers/Senders prüfen
-          3. Nur bei Erfolg: True → Callback wird aufgerufen
+          1. AES-GCM decrypt -> Expense/Settlement object
+          2. Verify Ed25519 signature of payer/sender
+          3. Nur bei Erfolg: True -> Callback wird aufgerufen
 
         Warum hier und nicht im GUI-Callback:
-          Frühe Verifikation verhindert dass manipulierte Blobs
-          überhaupt die DB oder die UI erreichen. Jeder Peer im
-          Netz könnte sonst Müll-Pakete mit gültiger topic_id senden.
+          Early verification prevents tampered blobs from ever
+          reaching the DB or UI. Any peer in the network could
+          otherwise send junk packets with a valid topic ID.
         """
         try:
             from crypto import (decrypt_expense, verify_expense,
                                 decrypt_settlement, verify_settlement)
         except ImportError:
-            return True  # crypto nicht verfügbar → kein Filter
+            return True  # crypto not available -> no filter
 
         try:
             if ptype == "expense":
                 obj = decrypt_expense(blob, self._group_pw, self._group_salt)
                 if obj is None:
-                    logger.warning("Expense-Blob nicht entschlüsselbar "
+                    logger.warning("Expense blob not decryptable "
                                    "(falscher Key oder korrupt)")
                     return False
                 if not verify_expense(obj):
-                    logger.warning("Ungültige Signatur auf Expense %s "
+                    logger.warning("Invalid signature on expense %s "
                                    "– verworfen", obj.id[:8])
                     return False
-                # Creator-Integritaet: payer_pubkey unveraenderlich.
-                # Ed25519-Signatur garantiert das bereits kryptografisch --
-                # ein Angreifer koennte obj.payer_pubkey nicht aendern ohne
-                # die Signatur zu brechen. Dieser Check ist Defense-in-Depth:
-                # Er fangt den Fall ab, dass jemand einen neuen Blob mit
-                # geaendertem payer_pubkey aber gueltigem eigenem Key signiert.
+                # Creator integrity: payer_pubkey must never change.
+                # The Ed25519 signature already guarantees this cryptographically -
+                # an attacker cannot change obj.payer_pubkey without breaking
+                # the signature. This check is defense-in-depth:
+                # it catches the case where someone signs a new blob with
+                # a changed payer_pubkey but their own valid key.
                 try:
                     from storage import DB_PATH as _dbp
                     import sqlite3 as _sq
@@ -404,25 +407,25 @@ class P2PNetwork:
                             bytes(_r[0]), self._group_pw, self._group_salt)
                         if existing and existing.payer_pubkey != obj.payer_pubkey:
                             logger.warning(
-                                "Expense %s: payer_pubkey geaendert – verworfen",
+                                "Expense %s: payer_pubkey changed - rejected",
                                 obj.id[:8])
                             return False
                 except Exception as _e:
-                    logger.debug("Creator-Check DB-Fehler: %s", _e)
+                    logger.debug("Creator check DB error: %s", _e)
 
-                logger.debug("Expense %s verifiziert OK", obj.id[:8])
+                logger.debug("Expense %s verified OK", obj.id[:8])
                 return True
 
             elif ptype == "settlement":
                 obj = decrypt_settlement(blob, self._group_pw, self._group_salt)
                 if obj is None:
-                    logger.warning("Settlement-Blob nicht entschlüsselbar")
+                    logger.warning("Settlement blob not decryptable")
                     return False
                 if not verify_settlement(obj):
-                    logger.warning("Ungültige Signatur auf Settlement %s "
+                    logger.warning("Invalid signature on settlement %s "
                                    "– verworfen", obj.id[:8])
                     return False
-                logger.debug("Settlement %s verifiziert OK", obj.id[:8])
+                logger.debug("Settlement %s verified OK", obj.id[:8])
                 return True
 
         except Exception as e:
@@ -442,12 +445,12 @@ class P2PNetwork:
         try:
             blob = bytes.fromhex(packet["blob"]) if "blob" in packet else b""
         except ValueError:
-            logger.warning("Ungültiger hex-Blob in Paket")
+            logger.warning("Invalid hex blob in packet")
             return
 
         if ptype in ("expense", "settlement"):
             if not self._verify_and_decode_blob(blob, ptype):
-                return  # Signatur ungültig oder falscher Key – verwerfen
+                return  # invalid signature or wrong key - reject
             if ptype == "expense":
                 self.callbacks.on_expense_received(packet["id"], blob)
             else:
@@ -482,7 +485,7 @@ class P2PNetwork:
                             break
                     if not ok:
                         logger.warning(
-                            "File %s von keinem der %d Peers erhaltbar",
+                            "File %s unavailable from any of %d peers",
                             sha[:12], len(peers))
                 elif cmd["cmd"] == "req_history_from":
                     await self._request_history(cmd["peer_id"])
@@ -553,10 +556,10 @@ class P2PNetwork:
 
     async def _cleanup_stale_tmp(self) -> None:
         """
-        Loescht beim Start alle *.tmp-Dateien im storage/-Ordner.
-        Diese stammen von abgebrochenen Downloads und sind immer
-        unvollstaendig (der Hash stimmt nie ueberein).
-        Wird einmalig beim Start als Trio-Task ausgefuehrt.
+        Deletes all *.tmp files in the storage folder at startup.
+        These are always from aborted downloads and always incomplete
+        (the hash never matches).
+        Runs once at startup as a Trio task.
         """
         from storage import STORAGE_DIR
         try:
@@ -567,21 +570,21 @@ class P2PNetwork:
                     try:
                         os.remove(path)
                         removed += 1
-                        logger.info("Stale tmp removed: %s", fname)
+                        logger.info("Stale .tmp removed: %s", fname)
                     except OSError as e:
-                        logger.warning("Cannot remove tmp %s: %s", fname, e)
+                        logger.warning("Cannot remove .tmp %s: %s", fname, e)
             if removed:
-                logger.info("Startup cleanup: %d stale .tmp file(s) removed",
+                logger.info("Startup cleanup: removed %d stale .tmp file(s)",
                             removed)
         except Exception as e:
-            logger.warning("Startup tmp cleanup failed: %s", e)
+            logger.warning("Startup .tmp cleanup failed: %s", e)
 
     async def _download_file(self, peer_id_str: str, sha256: str) -> bool:
         """
-        Laedt eine Datei von einem Peer herunter.
-        Retry-Logik: bis zu DOWNLOAD_RETRIES Versuche mit exponentiellem
-        Backoff. Bei Hash-Fehler oder Timeout wird die .tmp-Datei
-        geloescht und der naechste Versuch gestartet.
+        Downloads a file from a peer.
+        Retry logic: up to DOWNLOAD_RETRIES attempts with exponential
+        backoff. On hash mismatch or timeout the .tmp file is deleted
+        and the next attempt starts fresh.
         """
         import trio
         from storage import STORAGE_DIR
@@ -590,7 +593,7 @@ class P2PNetwork:
         for attempt in range(DOWNLOAD_RETRIES):
             if attempt > 0:
                 wait = RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
-                logger.info("File %s: Versuch %d/%d in %ds...",
+                logger.info("File %s: attempt %d/%d in %ds...",
                             sha256[:12], attempt + 1, DOWNLOAD_RETRIES, wait)
                 await trio.sleep(wait)
 
@@ -602,7 +605,7 @@ class P2PNetwork:
             except Exception as e:
                 logger.warning("Cannot open file stream to %s: %s",
                                peer_id_str[:12], e)
-                continue  # naechster Versuch
+                continue  # try next attempt
 
             try:
                 h = hashlib.sha256()
@@ -612,7 +615,7 @@ class P2PNetwork:
                         with trio.move_on_after(30) as cancel:
                             chunk = await stream.read(CHUNK_SIZE)
                         if cancel.cancelled_caught:
-                            raise TimeoutError("chunk timeout nach 30s")
+                            raise TimeoutError("chunk timeout after 30s")
                         if not chunk:
                             break
                         f.write(chunk)
@@ -621,18 +624,18 @@ class P2PNetwork:
                 if h.hexdigest() == sha256:
                     os.rename(temp, os.path.join(STORAGE_DIR, sha256))
                     self.callbacks.on_file_received(sha256)
-                    logger.info("File %s heruntergeladen (Versuch %d)",
+                    logger.info("File %s downloaded (attempt %d)",
                                 sha256[:12], attempt + 1)
                     return True
 
                 # Hash-Fehler: .tmp loeschen, Versuch wiederholen
-                logger.warning("Hash mismatch fuer %s (Versuch %d/%d)",
+                logger.warning("Hash mismatch for %s (attempt %d/%d)",
                                sha256[:12], attempt + 1, DOWNLOAD_RETRIES)
                 if os.path.exists(temp):
                     os.remove(temp)
 
             except Exception as e:
-                logger.warning("Download-Fehler %s Versuch %d: %s",
+                logger.warning("Download error %s attempt %d: %s",
                                sha256[:12], attempt + 1, e)
                 if os.path.exists(temp):
                     os.remove(temp)
@@ -643,7 +646,7 @@ class P2PNetwork:
                     except Exception:
                         pass
 
-        logger.error("File %s nach %d Versuchen fehlgeschlagen",
+        logger.error("File %s failed after %d attempts",
                      sha256[:12], DOWNLOAD_RETRIES)
         return False
 
@@ -733,7 +736,7 @@ class P2PNetwork:
                         if ptype in ("expense", "settlement"):
                             if not self._verify_and_decode_blob(blob, ptype):
                                 logger.warning("History: Paket verworfen "
-                                               "(Signatur ungültig)")
+                                               "(invalid signature)")
                                 continue
                         if ptype == "expense":
                             self.callbacks.on_expense_received(pkt["id"], blob)

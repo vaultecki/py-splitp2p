@@ -4,10 +4,10 @@
 """
 Storage Module – SQLite-Persistenz.
 
-Ausgaben und Ausgleichszahlungen werden als verschlüsselte Blobs gespeichert.
-Dateianhänge als Binärdaten unter storage/<sha256>.
-CRDT: Lamport-Uhr + deterministisches Tiebreaking.
-Merge-Prioritaet: lamport_clock > timestamp > author_pubkey (lexikografisch).
+Expenses and settlements stored as encrypted blobs.
+File attachments as binary data under storage/<sha256>.
+CRDT: Lamport clock + deterministic tiebreaking.
+Merge priority: lamport_clock > timestamp > author_pubkey (lexicographic).
 """
 
 import json
@@ -86,16 +86,16 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
 def _wins_over(new_lc: int, new_ts: int, new_pk: str,
                old_lc: int, old_ts: int, old_pk: str) -> bool:
     """
-    Merge-Entscheidung: gewinnt die neue Version ueber die gespeicherte?
+    Merge decision: does the new version win over the stored one?
 
-    Prioritaet:
-      1. Lamport-Uhr    - uhrzeit-unabhaengig, kausal korrekt
-      2. Wanduhr        - Tiebreaker bei identischer Lamport-Uhr
-                         (kann bei gleichzeitiger Erstellung gleich sein)
-      3. author_pubkey  - deterministischer letzter Tiebreaker;
-                         lexikografisch groesserer Schluessel gewinnt.
-                         Beide Seiten kommen zum selben Ergebnis ohne
-                         Kommunikation -> keine Split-Brain-Moeglichkeit.
+    Priority:
+      1. Lamport clock  - clock-drift-independent, causally correct
+      2. Wall clock     - tiebreaker when Lamport clocks are equal
+                         (possible with simultaneous creation)
+      3. author_pubkey  - deterministic final tiebreaker;
+                         lexicographically larger key wins.
+                         Both sides reach the same result without
+                         communication -> no split-brain possible.
     """
     if new_lc != old_lc:
         return new_lc > old_lc
@@ -115,7 +115,7 @@ def _save_blob(db: sqlite3.Connection, table: str, obj_id: str,
         lamport_clock, timestamp, author_pubkey,
         row["lamport_clock"], row["timestamp"], row["author_pubkey"],
     ):
-        logger.debug("CRDT: verworfen (Lamport %d <= %d, ts %d <= %d)",
+        logger.debug("CRDT: rejected (Lamport %d <= %d, ts %d <= %d)",
                      lamport_clock, row["lamport_clock"],
                      timestamp, row["timestamp"])
         return False
@@ -215,7 +215,7 @@ def get_member(db: sqlite3.Connection, pubkey: str):
 
 
 # ---------------------------------------------------------------------------
-# Dateianhänge
+# File attachments
 # ---------------------------------------------------------------------------
 
 def save_attachment(data: bytes, sha256: str) -> str:
@@ -240,51 +240,51 @@ def attachment_exists(sha256: str) -> bool:
 def delete_attachment_if_unreferenced(
         db: sqlite3.Connection, sha256: str) -> bool:
     """
-    Loescht die Anhang-Datei aus dem Dateisystem, falls kein
-    nicht-geloeschter Expense-Eintrag mehr auf diesen SHA-256 verweist.
+    Deletes the attachment file from disk if no active (non-deleted)
+    expense entry references this SHA-256 anymore.
 
-    Warum 'unreferenced' pruefen?
-      Zwei Ausgaben koennen dieselbe Datei referenzieren (selber Kassenbon
-      zweimal hinzugefuegt). In diesem Fall bleibt die Datei erhalten.
-      Der DB-Tombstone (is_deleted=1) bleibt immer erhalten damit
-      andere Peers die Loeschung per Sync erhalten koennen.
+    Why check 'unreferenced'?
+      Two expenses can reference the same file (same receipt added twice).
+      In that case the file is kept.
+      The DB tombstone (is_deleted=1) always stays so other peers
+      receive the deletion via sync.
 
-    Gibt True zurueck wenn die Datei geloescht wurde, False sonst.
+    Returns True if the file was deleted, False otherwise.
     """
     path = os.path.join(STORAGE_DIR, sha256)
     if not os.path.exists(path):
-        return False  # existiert nicht mehr
+        return False  # file already gone
 
-    # Alle Blobs laden und pruefen ob noch jemand diesen Hash referenziert
-    # Wir checken auf Blob-Ebene (ohne Entschluesselung) ob der hex-String
-    # im Blob vorkommt -- als schnellen Heuristik-Filter.
-    # Exakt: nur nicht-geloeschte Eintraege zaehlen.
+    # Load all blobs and check if any active entry still references this hash.
+    # We check at blob level (without decryption) whether the hex string
+    # appears in the blob - fast heuristic filter.
+    # Only non-deleted entries count.
     rows = db.execute(
         "SELECT blob FROM expenses WHERE is_deleted = 0"
     ).fetchall()
     sha_bytes = sha256.encode()
     for row in rows:
         if sha_bytes in bytes(row["blob"]):
-            logger.debug("Attachment %s noch referenziert, nicht geloescht",
+            logger.debug("Attachment %s still referenced, not deleted",
                          sha256[:12])
             return False
 
     try:
         os.remove(path)
-        logger.info("Attachment geloescht: %s", sha256[:12])
+        logger.info("Attachment deleted: %s", sha256[:12])
         return True
     except OSError as e:
-        logger.warning("Attachment loeschen fehlgeschlagen %s: %s",
+        logger.warning("Failed to delete attachment %s: %s",
                        sha256[:12], e)
         return False
 
 
 # ---------------------------------------------------------------------------
-# History-Sync Hilfsfunktionen (für network.py)
+# History sync helpers (used by network.py)
 # ---------------------------------------------------------------------------
 
 def load_all_expense_blobs_since(since_ts: int) -> list[tuple[str, bytes]]:
-    """Alle Expense-Blobs mit timestamp > since_ts (inkl. gelöschter für Tombstone-Sync)."""
+    """All expense blobs with timestamp > since_ts (incl. deleted for tombstone sync)."""
     import sqlite3 as _sq
     conn = _sq.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = _sq.Row
@@ -297,7 +297,7 @@ def load_all_expense_blobs_since(since_ts: int) -> list[tuple[str, bytes]]:
 
 
 def load_all_settlement_blobs_since(since_ts: int) -> list[tuple[str, bytes]]:
-    """Alle Settlement-Blobs mit timestamp > since_ts."""
+    """All settlement blobs with timestamp > since_ts."""
     import sqlite3 as _sq
     conn = _sq.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = _sq.Row
@@ -310,7 +310,7 @@ def load_all_settlement_blobs_since(since_ts: int) -> list[tuple[str, bytes]]:
 
 
 def get_max_timestamp() -> int:
-    """Höchster bekannter Timestamp über Expenses und Settlements."""
+    """Highest known timestamp across expenses and settlements."""
     import sqlite3 as _sq
     conn = _sq.connect(DB_PATH, check_same_thread=False)
     row = conn.execute(

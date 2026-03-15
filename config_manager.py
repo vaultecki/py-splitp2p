@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Configuration Manager Module - Handles application configuration storage.
+Configuration Manager Module - Handles persistent application configuration storage.
 
 This module provides persistent configuration storage with automatic
 directory creation and error handling.
@@ -22,7 +22,7 @@ class ConfigManager:
 
     Features:
     - Automatic config directory creation
-    - Platform-specific paths (Windows/Linux)
+    - Platform-specific paths (Windows/Linux/macOS)
     - Safe loading with fallback to empty config
     - Type-safe get/set operations
     """
@@ -32,8 +32,8 @@ class ConfigManager:
         Initialize the configuration manager.
 
         Args:
-            app_name: Application name for config directory
-            filename: Configuration filename
+            app_name: application name for the config directory
+            filename: configuration filename
         """
         self.app_name = app_name
         self.config_path = self._get_config_path(app_name)
@@ -45,7 +45,7 @@ class ConfigManager:
     @staticmethod
     def _get_config_path(app_name: str) -> str:
         """
-        Get platform-specific configuration directory path.
+        Returns platform-specific configuration directory path.
 
         Args:
             app_name: Application name for directory
@@ -54,8 +54,8 @@ class ConfigManager:
             Full path to config directory
 
         Platform paths:
-            - Windows: %LOCALAPPDATA%\\{app_name}
-            - Linux/Mac: ~/.config/{app_name}
+            Windows:   %LOCALAPPDATA%\{app_name}
+            Linux/Mac: ~/.config/{app_name}
         """
         home_dir = os.path.expanduser("~")
 
@@ -64,12 +64,12 @@ class ConfigManager:
         else:  # Linux, Mac, Unix
             config_dir = os.path.join(home_dir, ".config", app_name)
 
-        logger.debug(f"Config path determined: {config_dir}")
+        logger.debug(f"Config path: {config_dir}")
         return config_dir
 
     def _ensure_directory_exists(self) -> None:
         """
-        Create config directory if it doesn't exist.
+        Creates config directory if it does not exist.
 
         Creates all intermediate directories as needed.
         """
@@ -83,9 +83,9 @@ class ConfigManager:
 
     def load(self) -> None:
         """
-        Load configuration from file.
+        Loads configuration from file.
 
-        If file doesn't exist or is invalid, starts with empty config.
+        If file does not exist or is invalid, starts with empty config.
         Does not raise exceptions - logs warnings instead.
         """
         try:
@@ -107,12 +107,12 @@ class ConfigManager:
 
     def save(self) -> None:
         """
-        Save configuration to file.
+        Saves configuration to file.
 
         Creates formatted JSON with 4-space indentation.
 
         Raises:
-            IOError: If file cannot be written
+            IOError: if file cannot be written
         """
         try:
             # Ensure directory still exists
@@ -132,11 +132,11 @@ class ConfigManager:
         Get configuration value by key.
 
         Args:
-            key: Configuration key
-            default: Default value if key not found
+            key: configuration key
+            default: default value if key not found
 
         Returns:
-            Configuration value or default
+            configuration value or default
         """
         value = self.data.get(key, default)
         logger.debug(f"Config get: {key} = {type(value).__name__}")
@@ -147,8 +147,8 @@ class ConfigManager:
         Set configuration value.
 
         Args:
-            key: Configuration key
-            value: Value to store (must be JSON serializable)
+            key: configuration key
+            value: value to store (must be JSON serializable)
         """
         logger.debug(f"Config set: {key} = {type(value).__name__}")
         self.data[key] = value
@@ -158,10 +158,10 @@ class ConfigManager:
         Delete a configuration key.
 
         Args:
-            key: Configuration key to delete
+            key: configuration key to delete
 
         Returns:
-            True if key was deleted, False if key didn't exist
+            True if deleted, False if key did not exist
         """
         if key in self.data:
             del self.data[key]
@@ -174,7 +174,7 @@ class ConfigManager:
         Check if configuration key exists.
 
         Args:
-            key: Configuration key to check
+            key: configuration key to check
 
         Returns:
             True if key exists, False otherwise
@@ -182,7 +182,7 @@ class ConfigManager:
         return key in self.data
 
     def clear(self) -> None:
-        """Clear all configuration data."""
+        """Clears all configuration data."""
         self.data.clear()
         logger.info("Config cleared")
 
@@ -196,7 +196,7 @@ class ConfigManager:
         return self.data.copy()
 
     def __repr__(self) -> str:
-        """String representation of config manager."""
+        """String representation."""
         return f"ConfigManager(app='{self.app_name}', entries={len(self.data)})"
 
 

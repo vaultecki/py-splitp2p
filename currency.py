@@ -4,17 +4,16 @@
 """
 Currency Module
 
-Wechselkurse werden von einer kostenlosen API geholt und lokal
-in SQLite gecacht. Bei Offline-Betrieb werden die zuletzt bekannten
-Kurse verwendet.
+Exchange rates are fetched from a free API and cached locally
+in SQLite. In offline mode the last known rates are used.
 
-Erneuerungsstrategie: "unregelmäßige Abstände"
-  - Basis-Intervall: 6 Stunden
-  - Jitter: ±0–3 Stunden (zufällig)
-  → Verhindert, dass alle Nodes gleichzeitig die API anfragen
+Refresh strategy: randomized intervals
+  - Base interval: 6 hours
+  - Jitter: +/- 0-3 hours (random)
+  -> Prevents all nodes from querying the API simultaneously
 
-API: open.er-api.com – kostenlos, kein API-Key nötig.
-Fallback: exchangerate.host (falls erste API nicht erreichbar)
+API: open.er-api.com - free, no API key required.
+Fallback: exchangerate-api.com (if primary API unreachable)
 """
 
 import json
@@ -28,16 +27,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Alle gängigen Währungen die unterstützt werden
+# All commonly supported currencies
 SUPPORTED_CURRENCIES = [
     "EUR", "USD", "GBP", "CHF", "JPY", "CNY", "CAD", "AUD",
     "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "RON", "BGN",
     "TRY", "BRL", "MXN", "INR", "KRW", "SGD", "HKD", "NZD",
 ]
 
-# Erneuerungs-Intervall
-_BASE_INTERVAL_SEC  = 6 * 3600   # 6 Stunden Basis
-_MAX_JITTER_SEC     = 3 * 3600   # ±3 Stunden Jitter
+# Refresh interval
+_BASE_INTERVAL_SEC  = 6 * 3600   # 6 hour base
+_MAX_JITTER_SEC     = 3 * 3600   # +/- 3 hour jitter
 
 _API_URLS = [
     "https://open.er-api.com/v6/latest/{base}",
@@ -46,7 +45,7 @@ _API_URLS = [
 
 
 # ---------------------------------------------------------------------------
-# Schema (wird von storage.init_db() eingebunden)
+# Schema (included by storage.init_db())
 # ---------------------------------------------------------------------------
 
 RATES_DDL = """
@@ -66,15 +65,15 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
 # ---------------------------------------------------------------------------
 
 def _next_fetch_time() -> int:
-    """Nächster Fetch-Zeitpunkt mit zufälligem Jitter."""
+    """Next fetch time with random jitter."""
     jitter = random.randint(0, _MAX_JITTER_SEC)
     return int(time.time()) + _BASE_INTERVAL_SEC + jitter
 
 
 def fetch_rates_online(base: str) -> Optional[dict[str, float]]:
     """
-    Holt aktuelle Kurse von der API.
-    Gibt ein Dict {target: rate} zurück oder None bei Fehler.
+    Fetches current rates from the API.
+    Returns a dict {target: rate} or None on error.
     """
     base = base.upper()
     for url_tmpl in _API_URLS:
@@ -91,15 +90,15 @@ def fetch_rates_online(base: str) -> Optional[dict[str, float]]:
             # exchangerate-api.com gibt {"rates": {...}} auch
             rates = data.get("rates") or data.get("conversion_rates")
             if rates and isinstance(rates, dict):
-                logger.info("Kurse für %s geholt von %s (%d Zielwährungen)",
+                logger.info("Rates for %s fetched from %s (%d target currencies)",
                             base, url, len(rates))
                 return {k.upper(): float(v) for k, v in rates.items()}
         except urllib.error.URLError as e:
-            logger.warning("API %s nicht erreichbar: %s", url, e)
+            logger.warning("API %s unreachable: %s", url, e)
         except Exception as e:
-            logger.warning("Fehler beim Kurse-Abruf von %s: %s", url, e)
+            logger.warning("Error fetching rates from %s: %s", url, e)
 
-    logger.error("Alle APIs fehlgeschlagen – bleibe offline")
+    logger.error("All APIs failed - staying offline")
     return None
 
 
@@ -108,7 +107,7 @@ def fetch_rates_online(base: str) -> Optional[dict[str, float]]:
 # ---------------------------------------------------------------------------
 
 def save_rates(db: sqlite3.Connection, base: str, rates: dict[str, float]) -> None:
-    """Speichert Kurse in der Datenbank."""
+    """Saves exchange rates to the database."""
     now       = int(time.time())
     next_time = _next_fetch_time()
     base = base.upper()
@@ -121,12 +120,12 @@ def save_rates(db: sqlite3.Connection, base: str, rates: dict[str, float]) -> No
          for target, rate in rates.items()],
     )
     db.commit()
-    logger.debug("Kurse für %s gespeichert (nächster Fetch ~%s)",
+    logger.debug("Rates for %s saved (next fetch ~%s)",
                  base, time.strftime("%H:%M", time.localtime(next_time)))
 
 
 def load_rates(db: sqlite3.Connection, base: str) -> dict[str, float]:
-    """Lädt gecachte Kurse aus der Datenbank."""
+    """Loads cached exchange rates from the database."""
     rows = db.execute(
         "SELECT target, rate FROM exchange_rates WHERE base = ?",
         (base.upper(),),
@@ -135,7 +134,7 @@ def load_rates(db: sqlite3.Connection, base: str) -> dict[str, float]:
 
 
 def rates_need_refresh(db: sqlite3.Connection, base: str) -> bool:
-    """True wenn die gecachten Kurse veraltet sind oder fehlen."""
+    """True if cached rates are stale or missing."""
     row = db.execute(
         "SELECT MIN(next_fetch) as nf FROM exchange_rates WHERE base = ?",
         (base.upper(),),
@@ -146,16 +145,16 @@ def rates_need_refresh(db: sqlite3.Connection, base: str) -> bool:
 
 
 def rates_age_str(db: sqlite3.Connection, base: str) -> str:
-    """Lesbare Altersangabe der gecachten Kurse, z.B. 'vor 2h 14m'."""
+    """Human-readable age of cached rates, e.g. '2h 14m ago'."""
     row = db.execute(
         "SELECT MAX(fetched_at) as fa FROM exchange_rates WHERE base = ?",
         (base.upper(),),
     ).fetchone()
     if not row or row["fa"] is None:
-        return "nie aktualisiert"
+        return "never updated"
     age = int(time.time()) - row["fa"]
     if age < 60:
-        return "gerade eben"
+        return "just now"
     if age < 3600:
         return f"vor {age // 60}m"
     h, m = divmod(age // 60, 60)
@@ -168,32 +167,32 @@ def rates_age_str(db: sqlite3.Connection, base: str) -> str:
 
 def get_rates(db: sqlite3.Connection, base: str) -> dict[str, float]:
     """
-    Gibt aktuelle Wechselkurse zurück.
-    Holt online wenn Cache veraltet/leer, sonst aus Cache.
-    Fällt auf Cache zurück wenn online fehlschlägt.
+    Returns current exchange rates.
+    Fetches online if cache is stale/empty, otherwise uses cache.
+    Falls back to cache if online fetch fails.
     """
     base = base.upper()
     if rates_need_refresh(db, base):
-        logger.info("Kurse für %s veraltet – hole online…", base)
+        logger.info("Rates for %s stale - fetching online...", base)
         fresh = fetch_rates_online(base)
         if fresh:
             save_rates(db, base, fresh)
             return fresh
         else:
-            logger.warning("Online-Abruf fehlgeschlagen – nutze Cache")
+            logger.warning("Online fetch failed - using cache")
 
     cached = load_rates(db, base)
     if cached:
         return cached
 
-    logger.error("Keine Kurse für %s vorhanden (weder online noch Cache)", base)
+    logger.error("No rates for %s available (neither online nor cache)", base)
     return {}
 
 
 def force_refresh(db: sqlite3.Connection, base: str) -> bool:
     """
-    Erzwingt einen sofortigen Online-Abruf.
-    Gibt True zurück wenn erfolgreich.
+    Forces an immediate online fetch.
+    Returns True if successful.
     """
     fresh = fetch_rates_online(base)
     if fresh:
@@ -213,12 +212,12 @@ def convert(
     rates: dict[str, float],
 ) -> Optional[float]:
     """
-    Konvertiert einen Betrag zwischen zwei Währungen.
+    Converts an amount between two currencies.
 
-    rates muss in Bezug auf eine Basiswährung vorliegen
-    (d.h. rates["EUR"] = Kurs EUR/Basis).
+    rates must be relative to a base currency
+    (i.e. rates["EUR"] = EUR/base rate).
 
-    Gibt None zurück wenn einer der Kurse nicht bekannt ist.
+    Returns None if either rate is unknown.
     """
     fc = from_currency.upper()
     tc = to_currency.upper()
@@ -232,7 +231,7 @@ def convert(
         rate = rates[tc] / rates[fc]
         return round(amount * rate, 2)
 
-    logger.warning("Kurs %s→%s nicht verfügbar", fc, tc)
+    logger.warning("Rate %s->%s not available", fc, tc)
     return None
 
 
@@ -241,8 +240,8 @@ def format_rate(
     to_currency: str,
     rates: dict[str, float],
 ) -> str:
-    """Lesbare Kursanzeige, z.B. '1 USD = 0.9234 EUR'."""
+    """Human-readable rate display, e.g. '1 USD = 0.9234 EUR'."""
     result = convert(1.0, from_currency, to_currency, rates)
     if result is None:
-        return f"{from_currency} → {to_currency}: unbekannt"
+        return f"{from_currency} -> {to_currency}: unknown"
     return f"1 {from_currency} = {result:.4f} {to_currency}"
