@@ -39,6 +39,8 @@ SYNC_PROTOCOL    = "/splitp2p/sync/1.0"
 FILE_PROTOCOL    = "/splitp2p/files/1.0"
 HISTORY_PROTOCOL = "/splitp2p/history/1.0"
 CHUNK_SIZE       = 16_384
+DOWNLOAD_RETRIES = 3       # max Versuche pro Peer
+RETRY_BACKOFF    = (1, 3, 7)  # Wartezeit in Sekunden zwischen Versuchen
 
 IPFS_BOOTSTRAP = [
     "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
@@ -194,6 +196,7 @@ class P2PNetwork:
                     nursery.start_soon(self._receive_loop)
                     nursery.start_soon(self._cmd_loop)
                     nursery.start_soon(self._connect_bootstrap)
+                    nursery.start_soon(self._cleanup_stale_tmp)
 
         except Exception as e:
             logger.error("P2P run error: %s", e)
@@ -466,10 +469,17 @@ class P2PNetwork:
                     if self._pubsub:
                         await self._pubsub.publish(self.topic_id, cmd["data"])
                 elif cmd["cmd"] == "req_file":
-                    for pid in list(self._peers):
-                        ok = await self._download_file(pid, cmd["sha256"])
+                    sha = cmd["sha256"]
+                    peers = list(self._peers)
+                    ok = False
+                    for pid in peers:
+                        ok = await self._download_file(pid, sha)
                         if ok:
                             break
+                    if not ok:
+                        logger.warning(
+                            "File %s von keinem der %d Peers erhaltbar",
+                            sha[:12], len(peers))
                 elif cmd["cmd"] == "req_history_from":
                     await self._request_history(cmd["peer_id"])
                 elif cmd["cmd"] == "req_history_all":
@@ -537,50 +547,101 @@ class P2PNetwork:
     # File Transfer – Requesting
     # ------------------------------------------------------------------
 
-    async def _download_file(self, peer_id_str: str, sha256: str) -> bool:
-        import trio
+    async def _cleanup_stale_tmp(self) -> None:
+        """
+        Loescht beim Start alle *.tmp-Dateien im storage/-Ordner.
+        Diese stammen von abgebrochenen Downloads und sind immer
+        unvollstaendig (der Hash stimmt nie ueberein).
+        Wird einmalig beim Start als Trio-Task ausgefuehrt.
+        """
         from storage import STORAGE_DIR
         try:
-            from libp2p.peer.id import ID as PeerID
-            stream = await self._host.new_stream(
-                PeerID.from_base58(peer_id_str), [FILE_PROTOCOL])
+            removed = 0
+            for fname in os.listdir(STORAGE_DIR):
+                if fname.endswith(".tmp"):
+                    path = os.path.join(STORAGE_DIR, fname)
+                    try:
+                        os.remove(path)
+                        removed += 1
+                        logger.info("Stale tmp removed: %s", fname)
+                    except OSError as e:
+                        logger.warning("Cannot remove tmp %s: %s", fname, e)
+            if removed:
+                logger.info("Startup cleanup: %d stale .tmp file(s) removed",
+                            removed)
         except Exception as e:
-            logger.warning("Cannot open file stream to %s: %s", peer_id_str[:12], e)
-            return False
+            logger.warning("Startup tmp cleanup failed: %s", e)
 
+    async def _download_file(self, peer_id_str: str, sha256: str) -> bool:
+        """
+        Laedt eine Datei von einem Peer herunter.
+        Retry-Logik: bis zu DOWNLOAD_RETRIES Versuche mit exponentiellem
+        Backoff. Bei Hash-Fehler oder Timeout wird die .tmp-Datei
+        geloescht und der naechste Versuch gestartet.
+        """
+        import trio
+        from storage import STORAGE_DIR
         temp = os.path.join(STORAGE_DIR, sha256 + ".tmp")
-        h    = hashlib.sha256()
-        try:
-            await stream.write(sha256.encode())
-            with open(temp, "wb") as f:
-                while True:
-                    with trio.move_on_after(30) as cancel:
-                        chunk = await stream.read(CHUNK_SIZE)
-                    if cancel.cancelled_caught:
-                        raise TimeoutError("download timeout")
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    h.update(chunk)
 
-            if h.hexdigest() == sha256:
-                os.rename(temp, os.path.join(STORAGE_DIR, sha256))
-                self.callbacks.on_file_received(sha256)
-                logger.info("File %s downloaded OK", sha256[:12])
-                return True
-            logger.error("Hash mismatch for %s", sha256[:12])
-            os.remove(temp)
-            return False
-        except Exception as e:
-            logger.error("Download error %s: %s", sha256[:12], e)
-            if os.path.exists(temp):
-                os.remove(temp)
-            return False
-        finally:
+        for attempt in range(DOWNLOAD_RETRIES):
+            if attempt > 0:
+                wait = RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
+                logger.info("File %s: Versuch %d/%d in %ds...",
+                            sha256[:12], attempt + 1, DOWNLOAD_RETRIES, wait)
+                await trio.sleep(wait)
+
+            stream = None
             try:
-                await stream.close()
-            except Exception:
-                pass
+                from libp2p.peer.id import ID as PeerID
+                stream = await self._host.new_stream(
+                    PeerID.from_base58(peer_id_str), [FILE_PROTOCOL])
+            except Exception as e:
+                logger.warning("Cannot open file stream to %s: %s",
+                               peer_id_str[:12], e)
+                continue  # naechster Versuch
+
+            try:
+                h = hashlib.sha256()
+                await stream.write(sha256.encode())
+                with open(temp, "wb") as f:
+                    while True:
+                        with trio.move_on_after(30) as cancel:
+                            chunk = await stream.read(CHUNK_SIZE)
+                        if cancel.cancelled_caught:
+                            raise TimeoutError("chunk timeout nach 30s")
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        h.update(chunk)
+
+                if h.hexdigest() == sha256:
+                    os.rename(temp, os.path.join(STORAGE_DIR, sha256))
+                    self.callbacks.on_file_received(sha256)
+                    logger.info("File %s heruntergeladen (Versuch %d)",
+                                sha256[:12], attempt + 1)
+                    return True
+
+                # Hash-Fehler: .tmp loeschen, Versuch wiederholen
+                logger.warning("Hash mismatch fuer %s (Versuch %d/%d)",
+                               sha256[:12], attempt + 1, DOWNLOAD_RETRIES)
+                if os.path.exists(temp):
+                    os.remove(temp)
+
+            except Exception as e:
+                logger.warning("Download-Fehler %s Versuch %d: %s",
+                               sha256[:12], attempt + 1, e)
+                if os.path.exists(temp):
+                    os.remove(temp)
+            finally:
+                if stream:
+                    try:
+                        await stream.close()
+                    except Exception:
+                        pass
+
+        logger.error("File %s nach %d Versuchen fehlgeschlagen",
+                     sha256[:12], DOWNLOAD_RETRIES)
+        return False
 
     def request_file(self, sha256: str) -> None:
         if self._peers and self._running:
