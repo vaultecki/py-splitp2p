@@ -280,6 +280,117 @@ def delete_attachment_if_unreferenced(
 
 
 # ---------------------------------------------------------------------------
+# Comments
+# ---------------------------------------------------------------------------
+
+_COMMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS comments (
+    id            TEXT PRIMARY KEY,
+    expense_id    TEXT NOT NULL,
+    blob          BLOB NOT NULL,
+    timestamp     INTEGER NOT NULL,
+    lamport_clock INTEGER NOT NULL DEFAULT 0,
+    author_pubkey TEXT    NOT NULL DEFAULT '',
+    is_deleted    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_comments_exp ON comments(expense_id);
+CREATE INDEX IF NOT EXISTS idx_comments_lc  ON comments(lamport_clock);
+"""
+
+
+def _ensure_comments_table(db: sqlite3.Connection) -> None:
+    """Idempotent: creates comments table if not present (migration helper)."""
+    for stmt in _COMMENTS_DDL.strip().split(";"):
+        s = stmt.strip()
+        if s:
+            db.execute(s)
+    db.commit()
+
+
+def save_comment_blob(db: sqlite3.Connection, comment_id: str,
+                      expense_id: str, blob: bytes,
+                      timestamp: int, is_deleted: bool = False,
+                      lamport_clock: int = 0,
+                      author_pubkey: str = "") -> bool:
+    """CRDT-safe save: same merge rules as expenses."""
+    _ensure_comments_table(db)
+    row = db.execute(
+        "SELECT timestamp, lamport_clock, author_pubkey FROM comments WHERE id = ?",
+        (comment_id,)
+    ).fetchone()
+    if row and not _wins_over(
+        lamport_clock, timestamp, author_pubkey,
+        row["lamport_clock"], row["timestamp"], row["author_pubkey"],
+    ):
+        return False
+    db.execute(
+        "INSERT OR REPLACE INTO comments"
+        " (id, expense_id, blob, timestamp, lamport_clock, author_pubkey, is_deleted)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (comment_id, expense_id, blob, timestamp,
+         lamport_clock, author_pubkey, int(is_deleted)),
+    )
+    db.commit()
+    return True
+
+
+def load_comments_for_expense(db: sqlite3.Connection,
+                               expense_id: str) -> list[tuple[str, bytes]]:
+    """Returns (id, blob) pairs for all non-deleted comments on an expense."""
+    _ensure_comments_table(db)
+    rows = db.execute(
+        "SELECT id, blob FROM comments"
+        " WHERE expense_id = ? AND is_deleted = 0"
+        " ORDER BY lamport_clock ASC, timestamp ASC",
+        (expense_id,)
+    ).fetchall()
+    return [(r["id"], bytes(r["blob"])) for r in rows]
+
+
+def load_all_comment_blobs_since(since_ts: int) -> list[tuple[str, str, bytes]]:
+    """Returns (id, expense_id, blob) for delta history sync."""
+    import sqlite3 as _sq
+    try:
+        conn = _sq.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = _sq.Row
+        rows = conn.execute(
+            "SELECT id, expense_id, blob FROM comments"
+            " WHERE timestamp > ? ORDER BY timestamp ASC",
+            (since_ts,),
+        ).fetchall()
+        conn.close()
+        return [(r["id"], r["expense_id"], bytes(r["blob"])) for r in rows]
+    except Exception:
+        return []
+
+
+def soft_delete_comment_blob(db: sqlite3.Connection, comment_id: str,
+                              blob: bytes, timestamp: int,
+                              lamport_clock: int = 0,
+                              author_pubkey: str = "") -> None:
+    """Tombstone a comment (keeps id for sync propagation)."""
+    _ensure_comments_table(db)
+    db.execute(
+        "INSERT OR REPLACE INTO comments"
+        " (id, expense_id, blob, timestamp, lamport_clock, author_pubkey, is_deleted)"
+        " VALUES ((SELECT expense_id FROM comments WHERE id=?),?,?,?,?,?,1)",
+        (comment_id, blob, timestamp, lamport_clock, author_pubkey, comment_id),
+    )
+    db.commit()
+
+
+def get_comment_count(db: sqlite3.Connection, expense_id: str) -> int:
+    """Fast count of non-deleted comments for an expense (for the badge)."""
+    _ensure_comments_table(db)
+    row = db.execute(
+        "SELECT COUNT(*) as n FROM comments"
+        " WHERE expense_id = ? AND is_deleted = 0",
+        (expense_id,)
+    ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+# ---------------------------------------------------------------------------
 # History sync helpers (used by network.py)
 # ---------------------------------------------------------------------------
 
@@ -318,6 +429,25 @@ def get_max_timestamp() -> int:
         "  SELECT MAX(timestamp) as ts FROM expenses"
         "  UNION ALL"
         "  SELECT MAX(timestamp) as ts FROM settlements"
+        ")"
+    ).fetchone()
+    conn.close()
+    return int(row[0] or 0)
+
+
+def get_max_lamport_clock() -> int:
+    """
+    Highest known Lamport clock value across expenses and settlements.
+    Used to restore the local Lamport clock after a restart so that
+    new entries always have a higher clock than any stored entry.
+    """
+    import sqlite3 as _sq
+    conn = _sq.connect(DB_PATH, check_same_thread=False)
+    row = conn.execute(
+        "SELECT MAX(lc) as m FROM ("
+        "  SELECT MAX(lamport_clock) as lc FROM expenses"
+        "  UNION ALL"
+        "  SELECT MAX(lamport_clock) as lc FROM settlements"
         ")"
     ).fetchone()
     conn.close()

@@ -1472,15 +1472,15 @@ class ExportDialog(tk.Toplevel):
     def _export_csv(self):
         import csv, tkinter.filedialog as fd2
         path = fd2.asksaveasfilename(
-            title="CSV speichern", defaultextension=".csv",
+            title="Save CSV", defaultextension=".csv",
             filetypes=[("CSV", "*.csv"), ("All", "*.*")], parent=self)
         if not path:
             return
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if self._incl_exp.get():
-                w.writerow(["Type","Datum","Beschreibung","Kategorie",
-                             "Betrag","Currency","Paid by","Splits",
+                w.writerow(["Type","Date","Description","Category",
+                             "Amount","Currency","Paid by","Splits",
                              "Original amount","Original currency"])
                 for e in sorted(self.expenses, key=lambda x: x.display_date()):
                     splits = "; ".join(
@@ -1496,7 +1496,7 @@ class ExportDialog(tk.Toplevel):
                     ])
             if self._incl_set.get():
                 w.writerow([])
-                w.writerow(["Type","Datum","From","An","Betrag","Currency","Note"])
+                w.writerow(["Type","Date","From","To","Amount","Currency","Note"])
                 for s in sorted(self.settlements, key=lambda x: x.display_date()):
                     w.writerow([
                         "Payment",
@@ -1508,11 +1508,14 @@ class ExportDialog(tk.Toplevel):
                 from ledger import get_settlements
                 w.writerow([])
                 w.writerow(["Debt summary","","","","","",""])
-                w.writerow(["From","An","Betrag","Currency"])
+                w.writerow(["From","To","Amount","Currency","% of total"])
+                _total = sum(e.amount for e in self.expenses) or 1
                 for debt in get_settlements(self.expenses, self.settlements):
+                    pct = debt.amount / _total * 100
                     w.writerow([self._name(debt.debtor), self._name(debt.creditor),
-                                f"{debt.amount:.2f}", self.currency])
-        mb.showinfo("Exported", "CSV gespeichert:" + path, parent=self)
+                                f"{debt.amount:.2f}", self.currency,
+                                f"{pct:.1f}%"])
+        mb.showinfo("Exported", "CSV saved: " + path, parent=self)
 
     def _export_pdf(self):
         import tkinter.filedialog as fd2
@@ -1525,7 +1528,7 @@ class ExportDialog(tk.Toplevel):
             return
 
         path = fd2.asksaveasfilename(
-            title="PDF speichern", defaultextension=".pdf",
+            title="Save PDF", defaultextension=".pdf",
             filetypes=[("PDF", "*.pdf"), ("All", "*.*")], parent=self)
         if not path:
             return
@@ -1537,11 +1540,11 @@ class ExportDialog(tk.Toplevel):
         # Titel
         pdf.set_font("Helvetica", "B", 16)
         pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 10, f"SplitP2P – {self.group_name}", ln=True)
+        pdf.cell(0, 10, f"SplitP2P - {self.group_name}", ln=True)
         pdf.set_font("Helvetica", "", 9)
         pdf.set_text_color(100, 100, 100)
-        pdf.cell(0, 6, f"Exportiert am {time.strftime('%d.%m.%Y %H:%M')}  "
-                       f"· Currency: {self.currency}", ln=True)
+        pdf.cell(0, 6, f"Exported {time.strftime('%Y-%m-%d %H:%M')}  "
+                       f"| Currency: {self.currency}", ln=True)
         pdf.ln(4)
 
         def section(title):
@@ -1564,14 +1567,17 @@ class ExportDialog(tk.Toplevel):
 
         if self._incl_exp.get() and self.expenses:
             section("Expenses")
-            row("Datum", "Beschreibung", "Kategorie", "Betrag", "Paid by", "", bold=True,
+            row("Date", "Description", "Category", "Amount", "Paid by", "% of total", bold=True,
                 color=(80,80,80))
+            _exp_total = sum(e.amount for e in self.expenses) or 1
             for e in sorted(self.expenses, key=lambda x: x.display_date()):
+                pct = e.amount / _exp_total * 100
                 row(
                     time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
                     e.description, e.category,
                     f"{e.amount:.2f} {e.currency}",
-                    self._name(e.payer_pubkey), "",
+                    self._name(e.payer_pubkey),
+                    f"{pct:.1f}%",
                 )
             total = sum(e.amount for e in self.expenses)
             pdf.set_font("Helvetica", "B", 9)
@@ -1580,7 +1586,7 @@ class ExportDialog(tk.Toplevel):
 
         if self._incl_set.get() and self.settlements:
             section("Recorded payments")
-            row("Datum", "From", "An", "Betrag", "", "", bold=True, color=(80,80,80))
+            row("Date", "From", "To", "Amount", "", "", bold=True, color=(80,80,80))
             for s in sorted(self.settlements, key=lambda x: x.display_date()):
                 row(
                     time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
@@ -1590,19 +1596,45 @@ class ExportDialog(tk.Toplevel):
             pdf.ln(4)
 
         if self._incl_debt.get():
-            from ledger import get_settlements
+            from ledger import get_settlements, compute_balances
             debts = get_settlements(self.expenses, self.settlements)
-            section("Offene Schulden")
+            balances = compute_balances(self.expenses, self.settlements)
+            _exp_total = sum(e.amount for e in self.expenses) or 1
+
+            # Balance per person with % share of total
+            section("Balance per person")
+            row("Person", "Net balance", "Paid", "Owes", "% of total", "",
+                bold=True, color=(80,80,80))
+            for m in self.members:
+                paid   = sum(e.amount for e in self.expenses
+                             if e.payer_pubkey == m.pubkey and not e.is_deleted)
+                owes   = sum(s.amount for e in self.expenses
+                             if not e.is_deleted
+                             for s in e.splits if s.pubkey == m.pubkey)
+                net    = balances.get(m.pubkey, 0.0)
+                pct    = paid / _exp_total * 100
+                sign   = "+" if net >= 0 else ""
+                row(m.display_name,
+                    f"{sign}{net:.2f} {self.currency}",
+                    f"{paid:.2f}",
+                    f"{owes:.2f}",
+                    f"{pct:.1f}%", "")
+            pdf.ln(4)
+
+            # Open debts
+            section("Open debts")
             if debts:
                 for d in debts:
+                    pct = d.amount / _exp_total * 100
                     row(self._name(d.debtor), "->", self._name(d.creditor),
-                        f"{d.amount:.2f} {self.currency}", "", "")
+                        f"{d.amount:.2f} {self.currency}",
+                        f"{pct:.1f}%", "")
             else:
                 pdf.set_font("Helvetica", "", 9)
                 pdf.cell(0, 6, "All settled.", ln=True)
 
         pdf.output(path)
-        mb.showinfo("Exported", "PDF gespeichert:" + path, parent=self)
+        mb.showinfo("Exported", "PDF saved:\n" + path, parent=self)
 
 
 
@@ -2037,8 +2069,30 @@ class App(tk.Tk):
 
     # -- Identity & group --
 
+    def _restore_lamport_clock(self) -> None:
+        """
+        Loads the highest known Lamport clock from the DB and sets the
+        local counter to that value. Called once after a group is opened.
+
+        Without this, after a restart the local clock would start at 0,
+        and new entries would have lamport_clock=1 - lower than many
+        existing DB entries, causing them to lose every CRDT merge.
+        """
+        try:
+            from storage import get_max_lamport_clock
+            stored_max = get_max_lamport_clock()
+            if stored_max > self._lamport_clock:
+                self._lamport_clock = stored_max
+                import logging as _log
+                _log.getLogger(__name__).info(
+                    "Lamport clock restored from DB: %d", stored_max)
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "Could not restore Lamport clock: %s", e)
+
     def _next_lamport(self, received: int = 0) -> int:
-        """Naechsten Lamport-Timestamp berechnen: local = max(local, received) + 1."""
+        """Next Lamport timestamp: local = max(local, received) + 1."""
         self._lamport_clock = max(self._lamport_clock, received) + 1
         return self._lamport_clock
 
@@ -2156,6 +2210,9 @@ class App(tk.Tk):
 
         self.deiconify()
         self._load_rates_async()
+        # Restore Lamport clock from DB so new entries always
+        # have a higher clock than anything already stored.
+        self._restore_lamport_clock()
         self._start_network()
         self._refresh()
 
@@ -2451,6 +2508,8 @@ class App(tk.Tk):
         if self._network:
             self._network.publish_expense(expense.id, blob, expense.timestamp)
         self._append_log('info', f"Expense deleted: '{expense.description}'")
+        self._post_system_comment(expense.id,
+            f"Expense deleted by {self._own_name}")
         self._refresh()
 
     # ── Ausgleichszahlungen ─────────────────────────────────────────

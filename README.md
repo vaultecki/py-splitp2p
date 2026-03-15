@@ -1,26 +1,82 @@
 # SplitP2P
 
-Dezentraler Splitwise-Klon ohne zentralen Server.  
-Ausgaben werden lokal gespeichert, automatisch zwischen Peers synchronisiert, Dateianhänge peer-to-peer übertragen und Schulden automatisch minimiert.
+Decentralized expense splitting — no server, no account, no internet required.
+
+Expenses are stored locally, automatically synchronized between peers over P2P,
+file attachments transferred peer-to-peer, and debts minimized automatically.
 
 ---
 
-## Funktionsumfang
+## Features
 
-- **Getrennte Zahlgruppen** — jede Gruppe hat ein eigenes Passwort; Peers anderer Gruppen können nichts lesen, auch wenn sie dieselbe Infrastruktur nutzen
-- **P2P-Synchronisation** — Ausgaben werden über GossipSub automatisch an alle Peers der Gruppe verteilt; CRDT verhindert Konflikte
-- **Ausgaben erfassen** — Beschreibung, Betrag, Zahler, freie Aufteilung (gleich oder individuell)
-- **Währungsumrechnung** — Eingabe in beliebiger Währung, automatische Umrechnung in die Gruppenwährung; Wechselkurse werden gecacht und im Hintergrund erneuert
-- **Dateianhänge** — Bilder (JPG, PNG, GIF, WEBP) und PDFs anhängen; Übertragung peer-to-peer, Integrität per SHA-256 gesichert
-- **Schuldenminimierung** — Greedy-Algorithmus berechnet die kleinstmögliche Anzahl an Ausgleichszahlungen
-- **Offline-fähig** — voller Funktionsumfang ohne Netzwerk; Sync erfolgt sobald Peers erreichbar sind
+### Core
+- **Multiple isolated groups** — each group has its own password and random salt;
+  peers from other groups cannot read anything even if they share the same network
+- **P2P synchronization** — expenses distributed via GossipSub to all group peers;
+  CRDT with Lamport clocks prevents conflicts even under clock drift
+- **Expense tracking** — description, amount, payer, date, category, notes
+- **Split modes** — equal, custom amounts, or percentage (e.g. 30% / 70%)
+- **Currency conversion** — enter in any of 24 currencies, auto-converted to the
+  group currency; rates cached locally, refreshed with random jitter
+- **File attachments** — images (JPG, PNG, GIF, WEBP) and PDFs; transferred
+  peer-to-peer, integrity verified by SHA-256
+- **Debt minimization** — greedy algorithm computes the minimum number of transfers
+- **Recorded settlements** — mark debts as paid; one-click from the open debts list
+- **Full offline support** — all features work without network; sync happens
+  automatically once peers are reachable
+
+### Search & Analytics
+- **Live search + filters** — full-text search across description, category and notes;
+  filter by category and by member; result count shown inline
+- **Charts** — expenses by category, balance per person, cumulative expenses over
+  time, balance history per person (all four in one window, PNG export)
+- **Export** — CSV (no dependencies) and PDF (`fpdf2`); both include a
+  **% of total** column and a per-person balance summary showing each
+  person's share of group spending
+
+### P2P Network
+- **mDNS** — automatic discovery on the local network (no configuration needed)
+- **IPFS bootstrap nodes** — connects to public libp2p nodes for internet-wide discovery
+- **AutoNAT** — detects whether we are behind a NAT/firewall
+- **Circuit Relay v2** — connections via public relay nodes when behind NAT
+- **Kademlia DHT** — advertises the group topic ID in the global DHT so members
+  can find each other without being in the same room
+- **Initial history sync** — when a new peer connects, it automatically requests all
+  records it has not seen yet (delta sync)
+- **Retry with backoff** — file downloads retry up to 3 times (1 s, 3 s, 7 s) and
+  clean up `.tmp` files on failure; stale `.tmp` files are also removed at startup
+
+### Security
+- **AES-256-GCM** encryption for all group data; key derived via PBKDF2-HMAC-SHA256
+  (600,000 iterations) from password + random 16-byte salt
+- **Ed25519 signatures** on every expense and settlement (authenticity)
+- **Creator-only editing** — only the original creator can edit or delete their
+  expenses; enforced both in the UI and cryptographically in the network layer
+- **Signature verification** before any blob reaches the database or UI
+- **QR code onboarding** — group password, salt and currency packed into a
+  compact (~140 char) base64-JSON payload; scan once to join instantly
+- **Tombstone sync** — deletions propagate to all peers; attachment files are
+  removed once unreferenced, but the DB tombstone persists for sync
+
+### CRDT
+Three-level merge priority (robust against clock drift):
+
+1. **Lamport clock** — causality-based, clock-drift-independent;
+   restored from DB on startup so new entries always win over old ones
+2. **Wall clock** — tiebreaker when Lamport values are equal
+3. **author_pubkey** — deterministic final tiebreaker (lexicographic);
+   both sides reach the same result without communication — no split-brain
 
 ---
 
-## Voraussetzungen
+## Requirements
 
-- Python 3.11 oder neuer
-- Tkinter (meist vorinstalliert; auf Debian/Ubuntu ggf. `sudo apt install python3-tk`)
+- Python 3.11 or newer  
+  (3.12 recommended; `libp2p` does not yet build on 3.14)
+- Tkinter — usually pre-installed; on Debian/Ubuntu:
+  ```
+  sudo apt install python3-tk
+  ```
 
 ---
 
@@ -33,198 +89,186 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Beim ersten Start wird ein Anzeigename abgefragt und ein Ed25519-Schlüsselpaar generiert. Der private Schlüssel wird unter `~/.config/SplitP2P/config.json` (Linux/Mac) bzw. `%LOCALAPPDATA%\SplitP2P\config.json` (Windows) gespeichert.
+On first start you will be asked for a display name and a storage location.
+An Ed25519 key pair is generated automatically and stored at:
+
+- Linux/macOS: `~/.config/SplitP2P/config.json`
+- Windows: `%LOCALAPPDATA%\SplitP2P\config.json`
 
 ---
 
-## Erste Schritte
+## Quick start
 
-1. **Anzeigename** eingeben (einmalig beim Start)
-2. **Neue Gruppe erstellen** oder einer bestehenden beitreten — einmalig Gruppenname, gemeinsames Passwort und Währung eingeben; alles wird gespeichert und muss nie wieder eingegeben werden
-3. Beim nächsten Start: Gruppe einfach aus der Liste auswählen, kein Passwort nötig
-4. Über **+ Mitglied** die anderen Teilnehmer anlegen (Name + ihren Public Key; oder temporären Key generieren lassen)
-5. Über **+ Ausgabe** Ausgaben erfassen — sie werden sofort lokal gespeichert und an verbundene Peers gesendet
+1. Enter your **display name** (first start only)
+2. Choose a **storage location** for the database and attachments
+3. Click **Create / Join** — enter a group name, shared password, and currency;
+   everything is saved and never asked again
+4. Show the **QR code** (`📤 Show QR`) and have other members scan it
+   with `📥 Import QR` to join
+5. Add members via **+ Member** (name + their public key, or generate a temporary one)
+6. Add expenses via **+ Expense** — saved locally and broadcast to connected peers
+7. The **Open debts** sidebar shows who owes whom; click **✓ paid** to record settlements
+8. Use **📊 Charts** for visual analysis and **⬇ Export** for CSV/PDF
 
 ---
 
-## Architektur
+## Architecture
 
 ```
-main.py             Einstiegspunkt, Logging
-gui.py              Tkinter-Oberfläche
-├── GroupSelectDialog     Bekannte Gruppen auswählen
-├── NewGroupDialog        Neue Gruppe erstellen / beitreten (Passwort einmalig)
-├── ExpenseDialog         Ausgabe anlegen/bearbeiten (inkl. Live-Umrechnung)
-├── AddMemberDialog       Mitglied hinzufügen
-└── AttachmentViewer      Bild-/PDF-Vorschau
+main.py              Entry point, logging
+gui.py               Tkinter UI (2,900+ lines)
+├── QRShowDialog          Display group QR code
+├── QRImportDialog        Scan / paste QR to join a group
+├── GroupSelectDialog     Pick from known groups
+├── NewGroupDialog        Create / join (password entered once)
+├── ExpenseDialog         Add / edit expense (live currency preview, % split)
+├── SettlementDialog      Record a payment
+├── ChartsWindow          Four charts + PNG export
+├── ExportDialog          CSV / PDF with % of total + balance summary
+├── ActivityLogWindow     Chronological change log + live P2P events
+└── AttachmentViewer      Image / PDF preview
 
-network.py          P2P-Netzwerkschicht
-├── P2PNetwork            Hauptklasse; startet libp2p-Host im Daemon-Thread
-├── GossipSub             Expense-Pakete an die Gruppe senden/empfangen
-├── File-Server           Dateianhänge auf Anfrage an andere Peers streamen
-├── File-Client           Fehlende Anhänge von Peers anfordern + verifizieren
-└── NetworkCallbacks      Interface für GUI-Events (thread-safe via Tk.after)
+network.py           P2P layer (libp2p + trio)
+├── P2PNetwork            Host, GossipSub, mDNS, bootstrap, NAT traversal
+├── _verify_and_decode_blob  Decrypt + signature check before any callback
+├── _download_file        Retry with exponential backoff + .tmp cleanup
+├── _cleanup_stale_tmp    Startup cleanup of incomplete downloads
+└── NetworkCallbacks      Thread-safe bridge to Tkinter (via root.after)
 
-models.py           Datenmodelle (Dataclasses, JSON-serialisierbar)
-├── Member                pubkey + display_name
-├── Attachment            sha256 + Metadaten
-├── Split                 Anteil einer Person
-└── Expense               Ausgabe (inkl. CRDT-Felder, Signatur, Anhang)
+models.py            Data models (dataclasses, JSON-serializable)
+├── Expense               lamport_clock, Ed25519 signature, AES-GCM blob
+├── RecordedSettlement    Signed + CRDT-synced payment record
+├── Member, Attachment, Split
 
-ledger.py           Schuldenberechnung
-├── compute_balances()    Netto-Saldo pro Person
-└── compute_settlements() Greedy-Minimierung der Überweisungen
+ledger.py            Debt calculation + caching
+├── ledger_cache_key()    Fast cache key — avoids redundant recalculation
+├── compute_balances()    Net balance per person
+└── compute_settlements() Greedy debt minimization
 
-crypto.py           Kryptografie
-├── Ed25519               Schlüsselgenerierung, sign_expense(), verify_expense()
-└── AES-256-GCM           encrypt_expense(), decrypt_expense() (Gruppenkey)
+crypto.py            Cryptography
+├── PBKDF2 + AES-256-GCM  Group encryption / decryption
+├── Ed25519               Sign / verify expenses and settlements
+└── group_topic_id()      SHA256(salt)[:16] — P2P routing identifier
 
-currency.py         Wechselkurse
-├── fetch_rates_online()  API-Abruf (open.er-api.com → exchangerate-api.com)
-├── get_rates()           Cache-oder-Online-Entscheidung mit Jitter-Intervall
-└── convert()             Betragsumrechnung über Basiswährung
+currency.py          Exchange rates
+├── fetch_rates_online()  open.er-api.com (fallback: exchangerate-api.com)
+├── get_rates()           Cache-or-online with jitter
+└── convert()             Via base currency
 
-storage.py          SQLite-Persistenz
-├── Ausgaben              verschlüsselte Blobs (CRDT-merge)
-├── Mitglieder            Klartext (nur öffentliche Daten)
-├── Wechselkurse          gecachte Kurse mit next_fetch-Zeitstempel
-└── Dateianhänge          Binärdaten unter storage/<sha256>
+storage.py           SQLite persistence
+├── _wins_over()          CRDT merge decision
+├── get_max_lamport_clock()  Restore Lamport state across restarts
+├── delete_attachment_if_unreferenced()
+└── load_all_*_since()   Delta sync helpers for network.py
 
-config_manager.py   Einstellungen (JSON, plattformspezifischer Pfad)
+config_manager.py    JSON settings (platform-specific path)
 ```
 
 ---
 
-## P2P-Synchronisation
+## P2P protocol
 
-### Protokolle
+### GossipSub topic
 
-Zwei libp2p-Protokolle arbeiten parallel:
+```
+"splitp2p-" + SHA256(group_salt)[:16]
+```
 
-**`/splitp2p/expenses/1.0`** (GossipSub)  
-Neue und geänderte Ausgaben werden als JSON-Paket an alle Peers des Gruppen-Topics gesendet:
+The topic ID is derived from the random group salt — not from the password —
+so it reveals nothing about the group even to passive observers.
+
+### Packet types
 
 ```json
-{ "id": "<uuid>", "timestamp": 1710426000, "blob": "<hex>" }
+{ "type": "expense",    "id": "<uuid>", "timestamp": 1710426000, "blob": "<hex>" }
+{ "type": "settlement", "id": "<uuid>", "timestamp": 1710426001, "blob": "<hex>" }
+{ "type": "member",     "pubkey": "<hex>", "data": {"display_name": "Ecki"} }
 ```
 
-Der `blob` ist das AES-GCM-verschlüsselte Expense-Objekt. Ohne das Gruppenpasswort ist er wertlos — Peers anderer Gruppen empfangen das Paket zwar, können es aber nicht entschlüsseln.
+Every blob is AES-256-GCM encrypted. Verification (decrypt + Ed25519 check)
+happens in `_verify_and_decode_blob()` before any callback fires.
 
-**`/splitp2p/files/1.0`** (Direct Stream)  
-Dateianhänge werden on-demand per direktem Peer-Stream übertragen:
-
-```
-→ SHA-256-Hex (Anfrage)
-← Rohdaten in 16-KB-Chunks (Antwort)
-```
-
-Nach dem Download wird der SHA-256-Hash der empfangenen Daten gegen den in der Expense gespeicherten Hash geprüft. Bei Abweichung wird die Datei verworfen.
-
-### Topic-Isolierung
-
-Das GossipSub-Topic wird aus dem Gruppenpasswort abgeleitet:
+### File transfer  `/splitp2p/files/1.0`
 
 ```
-topic = "splitp2p-" + SHA-256(passwort)[:16]
+-> SHA-256 hex  (request)
+<- binary data  (response in 16 KB chunks)
 ```
 
-Verschiedene Gruppen landen auf verschiedenen Topics und sind vollständig voneinander isoliert — weder Metadaten noch Inhalte sind sichtbar.
+SHA-256 verified after download; retried up to 3× on failure.
 
-### CRDT-Merge
+### History sync  `/splitp2p/history/1.0`
 
-Eingehende Pakete werden mit `save_expense_blob()` gemergt:
-
-```
-lokal: Expense(id=X, timestamp=100)
-eingehend: Expense(id=X, timestamp=105)  → gewinnt (last-write-wins)
-eingehend: Expense(id=X, timestamp=98)   → verworfen (veraltet)
-```
-
-Gelöschte Ausgaben hinterlassen einen Tombstone (`is_deleted=True`), damit Löschungen auch nach dem Sync erhalten bleiben.
-
-### Dateianhänge on-demand
-
-Wenn ein Expense-Paket empfangen wird, dessen Anhang lokal nicht vorhanden ist, fordert der Empfänger die Datei automatisch von den verbundenen Peers an:
+Triggered automatically on every new peer connection:
 
 ```
-1. on_expense_received() → decrypt → attachment.sha256 prüfen
-2. attachment_exists(sha256) == False → request_file(sha256)
-3. P2PNetwork versucht alle bekannten Peers der Reihe nach
-4. SHA-256-Verifikation → on_file_received() → UI-Refresh
+-> {"since_ts": <int>, "topic": "<topic_id>"}
+<- {"type": "expense",    "id": "...", "blob": "<hex>"}\n
+   {"type": "settlement", "id": "...", "blob": "<hex>"}\n
+   \n   <- EOF marker
 ```
 
-### Thread-Modell
+### QR code payload
 
+```json
+{"v":1,"name":"IslandTrip","pw":"secret","salt":"99cafd53...","currency":"ISK"}
 ```
-Tk-Main-Thread          asyncio-Thread (Daemon)
-──────────────          ──────────────────────
-GUI-Events         ←→   P2PNetwork._run()
-_save_expense()         GossipSub receive_loop()
-  └─ publish_expense()  File serve/request handler
-       └─ run_coroutine_threadsafe()
-_on_net_expense()  ←    NetworkCallbacks (via root.after)
-_refresh()
-```
+
+Base64-encoded, ~140 characters. Version field (`v`) allows future format changes.
 
 ---
 
-## Sicherheitsmodell
+## Security model
 
-### Gruppenverschlüsselung (Vertraulichkeit)
-
-Jede Ausgabe wird vor dem Speichern und Senden mit AES-256-GCM verschlüsselt:
-
-```
-Expense.to_dict()  →  JSON  →  AES-256-GCM(key=SHA-256(passwort))  →  Blob
-```
-
-Das Gruppenpasswort wird in `config.json` gespeichert — analog zum privaten Schlüssel, der ebenfalls dort liegt. Wer die Datenbankdatei oder den Netzwerkverkehr abfängt, sieht ausschließlich verschlüsselte Blobs. Das Passwort hat zwei technische Zwecke: AES-Schlüsselableitung (Vertraulichkeit) und GossipSub-Topic-Ableitung (P2P-Isolation). Als Authentifizierungsmechanismus ist es **nicht** gedacht — dafür ist der Ed25519-Schlüssel zuständig.
-
-### Signaturen (Authentizität)
-
-Jede Ausgabe wird vom Zahler mit seinem Ed25519-Schlüssel signiert. Die Signatur deckt alle relevanten Felder ab:
-
-```
-canonical_bytes(expense)  →  Ed25519.sign(private_key)  →  expense.signature
-```
-
-Ein Peer kann eine Ausgabe zwar weiterleiten, aber nicht unbemerkt verändern.
-
-### Dateianhänge (Integrität)
-
-Der SHA-256-Hash einer Datei fließt in `canonical_bytes()` ein und ist Teil der Ed25519-Signatur. Wer den Anhang austauscht, bricht die Signaturprüfung. Nach jedem Download wird der Hash gegen den in der Expense gespeicherten Wert geprüft.
+| Layer | Mechanism | Protects against |
+|-------|-----------|-----------------|
+| Confidentiality | AES-256-GCM (PBKDF2 key) | non-members reading data |
+| Authenticity | Ed25519 signatures | tampered or forged entries |
+| Creator integrity | payer_pubkey immutable in sig | impersonation edits |
+| Routing isolation | SHA256(salt) topic | group metadata leakage |
+| Attachment integrity | SHA-256 in expense signature | attachment swap |
+| Clock drift | Lamport clock CRDT | wrong timestamps winning merges |
 
 ---
 
-## Wechselkurse
+## Dependencies
 
-Kurse werden von [open.er-api.com](https://open.er-api.com) abgerufen (kostenlos, kein API-Key). Bei Nichterreichbarkeit Fallback auf [exchangerate-api.com](https://exchangerate-api.com).
+| Package | Purpose | Required |
+|---------|---------|---------|
+| `cryptography` | Ed25519, AES-256-GCM | yes |
+| `libp2p` | P2P sync | recommended |
+| `multiaddr` | Parse IPFS bootstrap addresses | recommended |
+| `trio` | Async backend for libp2p | recommended |
+| `Pillow` | In-app image preview | optional |
+| `matplotlib` | Charts window | optional |
+| `fpdf2` | PDF export | optional |
+| `qrcode[pil]` | QR code image display | optional |
+| `opencv-python` | QR camera / file scan | optional |
 
-Erneuerungsintervall mit Jitter:
-
-```
-nächster_fetch = jetzt + 6h + random(0..3h)
-```
-
-Der Jitter verhindert, dass alle Peers gleichzeitig die API anfragen. Bei Offline-Betrieb werden die zuletzt gespeicherten Kurse verwendet.
-
-**Unterstützte Währungen:** EUR, USD, GBP, CHF, JPY, CNY, CAD, AUD, SEK, NOK, DKK, PLN, CZK, HUF, RON, BGN, TRY, BRL, MXN, INR, KRW, SGD, HKD, NZD
-
----
-
-## Dateistruktur nach dem ersten Start
-
-```
-splitp2p.db             SQLite-Datenbank (Expense-Blobs, Mitglieder, Kurscache)
-storage/
-  <sha256>              Binärdaten von Dateianhängen
-splitp2p.log            Anwendungslog
-~/.config/SplitP2P/
-  config.json           Privater Schlüssel + Einstellungen
-```
+All optional packages degrade gracefully — the app runs without them,
+affected features show an install hint instead.
 
 ---
 
-## Lizenz
+## Roadmap: Kotlin / Android
 
-Apache 2.0 — siehe [LICENSE](LICENSE)
+This Python prototype is the reference implementation for a future Android app.
+
+| Component | Python prototype | Android target |
+|-----------|-----------------|----------------|
+| UI | Tkinter | Jetpack Compose |
+| Database | SQLite (stdlib) | Room |
+| Async | trio | Kotlin Coroutines |
+| Key storage | config.json | Android Keystore |
+| Local transport | libp2p mDNS | Nearby Connections API |
+| Internet transport | libp2p + IPFS | jvm-libp2p |
+| HTTP | urllib | Ktor |
+
+CRDT logic, PBKDF2 key derivation, Ed25519 signatures, debt calculation and
+QR payload format are directly portable — same algorithms, fully interoperable.
+
+---
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE)

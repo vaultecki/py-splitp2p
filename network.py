@@ -80,6 +80,8 @@ class NetworkCallbacks:
     def on_peer_disconnected(self, peer_id: str) -> None: pass
     def on_status_changed(self, online: bool, peer_id: str) -> None: pass
     def on_file_received(self, sha256: str) -> None: pass
+    def on_comment_received(self, comment_id: str, expense_id: str,
+                            blob: bytes) -> None: pass
     def on_history_synced(self, n_expenses: int, n_settlements: int) -> None: pass
 
 
@@ -428,11 +430,23 @@ class P2PNetwork:
                 logger.debug("Settlement %s verified OK", obj.id[:8])
                 return True
 
+            elif ptype == "comment":
+                from crypto import decrypt_comment, verify_comment
+                obj = decrypt_comment(blob, self._group_pw, self._group_salt)
+                if obj is None:
+                    logger.warning("Comment blob not decryptable")
+                    return False
+                if not verify_comment(obj):
+                    logger.warning("Invalid signature on comment %s",
+                                   obj.id[:8])
+                    return False
+                return True
+
         except Exception as e:
             logger.warning("Verifikation Fehler (%s): %s", ptype, e)
             return False
 
-        return True  # member-Pakete: keine Blob-Signatur, kein Filter hier
+        return True  # member packets: no blob signature, no filter
 
     async def _dispatch(self, msg) -> None:
         try:
@@ -455,6 +469,12 @@ class P2PNetwork:
                 self.callbacks.on_expense_received(packet["id"], blob)
             else:
                 self.callbacks.on_settlement_received(packet["id"], blob)
+        elif ptype == "comment":
+            blob = bytes.fromhex(packet["blob"])
+            if not self._verify_and_decode_blob(blob, "comment"):
+                return
+            self.callbacks.on_comment_received(
+                packet["id"], packet["expense_id"], blob)
         elif ptype == "member":
             self.callbacks.on_member_received(packet["pubkey"], packet["data"])
         else:
@@ -516,6 +536,16 @@ class P2PNetwork:
         self._publish_raw(json.dumps({
             "type": "settlement", "id": settlement_id,
             "timestamp": timestamp, "blob": blob.hex(),
+        }).encode())
+
+    def publish_comment(self, comment_id: str, expense_id: str,
+                        blob: bytes, timestamp: int) -> None:
+        self._publish_raw(json.dumps({
+            "type":       "comment",
+            "id":         comment_id,
+            "expense_id": expense_id,
+            "timestamp":  timestamp,
+            "blob":       blob.hex(),
         }).encode())
 
     def publish_member(self, pubkey: str, display_name: str, joined_at: int) -> None:
@@ -683,6 +713,15 @@ class P2PNetwork:
                 }) + "\n"
                 await stream.write(line.encode())
                 sent += 1
+            try:
+                from storage import load_all_comment_blobs_since
+                for cid, xid, cblob in load_all_comment_blobs_since(since):
+                    line = json.dumps({"type":"comment","id":cid,
+                        "expense_id":xid,"blob":cblob.hex()}) + "\n"
+                    await stream.write(line.encode())
+                    sent += 1
+            except Exception as _ce:
+                logger.debug("Comment history error: %s", _ce)
 
             await stream.write(b"\n")  # EOF marker
             logger.info("History: served %d records since ts=%d", sent, since)
@@ -733,7 +772,7 @@ class P2PNetwork:
                         pkt   = json.loads(line.decode())
                         blob  = bytes.fromhex(pkt["blob"])
                         ptype = pkt["type"]
-                        if ptype in ("expense", "settlement"):
+                        if ptype in ("expense", "settlement", "comment"):
                             if not self._verify_and_decode_blob(blob, ptype):
                                 logger.warning("History: Paket verworfen "
                                                "(invalid signature)")
@@ -744,6 +783,9 @@ class P2PNetwork:
                         elif ptype == "settlement":
                             self.callbacks.on_settlement_received(pkt["id"], blob)
                             n_set += 1
+                        elif ptype == "comment":
+                            self.callbacks.on_comment_received(
+                                pkt["id"], pkt.get("expense_id",""), blob)
                     except Exception as e:
                         logger.warning("History parse error: %s", e)
 

@@ -268,3 +268,53 @@ def decrypt_settlement(blob: bytes, group_password: str,
     except Exception as e:
         logger.warning("Settlement decryption failed: %s", e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Comment crypto (same pattern as Expense)
+# ---------------------------------------------------------------------------
+
+def sign_comment(comment, private_key: ed25519.Ed25519PrivateKey) -> str:
+    """Signs canonical_bytes() of the comment."""
+    return private_key.sign(comment.canonical_bytes()).hex()
+
+
+def verify_comment(comment) -> bool:
+    """Verifies the Ed25519 signature of the comment."""
+    if not comment.signature:
+        return False
+    try:
+        pub_key = ed25519.Ed25519PublicKey.from_public_bytes(
+            bytes.fromhex(comment.author_pubkey)
+        )
+        pub_key.verify(bytes.fromhex(comment.signature), comment.canonical_bytes())
+        return True
+    except Exception as e:
+        logger.warning("Invalid signature for comment %s: %s", comment.id[:8], e)
+        return False
+
+
+def encrypt_comment(comment, group_password: str,
+                    group_salt: bytes = b"") -> bytes:
+    """Serializes and encrypts a comment blob."""
+    key   = _group_aes_key(group_password, group_salt)
+    aes   = AESGCM(key)
+    data  = json.dumps(comment.to_dict(), ensure_ascii=False).encode()
+    nonce = os.urandom(12)
+    return nonce + aes.encrypt(nonce, data, None)
+
+
+def decrypt_comment(blob: bytes, group_password: str,
+                    group_salt: bytes = b"") -> Optional["Comment"]:
+    """Decrypts a comment blob. Returns None on error."""
+    from models import Comment
+    if len(blob) < 28:
+        return None
+    try:
+        key  = _group_aes_key(group_password, group_salt)
+        aes  = AESGCM(key)
+        data = aes.decrypt(blob[:12], blob[12:], None)
+        return Comment.from_dict(json.loads(data))
+    except Exception as e:
+        logger.warning("Comment decryption failed: %s", e)
+        return None

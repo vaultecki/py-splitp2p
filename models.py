@@ -348,3 +348,74 @@ def split_by_percent(amount: float,
     if diff:
         splits[0] = Split(splits[0].pubkey, round(splits[0].amount + diff, 2))
     return splits
+
+
+# ---------------------------------------------------------------------------
+# Comment  -  per-expense comment or auto-generated change log entry
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Comment:
+    """
+    A comment attached to an expense.
+
+    Two kinds:
+      kind="user"   - written by a group member
+      kind="system" - auto-generated when an expense is edited or deleted
+                      (e.g. "Amount changed from 10.00 to 12.00 EUR")
+
+    CRDT: same id, higher lamport_clock wins (last-write-wins).
+    Encrypted as AES-256-GCM blob with the group key; signed by author.
+    """
+    id: str
+    expense_id: str          # foreign key -> Expense.id
+    author_pubkey: str       # who wrote / who triggered the system event
+    text: str                # comment body
+    timestamp: int           # wall clock (display only)
+    signature: str           # Ed25519 over canonical_bytes()
+    lamport_clock: int = 0
+    kind: str = "user"       # "user" | "system"
+    is_deleted: bool = False
+
+    def display_time(self) -> str:
+        import time as _t
+        return _t.strftime("%d.%m.%Y %H:%M", _t.localtime(self.timestamp))
+
+    def canonical_bytes(self) -> bytes:
+        d = {
+            "id":           self.id,
+            "expense_id":   self.expense_id,
+            "author_pubkey":self.author_pubkey,
+            "text":         self.text,
+            "timestamp":    self.timestamp,
+            "kind":         self.kind,
+            "is_deleted":   self.is_deleted,
+        }
+        return json.dumps(d, sort_keys=True, ensure_ascii=False).encode()
+
+    @classmethod
+    def create(cls, expense_id: str, author_pubkey: str,
+               text: str, kind: str = "user") -> "Comment":
+        return cls(
+            id=str(uuid.uuid4()),
+            expense_id=expense_id,
+            author_pubkey=author_pubkey,
+            text=text,
+            timestamp=int(time.time()),
+            signature="",
+            lamport_clock=0,
+            kind=kind,
+        )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Comment":
+        d = dict(d)
+        known = cls.__dataclass_fields__.keys()
+        d = {k: v for k, v in d.items() if k in known}
+        return cls(**d)
+
+    def __repr__(self) -> str:
+        return f"Comment({self.author_pubkey[:8]}... on {self.expense_id[:8]}...)"
