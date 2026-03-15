@@ -233,10 +233,12 @@ class GroupSelectDialog(tk.Toplevel):
             tk.Frame(self, bg=BG, height=16).pack()
         else:
             self._selected = tk.StringVar(value="")
-            _lbl(frm, "Noch keine Gruppen.", fg=FG_DIM, font=FONT_SMALL).pack(
+            _lbl(frm, "No groups yet.", fg=FG_DIM, font=FONT_SMALL).pack(
                 anchor="w", pady=(0, 12))
-            _btn(frm, "+ Erste Gruppe erstellen / beitreten",
-                 self._new_group, width=32).pack(anchor="w", pady=8)
+            _btn(frm, "+ Create / join group",
+                 self._new_group, width=28).pack(anchor="w", pady=(0, 8))
+            _ghost(frm, "📥 Import QR code (join existing group)",
+                   self._import_qr).pack(anchor="w", pady=(0, 8))
             tk.Frame(self, bg=BG, height=16).pack()
 
     def _new_group(self):
