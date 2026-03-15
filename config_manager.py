@@ -54,7 +54,7 @@ class ConfigManager:
             Full path to config directory
 
         Platform paths:
-            Windows:   %LOCALAPPDATA%\{app_name}
+            Windows:   %LOCALAPPDATA%/{app_name}
             Linux/Mac: ~/.config/{app_name}
         """
         home_dir = os.path.expanduser("~")
