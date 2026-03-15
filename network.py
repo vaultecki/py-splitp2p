@@ -159,14 +159,17 @@ class P2PNetwork:
             import multiaddr
             listen_addrs = [multiaddr.Multiaddr("/ip4/0.0.0.0/tcp/0")]
 
-        # new_host mit mDNS (aktuelle API)
+        # new_host with mDNS if supported by installed version
         try:
             self._host = new_host(
                 listen_addrs=listen_addrs,
                 enable_mDNS=True,
             )
+            logger.info("new_host() with built-in mDNS")
         except TypeError:
             self._host = new_host()
+            logger.info("new_host() without mDNS (older API) - "
+                        "will use manual mDNS fallback")
 
         # GossipSub
         gossip = gossipsub.GossipSub(
@@ -188,11 +191,9 @@ class P2PNetwork:
                 self._host.set_stream_handler(FILE_PROTOCOL,    self._file_serve_handler)
                 self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
 
-                # Peer-Events (API variiert je nach Version)
-                try:
-                    self._host.get_network().notify(self._PeerNotifee(self))
-                except Exception as e:
-                    logger.debug("notify() not available: %s", e)
+                # Peer discovery via polling (works across all py-libp2p versions)
+                # notify() was removed in newer versions; polling the peerstore
+                # is the reliable cross-version alternative.
 
                 self.callbacks.on_status_changed(True, peer_id)
 
@@ -201,6 +202,8 @@ class P2PNetwork:
                     nursery.start_soon(self._cmd_loop)
                     nursery.start_soon(self._connect_bootstrap)
                     nursery.start_soon(self._cleanup_stale_tmp)
+                    nursery.start_soon(self._setup_mdns)
+                    nursery.start_soon(self._peer_poll_loop)
 
         except Exception as e:
             logger.error("P2P run error: %s", e)
@@ -251,6 +254,77 @@ class P2PNetwork:
     # ------------------------------------------------------------------
     # Bootstrap
     # ------------------------------------------------------------------
+
+    async def _peer_poll_loop(self) -> None:
+        """
+        Polls the host's peerstore every 2 seconds and fires
+        on_peer_connected / on_peer_disconnected callbacks when
+        the set of connected peers changes.
+
+        This replaces the old notify() / _PeerNotifee approach which
+        was removed in newer py-libp2p versions.
+        """
+        import trio
+        logger.info("Peer poll loop started")
+        while self._running:
+            try:
+                # Get currently connected peers from the peerstore
+                current: set[str] = set()
+                try:
+                    for pid in self._host.get_peerstore().peer_ids():
+                        pid_str = pid.to_string() \
+                            if hasattr(pid, 'to_string') else str(pid)
+                        # Only count peers we have open connections to
+                        try:
+                            conns = self._host.get_network().connections_with_peer(pid)
+                            if conns:
+                                current.add(pid_str)
+                        except Exception:
+                            # Fallback: any peer in store = connected
+                            current.add(pid_str)
+                except Exception as e:
+                    logger.debug("Peerstore poll error: %s", e)
+
+                # Fire callbacks for changes
+                new_peers  = current - self._peers
+                gone_peers = self._peers - current
+
+                for pid in new_peers:
+                    self._peers.add(pid)
+                    self.callbacks.on_peer_connected(pid)
+                    self.callbacks.on_history_synced(0, 0)  # triggers history request
+                    self._cmd_queue.put({"cmd": "req_history_from", "peer_id": pid})
+                    logger.info("Peer connected (poll): %s", pid[:20])
+
+                for pid in gone_peers:
+                    self._peers.discard(pid)
+                    self.callbacks.on_peer_disconnected(pid)
+                    logger.info("Peer disconnected (poll): %s", pid[:20])
+
+            except Exception as e:
+                logger.debug("Peer poll loop error: %s", e)
+
+            await trio.sleep(2.0)
+
+    async def _setup_mdns(self) -> None:
+        """
+        Manual mDNS discovery - fallback for py-libp2p versions
+        that don't support enable_mDNS=True in new_host().
+        Silently skipped if the module is not available.
+        """
+        import trio
+        try:
+            from libp2p.discovery.mdns import MDNSService
+            service_name = f"_splitp2p_{self.topic_id[:8]}._udp.local."
+            mdns = MDNSService(self._host, service_name=service_name)
+            await mdns.start()
+            logger.info("Manual mDNS discovery started (service: %s)",
+                        self.topic_id[:8])
+        except ImportError:
+            logger.debug("libp2p.discovery.mdns not available - "
+                         "mDNS disabled (already using built-in or not supported)")
+        except Exception as e:
+            logger.warning("mDNS setup failed: %s", e)
 
     async def _connect_bootstrap(self) -> None:
         import trio

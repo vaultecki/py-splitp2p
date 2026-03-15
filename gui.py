@@ -291,6 +291,39 @@ class GroupSelectDialog(tk.Toplevel):
 # Attachment Viewer
 # ---------------------------------------------------------------------------
 
+class AttachmentViewer(tk.Toplevel):
+    def __init__(self, parent, sha256: str, filename: str):
+        from storage import attachment_path
+        path = attachment_path(sha256)
+        if not path:
+            mb.showerror("Not found",
+                         "The file is not available locally.", parent=parent)
+            return
+        if filename.lower().endswith(".pdf"):
+            self._open_ext(path); return
+        super().__init__(parent)
+        self.title(filename)
+        self.configure(bg=BG)
+        self.grab_set()
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(path); img.thumbnail((800, 600))
+            photo = ImageTk.PhotoImage(img)
+            lbl = tk.Label(self, image=photo, bg=BG)
+            lbl.image = photo; lbl.pack(padx=10, pady=10)
+            _lbl(self, filename, fg=FG_DIM, font=FONT_SMALL).pack(pady=(0, 10))
+        except ImportError:
+            self._open_ext(path)
+            try: self.destroy()
+            except Exception: pass
+
+    @staticmethod
+    def _open_ext(path):
+        import subprocess, sys
+        if sys.platform == "win32": os.startfile(path)
+        elif sys.platform == "darwin": subprocess.run(["open", path])
+        else: subprocess.run(["xdg-open", path])
+
 
 # ---------------------------------------------------------------------------
 # QR-Code Dialoge: Anzeigen + Importieren
