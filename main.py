@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-ThaOTP – Encrypted P2P Messenger
+SplitP2P – Split payments
 Entry point: sets up logging, then launches the GUI.
 
 Usage:
