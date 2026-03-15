@@ -39,7 +39,7 @@ SYNC_PROTOCOL    = "/splitp2p/sync/1.0"
 FILE_PROTOCOL    = "/splitp2p/files/1.0"
 HISTORY_PROTOCOL = "/splitp2p/history/1.0"
 CHUNK_SIZE       = 16_384
-P2P_PORT         = 4001    # fixed port so mDNS advertises the correct address
+P2P_PORT         = 8000    # fixed port so mDNS advertises the correct address
                            # change if 4001 is already in use on your system
 DOWNLOAD_RETRIES = 3       # max Versuche pro Peer
 RETRY_BACKOFF    = (1, 3, 7)  # Wartezeit in Sekunden zwischen Versuchen
