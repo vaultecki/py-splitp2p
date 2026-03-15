@@ -2,40 +2,47 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Network Layer
+Network Layer – P2P Expense Synchronisation
+
+py-libp2p nutzt trio als Async-Backend (ab ~0.2).
+Dieser Code läuft daher in einem Daemon-Thread mit trio.run().
+
+Thread-Kommunikation:
+  tkinter  →  Trio   : queue.SimpleQueue (outgoing packets + commands)
+  Trio     →  tkinter: callbacks.on_*()  (werden in tkinter via root.after gerufen)
 
 Drei Protokolle:
-  1. GossipSub  "/splitp2p/sync/1.0"
-     Pakete mit type-Feld:
-       {"type": "expense",    "id": ..., "timestamp": ..., "blob": hex}
-       {"type": "settlement", "id": ..., "timestamp": ..., "blob": hex}
-       {"type": "member",     "pubkey": ..., "data": {display_name, joined_at}}
-
-  2. Direct Stream  "/splitp2p/files/1.0"
-     SHA-256-Anfrage → Binärdaten
-
-  3. Peer-Discovery
-     a) mDNS  – automatisch im lokalen Netz (kein Bootstrap nötig)
-     b) IPFS-Bootstrap-Nodes – öffentliche libp2p-Knoten für das Internet
-
-Alle Callbacks kommen aus dem asyncio-Thread.
-gui.py leitet sie per root.after(0, ...) in den Tk-Thread weiter.
+  /splitp2p/sync/1.0     – GossipSub (Expenses, Settlements, Members)
+  /splitp2p/files/1.0    – Direkt-Stream: SHA-256-Anfrage → Binärdaten
+  /splitp2p/history/1.0  – Direkt-Stream: Delta-Sync beim Peer-Connect
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
 import os
+import queue as _queue
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+SYNC_PROTOCOL    = "/splitp2p/sync/1.0"
+FILE_PROTOCOL    = "/splitp2p/files/1.0"
+HISTORY_PROTOCOL = "/splitp2p/history/1.0"
+CHUNK_SIZE       = 16_384
+
+IPFS_BOOTSTRAP = [
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+]
+
 
 def _local_max_timestamp() -> int:
-    """Modul-level Wrapper für storage.get_max_timestamp()."""
     try:
         from storage import get_max_timestamp
         return get_max_timestamp()
@@ -53,22 +60,8 @@ def load_all_settlement_blobs_since(since: int):
     return _f(since)
 
 
-SYNC_PROTOCOL = "/splitp2p/sync/1.0"
-FILE_PROTOCOL    = "/splitp2p/files/1.0"
-HISTORY_PROTOCOL = "/splitp2p/history/1.0"
-CHUNK_SIZE       = 16_384
-
-# Öffentliche libp2p / IPFS Bootstrap-Knoten
-IPFS_BOOTSTRAP = [
-    "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-    "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-    "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-    "/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-]
-
-
 # ---------------------------------------------------------------------------
-# Callbacks-Interface
+# Callbacks
 # ---------------------------------------------------------------------------
 
 class NetworkCallbacks:
@@ -94,9 +87,15 @@ class P2PNetwork:
         self._host      = None
         self._pubsub    = None
         self._sub       = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running   = False
         self._peers: set[str] = set()
+        # Thread-safe queue: tkinter → trio
+        # Items: dicts mit "cmd" key:
+        #   {"cmd": "publish",  "data": bytes}
+        #   {"cmd": "req_file", "sha256": str}
+        #   {"cmd": "req_history"}
+        #   {"cmd": "stop"}
+        self._cmd_queue: _queue.SimpleQueue = _queue.SimpleQueue()
         os.makedirs("storage", exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -104,48 +103,54 @@ class P2PNetwork:
     # ------------------------------------------------------------------
 
     def start_in_thread(self) -> None:
-        import threading
         threading.Thread(
-            target=self._thread_main, daemon=True, name="p2p-network"
+            target=self._thread_main,
+            daemon=True,
+            name="p2p-network",
         ).start()
 
     def _thread_main(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._run())
+            import trio
+            trio.run(self._run)
+        except ImportError:
+            logger.warning("trio not installed – offline mode")
+            self.callbacks.on_status_changed(False, "offline-mode")
         except Exception as e:
             logger.error("P2P thread crashed: %s", e)
-        finally:
             self.callbacks.on_status_changed(False, "")
 
     async def _run(self) -> None:
         try:
+            import trio
             from libp2p import new_host
             from libp2p.pubsub import gossipsub
             from libp2p.pubsub.pubsub import Pubsub
-            import multiaddr
-        except ImportError:
-            logger.warning("libp2p not installed – offline mode")
+            from libp2p.utils.address_validation import get_available_interfaces
+        except ImportError as e:
+            logger.warning("libp2p not installed – offline mode (%s)", e)
             self.callbacks.on_status_changed(False, "offline-mode")
             return
 
-        # listen_addrs: zufälliger TCP-Port, alle Interfaces
-        listen_addrs = [multiaddr.Multiaddr("/ip4/0.0.0.0/tcp/0")]
+        import trio
 
-        # mDNS und Bootstrap direkt in new_host (ab py-libp2p 0.3+)
+        # listen_addrs: Port 0 → OS wählt freien Port
+        try:
+            listen_addrs = get_available_interfaces(0)
+        except Exception:
+            import multiaddr
+            listen_addrs = [multiaddr.Multiaddr("/ip4/0.0.0.0/tcp/0")]
+
+        # new_host mit mDNS (aktuelle API)
         try:
             self._host = new_host(
                 listen_addrs=listen_addrs,
                 enable_mDNS=True,
-                bootstrap=IPFS_BOOTSTRAP,
             )
-            logger.info("Using new_host() with built-in mDNS + bootstrap")
         except TypeError:
-            # Ältere API ohne diese Parameter
             self._host = new_host()
-            logger.info("Using legacy new_host() – manual discovery fallback")
 
+        # GossipSub
         gossip = gossipsub.GossipSub(
             protocols=["/meshsub/1.1.0"],
             degree=6,
@@ -154,71 +159,75 @@ class P2PNetwork:
         )
         self._pubsub = Pubsub(self._host, gossip)
 
-        async with self._host.run(listen_addrs=listen_addrs):
-            peer_id = self._host.get_id().to_string()
-            self._running = True
-            logger.info("P2P node started. PeerID: %s", peer_id)
+        # Nursery statt asyncio.create_task
+        try:
+            async with self._host.run(listen_addrs=listen_addrs):
+                peer_id = self._host.get_id().to_string()
+                self._running = True
+                logger.info("P2P node started. PeerID: %s", peer_id)
 
-            self._sub = await self._pubsub.subscribe(self.topic_id)
-            self._host.set_stream_handler(FILE_PROTOCOL, self._file_serve_handler)
-            self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
+                self._sub = await self._pubsub.subscribe(self.topic_id)
+                self._host.set_stream_handler(FILE_PROTOCOL,    self._file_serve_handler)
+                self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
 
-            # Peer-Events registrieren (API je nach Version unterschiedlich)
-            try:
-                self._host.get_network().notify(self._PeerNotifee(self))
-            except Exception as e:
-                logger.debug("notify() not available: %s", e)
+                # Peer-Events (API variiert je nach Version)
+                try:
+                    self._host.get_network().notify(self._PeerNotifee(self))
+                except Exception as e:
+                    logger.debug("notify() not available: %s", e)
 
-            self.callbacks.on_status_changed(True, peer_id)
+                self.callbacks.on_status_changed(True, peer_id)
 
-            # Fallback: manuelle Discovery für ältere py-libp2p-Versionen
-            asyncio.create_task(self._setup_mdns())
-            asyncio.create_task(self._connect_bootstrap())
+                async with trio.open_nursery() as nursery:
+                    nursery.start_soon(self._receive_loop)
+                    nursery.start_soon(self._cmd_loop)
+                    nursery.start_soon(self._connect_bootstrap)
 
-            await self._receive_loop()
+        except Exception as e:
+            logger.error("P2P run error: %s", e)
+            self.callbacks.on_status_changed(False, "")
 
     def stop(self) -> None:
         self._running = False
-        if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        self._cmd_queue.put({"cmd": "stop"})
+        logger.info("P2P node stopping")
 
     # ------------------------------------------------------------------
-    # Peer-Discovery: mDNS
+    # Peer events
     # ------------------------------------------------------------------
 
-    async def _setup_mdns(self) -> None:
-        """
-        mDNS-Discovery für lokale Netze.
-        Peers im selben LAN mit demselben topic_id finden sich automatisch.
-        """
-        try:
-            from libp2p.discovery.mdns import MDNSService
-            mdns = MDNSService(
-                self._host,
-                service_name=f"_splitp2p_{self.topic_id[:8]}._udp.local.",
-            )
-            await mdns.start()
-            logger.info("mDNS discovery started (service: %s)", self.topic_id[:8])
-        except ImportError:
-            logger.debug("libp2p mDNS module not available – skipping local discovery")
-        except Exception as e:
-            logger.warning("mDNS setup failed: %s", e)
+    class _PeerNotifee:
+        def __init__(self, net):
+            self._net = net
+
+        def connected(self, _, conn):
+            import trio
+            pid = conn.get_remote_peer_id().to_string()
+            self._net._peers.add(pid)
+            self._net.callbacks.on_peer_connected(pid)
+            # History anfordern
+            self._net._cmd_queue.put({"cmd": "req_history_from", "peer_id": pid})
+
+        def disconnected(self, _, conn):
+            pid = conn.get_remote_peer_id().to_string()
+            self._net._peers.discard(pid)
+            self._net.callbacks.on_peer_disconnected(pid)
+
+        def listen(self, *_): pass
+        def listen_close(self, *_): pass
+        def open_stream(self, *_): pass
+        def close_stream(self, *_): pass
 
     # ------------------------------------------------------------------
-    # Peer-Discovery: IPFS Bootstrap
+    # Bootstrap
     # ------------------------------------------------------------------
 
     async def _connect_bootstrap(self) -> None:
-        """
-        Verbindet mit öffentlichen IPFS-Bootstrap-Nodes.
-        Das reicht um ins globale libp2p-DHT einzutreten und
-        andere SplitP2P-Nodes zu finden, die dieselbe Topic-ID abonniert haben.
-        """
+        import trio
         try:
             import multiaddr
             from libp2p.peer.peerinfo import info_from_p2p_addr
         except ImportError:
-            logger.debug("multiaddr not available – bootstrap skipped")
             return
 
         connected = 0
@@ -226,29 +235,27 @@ class P2PNetwork:
             try:
                 ma        = multiaddr.Multiaddr(addr_str)
                 peer_info = info_from_p2p_addr(ma)
-                await asyncio.wait_for(
-                    self._host.connect(peer_info), timeout=10.0
-                )
-                connected += 1
-                logger.info("Bootstrap connected: %s", addr_str.split("/")[-1][:16])
-            except asyncio.TimeoutError:
-                logger.debug("Bootstrap timeout: %s", addr_str[-30:])
+                with trio.move_on_after(10):
+                    await self._host.connect(peer_info)
+                    connected += 1
+                    logger.info("Bootstrap: %s", addr_str.split("/")[-1][:16])
             except Exception as e:
                 logger.debug("Bootstrap %s failed: %s", addr_str[-30:], e)
 
         logger.info("Bootstrap: %d/%d nodes reached", connected, len(IPFS_BOOTSTRAP))
 
     # ------------------------------------------------------------------
-    # GossipSub – Receive
+    # GossipSub – Empfangen
     # ------------------------------------------------------------------
 
     async def _receive_loop(self) -> None:
+        import trio
         while self._running and self._sub is not None:
             try:
-                msg = await asyncio.wait_for(self._sub.get(), timeout=1.0)
-                await self._dispatch(msg)
-            except asyncio.TimeoutError:
-                pass
+                with trio.move_on_after(1.0):
+                    msg = await self._sub.get()
+                    if msg is not None:
+                        await self._dispatch(msg)
             except Exception as e:
                 logger.error("Receive loop error: %s", e)
 
@@ -260,64 +267,82 @@ class P2PNetwork:
             return
 
         ptype = packet.get("type", "expense")
-
         if ptype == "expense":
-            blob = bytes.fromhex(packet["blob"])
-            self.callbacks.on_expense_received(packet["id"], blob)
-
+            self.callbacks.on_expense_received(
+                packet["id"], bytes.fromhex(packet["blob"]))
         elif ptype == "settlement":
-            blob = bytes.fromhex(packet["blob"])
-            self.callbacks.on_settlement_received(packet["id"], blob)
-
+            self.callbacks.on_settlement_received(
+                packet["id"], bytes.fromhex(packet["blob"]))
         elif ptype == "member":
             self.callbacks.on_member_received(packet["pubkey"], packet["data"])
-
         else:
             logger.debug("Unknown packet type: %s", ptype)
 
     # ------------------------------------------------------------------
-    # GossipSub – Publish
+    # Command loop (drains _cmd_queue in trio thread)
+    # ------------------------------------------------------------------
+
+    async def _cmd_loop(self) -> None:
+        import trio
+        while self._running:
+            try:
+                cmd = self._cmd_queue.get_nowait()
+                if cmd["cmd"] == "stop":
+                    self._running = False
+                    return
+                elif cmd["cmd"] == "publish":
+                    if self._pubsub:
+                        await self._pubsub.publish(self.topic_id, cmd["data"])
+                elif cmd["cmd"] == "req_file":
+                    for pid in list(self._peers):
+                        ok = await self._download_file(pid, cmd["sha256"])
+                        if ok:
+                            break
+                elif cmd["cmd"] == "req_history_from":
+                    await self._request_history(cmd["peer_id"])
+                elif cmd["cmd"] == "req_history_all":
+                    for pid in list(self._peers):
+                        await self._request_history(pid)
+            except _queue.Empty:
+                await trio.sleep(0.05)
+            except Exception as e:
+                logger.error("Command loop error: %s", e)
+                await trio.sleep(0.1)
+
+    # ------------------------------------------------------------------
+    # GossipSub – Senden (thread-safe, von tkinter aufrufbar)
     # ------------------------------------------------------------------
 
     def _publish_raw(self, data: bytes) -> None:
-        if not self._running or self._loop is None:
-            return
-        asyncio.run_coroutine_threadsafe(self._do_publish(data), self._loop)
-
-    async def _do_publish(self, data: bytes) -> None:
-        if self._pubsub:
-            await self._pubsub.publish(self.topic_id, data)
+        if self._running:
+            self._cmd_queue.put({"cmd": "publish", "data": data})
 
     def publish_expense(self, expense_id: str, blob: bytes, timestamp: int) -> None:
         self._publish_raw(json.dumps({
-            "type":      "expense",
-            "id":        expense_id,
-            "timestamp": timestamp,
-            "blob":      blob.hex(),
+            "type": "expense", "id": expense_id,
+            "timestamp": timestamp, "blob": blob.hex(),
         }).encode())
 
     def publish_settlement(self, settlement_id: str, blob: bytes, timestamp: int) -> None:
         self._publish_raw(json.dumps({
-            "type":      "settlement",
-            "id":        settlement_id,
-            "timestamp": timestamp,
-            "blob":      blob.hex(),
+            "type": "settlement", "id": settlement_id,
+            "timestamp": timestamp, "blob": blob.hex(),
         }).encode())
 
     def publish_member(self, pubkey: str, display_name: str, joined_at: int) -> None:
         self._publish_raw(json.dumps({
-            "type":        "member",
-            "pubkey":      pubkey,
-            "data":        {"display_name": display_name, "joined_at": joined_at},
+            "type": "member", "pubkey": pubkey,
+            "data": {"display_name": display_name, "joined_at": joined_at},
         }).encode())
 
     # ------------------------------------------------------------------
-    # File Transfer – Serve
+    # File Transfer – Serving
     # ------------------------------------------------------------------
 
     async def _file_serve_handler(self, stream) -> None:
+        import trio
         try:
-            sha256    = (await stream.read()).decode().strip()
+            sha256 = (await stream.read(64)).decode().strip()
             if len(sha256) != 64:
                 return
             from storage import STORAGE_DIR
@@ -331,179 +356,141 @@ class P2PNetwork:
         except Exception as e:
             logger.error("File serve error: %s", e)
         finally:
-            try: await stream.close()
-            except Exception: pass
+            try:
+                await stream.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
-    # File Transfer – Request
+    # File Transfer – Requesting
     # ------------------------------------------------------------------
 
     async def _download_file(self, peer_id_str: str, sha256: str) -> bool:
-        import hashlib as _hl
-        from libp2p.peer.id import ID as PeerID
+        import trio
         from storage import STORAGE_DIR
         try:
+            from libp2p.peer.id import ID as PeerID
             stream = await self._host.new_stream(
-                PeerID.from_base58(peer_id_str), [FILE_PROTOCOL]
-            )
+                PeerID.from_base58(peer_id_str), [FILE_PROTOCOL])
         except Exception as e:
             logger.warning("Cannot open file stream to %s: %s", peer_id_str[:12], e)
             return False
 
         temp = os.path.join(STORAGE_DIR, sha256 + ".tmp")
-        h    = _hl.sha256()
+        h    = hashlib.sha256()
         try:
             await stream.write(sha256.encode())
             with open(temp, "wb") as f:
                 while True:
-                    chunk = await asyncio.wait_for(stream.read(), timeout=30.0)
-                    if not chunk: break
-                    f.write(chunk); h.update(chunk)
+                    with trio.move_on_after(30) as cancel:
+                        chunk = await stream.read(CHUNK_SIZE)
+                    if cancel.cancelled_caught:
+                        raise TimeoutError("download timeout")
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    h.update(chunk)
+
             if h.hexdigest() == sha256:
                 os.rename(temp, os.path.join(STORAGE_DIR, sha256))
                 self.callbacks.on_file_received(sha256)
+                logger.info("File %s downloaded OK", sha256[:12])
                 return True
             logger.error("Hash mismatch for %s", sha256[:12])
             os.remove(temp)
             return False
         except Exception as e:
             logger.error("Download error %s: %s", sha256[:12], e)
-            if os.path.exists(temp): os.remove(temp)
+            if os.path.exists(temp):
+                os.remove(temp)
             return False
         finally:
-            try: await stream.close()
-            except Exception: pass
+            try:
+                await stream.close()
+            except Exception:
+                pass
 
     def request_file(self, sha256: str) -> None:
-        if not self._peers or not self._running: return
-        async def _try():
-            for pid in list(self._peers):
-                if await self._download_file(pid, sha256): return
-        asyncio.run_coroutine_threadsafe(_try(), self._loop)
+        if self._peers and self._running:
+            self._cmd_queue.put({"cmd": "req_file", "sha256": sha256})
 
     # ------------------------------------------------------------------
-    # Peer events
-    # ------------------------------------------------------------------
-
-    class _PeerNotifee:
-        def __init__(self, net):
-            self._net = net
-        def connected(self, _, conn):
-            pid = conn.get_remote_peer_id().to_string()
-            self._net._peers.add(pid)
-            self._net.callbacks.on_peer_connected(pid)
-            # Sofort History vom neuen Peer anfordern
-            asyncio.run_coroutine_threadsafe(
-                self._net._request_history(pid),
-                self._net._loop,
-            ) if self._net._loop else None
-        def disconnected(self, _, conn):
-            pid = conn.get_remote_peer_id().to_string()
-            self._net._peers.discard(pid)
-            self._net.callbacks.on_peer_disconnected(pid)
-        def listen(self, *_): pass
-        def listen_close(self, *_): pass
-        def open_stream(self, *_): pass
-        def close_stream(self, *_): pass
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # History Sync – Serving side
+    # History Sync – Serving
     # ------------------------------------------------------------------
 
     async def _history_serve_handler(self, stream) -> None:
-        """
-        Antwortet auf eine History-Anfrage.
-
-        Protokoll:
-          Anfrage:  JSON {"since_ts": int, "topic": str}
-          Antwort:  Zeilenweise JSON-Pakete (ein Blob pro Zeile), dann Leerzeile als EOF.
-                    Jede Zeile: {"type": "expense"|"settlement", "id": ..., "blob": hex, "ts": int}
-        """
+        import trio
         try:
-            req_raw = await asyncio.wait_for(stream.read(), timeout=10.0)
+            req_raw = await stream.read(4096)
             req     = json.loads(req_raw.decode())
             since   = int(req.get("since_ts", 0))
             topic   = req.get("topic", "")
 
-            # Nur antworten wenn Topic übereinstimmt (Gruppenpasswort-Ableitung)
             if topic != self.topic_id:
-                logger.debug("History request for wrong topic, ignoring")
-                await stream.close()
+                logger.debug("History request for wrong topic")
                 return
 
-            from storage import load_all_expense_blobs, load_all_settlement_blobs
-            import sqlite3
-
-            # Hole alle Blobs – CRDT-Timestamp liegt in der DB-Tabelle
             sent = 0
             for eid, blob in load_all_expense_blobs_since(since):
-                line = json.dumps({"type": "expense",
-                                   "id": eid, "blob": blob.hex()}) + "\n"
+                line = json.dumps({
+                    "type": "expense", "id": eid, "blob": blob.hex()
+                }) + "\n"
                 await stream.write(line.encode())
                 sent += 1
             for sid, blob in load_all_settlement_blobs_since(since):
-                line = json.dumps({"type": "settlement",
-                                   "id": sid, "blob": blob.hex()}) + "\n"
+                line = json.dumps({
+                    "type": "settlement", "id": sid, "blob": blob.hex()
+                }) + "\n"
                 await stream.write(line.encode())
                 sent += 1
 
-            # EOF-Marker
-            await stream.write(b"\n")
+            await stream.write(b"\n")  # EOF marker
             logger.info("History: served %d records since ts=%d", sent, since)
 
         except Exception as e:
             logger.error("History serve error: %s", e)
         finally:
-            try: await stream.close()
-            except Exception: pass
+            try:
+                await stream.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
-    # History Sync – Requesting side
+    # History Sync – Requesting
     # ------------------------------------------------------------------
 
     async def _request_history(self, peer_id_str: str) -> None:
-        """
-        Fordert alle Expense- und Settlement-Blobs vom Peer an
-        die neuer als unser höchster bekannter Timestamp sind.
-        """
+        import trio
         try:
             from libp2p.peer.id import ID as PeerID
-            stream = await asyncio.wait_for(
-                self._host.new_stream(PeerID.from_base58(peer_id_str),
-                                      [HISTORY_PROTOCOL]),
-                timeout=10.0,
-            )
+            stream = await self._host.new_stream(
+                PeerID.from_base58(peer_id_str), [HISTORY_PROTOCOL])
         except Exception as e:
-            logger.debug("Cannot open history stream to %s: %s",
-                         peer_id_str[:12], e)
+            logger.debug("Cannot open history stream to %s: %s", peer_id_str[:12], e)
             return
 
         try:
-            # Unseren aktuellen höchsten Timestamp ermitteln
             since = _local_max_timestamp()
             req   = json.dumps({"since_ts": since, "topic": self.topic_id})
             await stream.write(req.encode())
 
-            # Zeilenweise lesen bis Leerzeile (EOF-Marker)
             buf = b""
             n_exp = n_set = 0
             while True:
-                chunk = await asyncio.wait_for(stream.read(), timeout=30.0)
+                with trio.move_on_after(30) as cancel:
+                    chunk = await stream.read(CHUNK_SIZE)
+                if cancel.cancelled_caught:
+                    break
                 if not chunk:
                     break
                 buf += chunk
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     if not line.strip():
-                        # EOF-Marker
                         self.callbacks.on_history_synced(n_exp, n_set)
                         return
                     try:
-                        pkt = json.loads(line.decode())
+                        pkt  = json.loads(line.decode())
                         blob = bytes.fromhex(pkt["blob"])
                         if pkt["type"] == "expense":
                             self.callbacks.on_expense_received(pkt["id"], blob)
@@ -515,24 +502,24 @@ class P2PNetwork:
                         logger.warning("History parse error: %s", e)
 
             self.callbacks.on_history_synced(n_exp, n_set)
-            logger.info("History: received %d expenses + %d settlements from %s",
+            logger.info("History: +%d expenses +%d settlements from %s",
                         n_exp, n_set, peer_id_str[:12])
 
-        except asyncio.TimeoutError:
-            logger.warning("History request timeout from %s", peer_id_str[:12])
         except Exception as e:
-            logger.error("History request error: %s", e)
+            logger.error("History request error from %s: %s", peer_id_str[:12], e)
         finally:
-            try: await stream.close()
-            except Exception: pass
+            try:
+                await stream.close()
+            except Exception:
+                pass
 
     def request_history_from_all(self) -> None:
-        """Fordert History von allen bekannten Peers an (Thread-safe)."""
-        if not self._peers or not self._running: return
-        async def _do():
-            for pid in list(self._peers):
-                await self._request_history(pid)
-        asyncio.run_coroutine_threadsafe(_do(), self._loop)
+        if self._running:
+            self._cmd_queue.put({"cmd": "req_history_all"})
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
 
     @property
     def is_online(self) -> bool:
