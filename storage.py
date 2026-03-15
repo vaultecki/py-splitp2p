@@ -237,6 +237,48 @@ def attachment_exists(sha256: str) -> bool:
     return os.path.exists(os.path.join(STORAGE_DIR, sha256))
 
 
+def delete_attachment_if_unreferenced(
+        db: sqlite3.Connection, sha256: str) -> bool:
+    """
+    Loescht die Anhang-Datei aus dem Dateisystem, falls kein
+    nicht-geloeschter Expense-Eintrag mehr auf diesen SHA-256 verweist.
+
+    Warum 'unreferenced' pruefen?
+      Zwei Ausgaben koennen dieselbe Datei referenzieren (selber Kassenbon
+      zweimal hinzugefuegt). In diesem Fall bleibt die Datei erhalten.
+      Der DB-Tombstone (is_deleted=1) bleibt immer erhalten damit
+      andere Peers die Loeschung per Sync erhalten koennen.
+
+    Gibt True zurueck wenn die Datei geloescht wurde, False sonst.
+    """
+    path = os.path.join(STORAGE_DIR, sha256)
+    if not os.path.exists(path):
+        return False  # existiert nicht mehr
+
+    # Alle Blobs laden und pruefen ob noch jemand diesen Hash referenziert
+    # Wir checken auf Blob-Ebene (ohne Entschluesselung) ob der hex-String
+    # im Blob vorkommt -- als schnellen Heuristik-Filter.
+    # Exakt: nur nicht-geloeschte Eintraege zaehlen.
+    rows = db.execute(
+        "SELECT blob FROM expenses WHERE is_deleted = 0"
+    ).fetchall()
+    sha_bytes = sha256.encode()
+    for row in rows:
+        if sha_bytes in bytes(row["blob"]):
+            logger.debug("Attachment %s noch referenziert, nicht geloescht",
+                         sha256[:12])
+            return False
+
+    try:
+        os.remove(path)
+        logger.info("Attachment geloescht: %s", sha256[:12])
+        return True
+    except OSError as e:
+        logger.warning("Attachment loeschen fehlgeschlagen %s: %s",
+                       sha256[:12], e)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # History-Sync Hilfsfunktionen (für network.py)
 # ---------------------------------------------------------------------------

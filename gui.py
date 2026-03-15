@@ -2362,7 +2362,7 @@ class App(tk.Tk):
             text=f"online  {n} Peer{'s' if n != 1 else ''}" if n else "online  keine Peers")
 
     def _on_net_expense(self, expense_id, blob):
-        from storage import save_expense_blob
+        from storage import save_expense_blob, delete_attachment_if_unreferenced
         from crypto import decrypt_expense
         exp = decrypt_expense(blob, self._group_pw, self._group_salt)
         if exp is None: return
@@ -2373,11 +2373,22 @@ class App(tk.Tk):
             author_pubkey=exp.payer_pubkey,
         ):
             return
-        self._refresh()
-        if exp.attachment and self._network:
+        if exp.is_deleted:
+            # Tombstone empfangen: Anhang loeschen falls unreferenziert.
+            # Tombstone-Eintrag in DB bleibt fuer weitere Sync-Partner erhalten.
+            if exp.attachment:
+                deleted = delete_attachment_if_unreferenced(
+                    self._db, exp.attachment.sha256)
+                if deleted:
+                    self._append_log(
+                        'sync',
+                        f"Anhang per Sync geloescht: {exp.attachment.filename}")
+        elif exp.attachment:
+            # Neue/aktualisierte Ausgabe: fehlenden Anhang vom Peer anfordern.
             from storage import attachment_exists
-            if not attachment_exists(exp.attachment.sha256):
+            if not attachment_exists(exp.attachment.sha256) and self._network:
                 self._network.request_file(exp.attachment.sha256)
+        self._refresh()
 
     def _on_net_settlement(self, settlement_id, blob):
         from storage import save_settlement_blob
@@ -2506,4 +2517,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-    
