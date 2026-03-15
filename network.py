@@ -39,6 +39,8 @@ SYNC_PROTOCOL    = "/splitp2p/sync/1.0"
 FILE_PROTOCOL    = "/splitp2p/files/1.0"
 HISTORY_PROTOCOL = "/splitp2p/history/1.0"
 CHUNK_SIZE       = 16_384
+P2P_PORT         = 4001    # fixed port so mDNS advertises the correct address
+                           # change if 4001 is already in use on your system
 DOWNLOAD_RETRIES = 3       # max Versuche pro Peer
 RETRY_BACKOFF    = (1, 3, 7)  # Wartezeit in Sekunden zwischen Versuchen
 
@@ -152,12 +154,15 @@ class P2PNetwork:
 
         import trio
 
-        # listen_addrs: port 0 -> OS picks a free port
+        # Fixed port so mDNS advertises the correct address.
+        # Port 0 causes py-libp2p to announce port 8000 via mDNS
+        # regardless of the actual bound port, breaking connections.
         try:
-            listen_addrs = get_available_interfaces(0)
+            listen_addrs = get_available_interfaces(P2P_PORT)
         except Exception:
             import multiaddr
-            listen_addrs = [multiaddr.Multiaddr("/ip4/0.0.0.0/tcp/0")]
+            listen_addrs = [multiaddr.Multiaddr(
+                f"/ip4/0.0.0.0/tcp/{P2P_PORT}")]
 
         # new_host with mDNS if supported by installed version
         try:
@@ -257,33 +262,52 @@ class P2PNetwork:
 
     async def _peer_poll_loop(self) -> None:
         """
-        Polls the host's peerstore every 2 seconds and fires
-        on_peer_connected / on_peer_disconnected callbacks when
-        the set of connected peers changes.
-
-        This replaces the old notify() / _PeerNotifee approach which
-        was removed in newer py-libp2p versions.
+        Polls the GossipSub mesh every 2 seconds for peers sharing
+        our topic. Only peers in our mesh are SplitP2P group members;
+        bootstrap nodes (Qm... IDs) are excluded automatically because
+        they don't subscribe to our group topic.
         """
         import trio
+        own_id = self._host.get_id().to_string()
         logger.info("Peer poll loop started")
         while self._running:
             try:
-                # Get currently connected peers from the peerstore
                 current: set[str] = set()
+
+                # Primary: GossipSub mesh peers for our topic
+                # These are the only peers that share our group.
                 try:
-                    for pid in self._host.get_peerstore().peer_ids():
+                    mesh_peers = self._pubsub.router.mesh.get(
+                        self.topic_id, set())
+                    for pid in mesh_peers:
                         pid_str = pid.to_string() \
                             if hasattr(pid, 'to_string') else str(pid)
-                        # Only count peers we have open connections to
-                        try:
-                            conns = self._host.get_network().connections_with_peer(pid)
-                            if conns:
-                                current.add(pid_str)
-                        except Exception:
-                            # Fallback: any peer in store = connected
+                        if pid_str != own_id:
                             current.add(pid_str)
-                except Exception as e:
-                    logger.debug("Peerstore poll error: %s", e)
+                except Exception:
+                    pass
+
+                # Fallback: all peers with open TCP connections,
+                # excluding own ID and DHT-only bootstrap nodes (Qm... prefix)
+                if not current:
+                    try:
+                        for pid in self._host.get_peerstore().peer_ids():
+                            pid_str = pid.to_string() \
+                                if hasattr(pid, 'to_string') else str(pid)
+                            if pid_str == own_id:
+                                continue
+                            # Skip bootstrap/DHT-only nodes (legacy Qm IDs)
+                            if pid_str.startswith("Qm"):
+                                continue
+                            try:
+                                conns = self._host.get_network() \
+                                    .connections_with_peer(pid)
+                                if conns:
+                                    current.add(pid_str)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.debug("Peerstore poll error: %s", e)
 
                 # Fire callbacks for changes
                 new_peers  = current - self._peers
@@ -292,14 +316,14 @@ class P2PNetwork:
                 for pid in new_peers:
                     self._peers.add(pid)
                     self.callbacks.on_peer_connected(pid)
-                    self.callbacks.on_history_synced(0, 0)  # triggers history request
-                    self._cmd_queue.put({"cmd": "req_history_from", "peer_id": pid})
-                    logger.info("Peer connected (poll): %s", pid[:20])
+                    self._cmd_queue.put({"cmd": "req_history_from",
+                                         "peer_id": pid})
+                    logger.info("Group peer connected: %s", pid[:20])
 
                 for pid in gone_peers:
                     self._peers.discard(pid)
                     self.callbacks.on_peer_disconnected(pid)
-                    logger.info("Peer disconnected (poll): %s", pid[:20])
+                    logger.info("Group peer disconnected: %s", pid[:20])
 
             except Exception as e:
                 logger.debug("Peer poll loop error: %s", e)
@@ -586,6 +610,8 @@ class P2PNetwork:
                 elif cmd["cmd"] == "req_history_all":
                     for pid in list(self._peers):
                         await self._request_history(pid)
+                elif cmd["cmd"] == "connect":
+                    await self._connect_addr(cmd["addr"])
             except _queue.Empty:
                 await trio.sleep(0.05)
             except Exception as e:
@@ -657,6 +683,27 @@ class P2PNetwork:
     # ------------------------------------------------------------------
     # File Transfer – Requesting
     # ------------------------------------------------------------------
+
+    async def _connect_addr(self, addr_str: str) -> None:
+        """Connect to a peer by multiaddr string."""
+        import trio
+        try:
+            import multiaddr as _ma
+            from libp2p.peer.peerinfo import info_from_p2p_addr
+            ma = _ma.Multiaddr(addr_str)
+            try:
+                peer_info = info_from_p2p_addr(ma)
+            except Exception:
+                # addr without /p2p/... suffix - try direct
+                from libp2p.peer.peerinfo import PeerInfo
+                from libp2p.peer.id import ID
+                peer_info = PeerInfo(ID(b''), [ma])
+            with trio.move_on_after(15):
+                await self._host.connect(peer_info)
+                logger.info("Manual connect OK: %s", addr_str[-40:])
+        except Exception as e:
+            logger.warning("Manual connect failed %s: %s",
+                           addr_str[-40:], e)
 
     async def _cleanup_stale_tmp(self) -> None:
         """
@@ -753,6 +800,18 @@ class P2PNetwork:
         logger.error("File %s failed after %d attempts",
                      sha256[:12], DOWNLOAD_RETRIES)
         return False
+
+    def connect_to_peer(self, multiaddr_str: str) -> None:
+        """
+        Manually connect to a known peer.
+        multiaddr_str examples:
+          /ip4/192.168.1.42/tcp/4001/p2p/12D3KooW...
+          /ip4/192.168.1.42/tcp/4001  (without peer ID, for older versions)
+        Thread-safe: schedules the connect in the trio event loop.
+        """
+        if self._running:
+            self._cmd_queue.put({"cmd": "connect",
+                                 "addr": multiaddr_str})
 
     def request_file(self, sha256: str) -> None:
         if self._peers and self._running:
