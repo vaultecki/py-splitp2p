@@ -111,9 +111,13 @@ class Expense:
     """
     Eine Ausgabe.
 
-    timestamp  : CRDT-Uhr (wann gespeichert/geändert) – nicht bearbeiten
-    expense_date: Anzeige-Datum (vom Nutzer gewählt) – Unix-Tagesbeginn UTC
-                  0 = nicht gesetzt → timestamp wird angezeigt
+    CRDT-Merge-Prioritaet (Lamport + Tiebreaker):
+      1. lamport_clock  - kausalitaetsbasiert, uhrzeit-unabhaengig
+      2. timestamp      - Wanduhr-Tiebreaker bei gleichem Lamport-Wert
+      3. payer_pubkey   - deterministischer letzter Tiebreaker (lexikografisch)
+    timestamp   : Wanduhr - nur fuer Anzeige + Tiebreaker
+    expense_date: Anzeige-Datum (vom Nutzer gewaehlt) - Unix-Tagesbeginn UTC
+                  0 = nicht gesetzt -> timestamp wird angezeigt
     """
     id: str
     description: str
@@ -123,6 +127,7 @@ class Expense:
     splits: list[Split]
     timestamp: int
     signature: str
+    lamport_clock: int = 0     # Lamport-Uhr - primaere CRDT-Ordnung
     category: str = "Allgemein"
     expense_date: int = 0          # User-chosen display date (UTC day start)
     is_deleted: bool = False
@@ -132,7 +137,7 @@ class Expense:
     original_currency: Optional[str] = None
 
     def display_date(self) -> int:
-        """Datum für die Anzeige: expense_date falls gesetzt, sonst timestamp."""
+        """Datum fuer die Anzeige: expense_date falls gesetzt, sonst timestamp."""
         return self.expense_date if self.expense_date else self.timestamp
 
     @classmethod
@@ -149,6 +154,7 @@ class Expense:
         attachment: Optional[Attachment] = None,
         original_amount: Optional[float] = None,
         original_currency: Optional[str] = None,
+        lamport_clock: int = 0,
     ) -> "Expense":
         return cls(
             id=str(uuid.uuid4()),
@@ -165,6 +171,7 @@ class Expense:
             attachment=attachment,
             original_amount=original_amount,
             original_currency=original_currency,
+            lamport_clock=lamport_clock,
         )
 
     def canonical_bytes(self) -> bytes:
@@ -206,7 +213,7 @@ class Expense:
 
 
 # ---------------------------------------------------------------------------
-# RecordedSettlement  –  eine tatsächlich geleistete Ausgleichszahlung
+# RecordedSettlement  -  eine tatsaechlich geleistete Ausgleichszahlung
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -218,7 +225,7 @@ class RecordedSettlement:
       - Diese Klasse ist persistiert + signiert + CRDT-synchronisiert.
       - Die berechnete Settlement ist nur eine Empfehlung.
 
-    CRDT: gleiche id, steigender timestamp → last-write-wins.
+    CRDT: gleiche id, steigender timestamp -> last-write-wins.
     """
     id: str
     from_pubkey: str    # wer hat gezahlt
@@ -226,7 +233,8 @@ class RecordedSettlement:
     amount: float
     currency: str
     timestamp: int      # CRDT-Uhr
-    signature: str      # Ed25519 über canonical_bytes(), signiert von from_pubkey
+    lamport_clock: int = 0     # Lamport-Uhr - primaere CRDT-Ordnung
+    signature: str      # Ed25519 ueber canonical_bytes(), signiert von from_pubkey
     settlement_date: int = 0   # Anzeige-Datum (UTC-Tagesbeginn), 0 = timestamp
     is_deleted: bool = False
     note: str = ""
@@ -256,6 +264,7 @@ class RecordedSettlement:
             currency=currency,
             timestamp=int(time.time()),
             signature="",
+            lamport_clock=0,  # wird in gui.py gesetzt
             settlement_date=settlement_date,
             note=note,
             original_amount=original_amount,
@@ -285,7 +294,7 @@ class RecordedSettlement:
         return cls(**d)
 
     def __repr__(self) -> str:
-        return (f"RecordedSettlement({self.from_pubkey[:8]}→"
+        return (f"RecordedSettlement({self.from_pubkey[:8]}->"
                 f"{self.to_pubkey[:8]}, {self.amount} {self.currency})")
 
 
@@ -316,11 +325,11 @@ def split_by_percent(amount: float,
 
     Args:
         amount: Gesamtbetrag
-        percentages_by_pubkey: {pubkey: prozent}  – Summe sollte 100 ergeben.
+        percentages_by_pubkey: {pubkey: prozent}  - Summe sollte 100 ergeben.
             Falls die Summe abweicht, wird proportional skaliert.
 
     Returns:
-        Liste von Splits in absoluten Beträgen.
+        Liste von Splits in absoluten Betraegen.
         Rundungsdifferenz wird auf den ersten Eintrag aufgeschlagen.
     """
     if not percentages_by_pubkey:
@@ -328,7 +337,7 @@ def split_by_percent(amount: float,
     total_pct = sum(percentages_by_pubkey.values())
     if total_pct <= 0:
         return []
-    # Normalisieren falls Summe ≠ 100
+    # Normalisieren falls Summe != 100
     scale = 100.0 / total_pct
     splits = [
         Split(pubkey=pk, amount=round(amount * (pct * scale) / 100.0, 2))

@@ -6,7 +6,8 @@ Storage Module – SQLite-Persistenz.
 
 Ausgaben und Ausgleichszahlungen werden als verschlüsselte Blobs gespeichert.
 Dateianhänge als Binärdaten unter storage/<sha256>.
-CRDT: last-write-wins per Timestamp.
+CRDT: Lamport-Uhr + deterministisches Tiebreaking.
+Merge-Prioritaet: lamport_clock > timestamp > author_pubkey (lexikografisch).
 """
 
 import json
@@ -32,17 +33,21 @@ from currency import RATES_DDL as _RATES_DDL
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS expenses (
-    id          TEXT PRIMARY KEY,
-    blob        BLOB NOT NULL,
-    timestamp   INTEGER NOT NULL,
-    is_deleted  INTEGER NOT NULL DEFAULT 0
+    id            TEXT PRIMARY KEY,
+    blob          BLOB NOT NULL,
+    timestamp     INTEGER NOT NULL,
+    lamport_clock INTEGER NOT NULL DEFAULT 0,
+    author_pubkey TEXT    NOT NULL DEFAULT '',
+    is_deleted    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS settlements (
-    id          TEXT PRIMARY KEY,
-    blob        BLOB NOT NULL,
-    timestamp   INTEGER NOT NULL,
-    is_deleted  INTEGER NOT NULL DEFAULT 0
+    id            TEXT PRIMARY KEY,
+    blob          BLOB NOT NULL,
+    timestamp     INTEGER NOT NULL,
+    lamport_clock INTEGER NOT NULL DEFAULT 0,
+    author_pubkey TEXT    NOT NULL DEFAULT '',
+    is_deleted    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS members (
@@ -51,8 +56,10 @@ CREATE TABLE IF NOT EXISTS members (
     updated_at  INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_expenses_ts   ON expenses(timestamp);
+CREATE INDEX IF NOT EXISTS idx_expenses_ts    ON expenses(timestamp);
+CREATE INDEX IF NOT EXISTS idx_expenses_lc    ON expenses(lamport_clock);
 CREATE INDEX IF NOT EXISTS idx_settlements_ts ON settlements(timestamp);
+CREATE INDEX IF NOT EXISTS idx_settlements_lc ON settlements(lamport_clock);
 """ + "\n" + _RATES_DDL
 
 
@@ -76,16 +83,47 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
 # Generisches CRDT-Blob-Store (Expenses + Settlements teilen die Logik)
 # ---------------------------------------------------------------------------
 
+def _wins_over(new_lc: int, new_ts: int, new_pk: str,
+               old_lc: int, old_ts: int, old_pk: str) -> bool:
+    """
+    Merge-Entscheidung: gewinnt die neue Version ueber die gespeicherte?
+
+    Prioritaet:
+      1. Lamport-Uhr    - uhrzeit-unabhaengig, kausal korrekt
+      2. Wanduhr        - Tiebreaker bei identischer Lamport-Uhr
+                         (kann bei gleichzeitiger Erstellung gleich sein)
+      3. author_pubkey  - deterministischer letzter Tiebreaker;
+                         lexikografisch groesserer Schluessel gewinnt.
+                         Beide Seiten kommen zum selben Ergebnis ohne
+                         Kommunikation -> keine Split-Brain-Moeglichkeit.
+    """
+    if new_lc != old_lc:
+        return new_lc > old_lc
+    if new_ts != old_ts:
+        return new_ts > old_ts
+    return new_pk > old_pk  # lexikografisch
+
+
 def _save_blob(db: sqlite3.Connection, table: str, obj_id: str,
-               blob: bytes, timestamp: int, is_deleted: bool = False) -> bool:
+               blob: bytes, timestamp: int, is_deleted: bool = False,
+               lamport_clock: int = 0, author_pubkey: str = "") -> bool:
     row = db.execute(
-        f"SELECT timestamp FROM {table} WHERE id = ?", (obj_id,)
+        f"SELECT timestamp, lamport_clock, author_pubkey FROM {table} WHERE id = ?",
+        (obj_id,)
     ).fetchone()
-    if row and timestamp <= row["timestamp"]:
+    if row and not _wins_over(
+        lamport_clock, timestamp, author_pubkey,
+        row["lamport_clock"], row["timestamp"], row["author_pubkey"],
+    ):
+        logger.debug("CRDT: verworfen (Lamport %d <= %d, ts %d <= %d)",
+                     lamport_clock, row["lamport_clock"],
+                     timestamp, row["timestamp"])
         return False
     db.execute(
-        f"INSERT OR REPLACE INTO {table} (id, blob, timestamp, is_deleted) VALUES (?,?,?,?)",
-        (obj_id, blob, timestamp, int(is_deleted)),
+        f"INSERT OR REPLACE INTO {table}"
+        f" (id, blob, timestamp, lamport_clock, author_pubkey, is_deleted)"
+        f" VALUES (?,?,?,?,?,?)",
+        (obj_id, blob, timestamp, lamport_clock, author_pubkey, int(is_deleted)),
     )
     db.commit()
     return True
@@ -99,10 +137,13 @@ def _load_blobs(db: sqlite3.Connection, table: str) -> list[tuple[str, bytes]]:
 
 
 def _soft_delete_blob(db: sqlite3.Connection, table: str, obj_id: str,
-                      new_blob: bytes, new_timestamp: int) -> None:
+                      new_blob: bytes, new_timestamp: int,
+                      lamport_clock: int = 0, author_pubkey: str = "") -> None:
     db.execute(
-        f"INSERT OR REPLACE INTO {table} (id, blob, timestamp, is_deleted) VALUES (?,?,?,1)",
-        (obj_id, new_blob, new_timestamp),
+        f"INSERT OR REPLACE INTO {table}"
+        f" (id, blob, timestamp, lamport_clock, author_pubkey, is_deleted)"
+        f" VALUES (?,?,?,?,?,1)",
+        (obj_id, new_blob, new_timestamp, lamport_clock, author_pubkey),
     )
     db.commit()
 
@@ -111,28 +152,34 @@ def _soft_delete_blob(db: sqlite3.Connection, table: str, obj_id: str,
 # Ausgaben
 # ---------------------------------------------------------------------------
 
-def save_expense_blob(db, eid, blob, ts, is_deleted=False):
-    return _save_blob(db, "expenses", eid, blob, ts, is_deleted)
+def save_expense_blob(db, eid, blob, ts, is_deleted=False,
+                      lamport_clock=0, author_pubkey=""):
+    return _save_blob(db, "expenses", eid, blob, ts, is_deleted,
+                     lamport_clock, author_pubkey)
 
 def load_all_expense_blobs(db):
     return _load_blobs(db, "expenses")
 
-def soft_delete_expense_blob(db, eid, blob, ts):
-    _soft_delete_blob(db, "expenses", eid, blob, ts)
+def soft_delete_expense_blob(db, eid, blob, ts,
+                             lamport_clock=0, author_pubkey=""):
+    _soft_delete_blob(db, "expenses", eid, blob, ts, lamport_clock, author_pubkey)
 
 
 # ---------------------------------------------------------------------------
 # Ausgleichszahlungen
 # ---------------------------------------------------------------------------
 
-def save_settlement_blob(db, sid, blob, ts, is_deleted=False):
-    return _save_blob(db, "settlements", sid, blob, ts, is_deleted)
+def save_settlement_blob(db, sid, blob, ts, is_deleted=False,
+                         lamport_clock=0, author_pubkey=""):
+    return _save_blob(db, "settlements", sid, blob, ts, is_deleted,
+                     lamport_clock, author_pubkey)
 
 def load_all_settlement_blobs(db):
     return _load_blobs(db, "settlements")
 
-def soft_delete_settlement_blob(db, sid, blob, ts):
-    _soft_delete_blob(db, "settlements", sid, blob, ts)
+def soft_delete_settlement_blob(db, sid, blob, ts,
+                                lamport_clock=0, author_pubkey=""):
+    _soft_delete_blob(db, "settlements", sid, blob, ts, lamport_clock, author_pubkey)
 
 
 # ---------------------------------------------------------------------------

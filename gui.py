@@ -1544,6 +1544,7 @@ class App(tk.Tk):
         self._group_pw       = ""
         self._group_salt     = b""  # 16 zufällige Bytes, mit Gruppe gespeichert
         self._group_currency = "EUR"
+        self._lamport_clock  = 0    # lokale Lamport-Uhr
         self._rates: dict    = {}
         self._network        = None
         # Aktivitäts-Log (in-memory, max. 500 Einträge)
@@ -1696,6 +1697,11 @@ class App(tk.Tk):
         self._rates_status.pack(side="left", padx=16, pady=8)
 
     # ── Identität & Gruppe ───────────────────────────────────────────
+
+    def _next_lamport(self, received: int = 0) -> int:
+        """Naechsten Lamport-Timestamp berechnen: local = max(local, received) + 1."""
+        self._lamport_clock = max(self._lamport_clock, received) + 1
+        return self._lamport_clock
 
     @staticmethod
     def _default_paths() -> dict:
@@ -1963,18 +1969,24 @@ class App(tk.Tk):
     def _save_expense(self, expense):
         from crypto import sign_expense, encrypt_expense
         from storage import save_expense_blob
+        expense.lamport_clock = self._next_lamport()
         expense.signature = sign_expense(expense, self._own_key)
         blob = encrypt_expense(expense, self._group_pw, self._group_salt)
-        save_expense_blob(self._db, expense.id, blob, expense.timestamp)
+        save_expense_blob(self._db, expense.id, blob, expense.timestamp,
+                          lamport_clock=expense.lamport_clock,
+                          author_pubkey=expense.payer_pubkey)
         if self._network:
             self._network.publish_expense(expense.id, blob, expense.timestamp)
 
     def _save_settlement(self, settlement):
         from crypto import sign_settlement, encrypt_settlement
         from storage import save_settlement_blob
+        settlement.lamport_clock = self._next_lamport()
         settlement.signature = sign_settlement(settlement, self._own_key)
         blob = encrypt_settlement(settlement, self._group_pw, self._group_salt)
-        save_settlement_blob(self._db, settlement.id, blob, settlement.timestamp)
+        save_settlement_blob(self._db, settlement.id, blob, settlement.timestamp,
+                             lamport_clock=settlement.lamport_clock,
+                             author_pubkey=settlement.from_pubkey)
         if self._network:
             self._network.publish_settlement(settlement.id, blob, settlement.timestamp)
 
@@ -2354,7 +2366,12 @@ class App(tk.Tk):
         from crypto import decrypt_expense
         exp = decrypt_expense(blob, self._group_pw, self._group_salt)
         if exp is None: return
-        if not save_expense_blob(self._db, exp.id, blob, exp.timestamp, exp.is_deleted):
+        self._next_lamport(exp.lamport_clock)
+        if not save_expense_blob(
+            self._db, exp.id, blob, exp.timestamp, exp.is_deleted,
+            lamport_clock=exp.lamport_clock,
+            author_pubkey=exp.payer_pubkey,
+        ):
             return
         self._refresh()
         if exp.attachment and self._network:
@@ -2367,7 +2384,12 @@ class App(tk.Tk):
         from crypto import decrypt_settlement
         s = decrypt_settlement(blob, self._group_pw, self._group_salt)
         if s is None: return
-        if save_settlement_blob(self._db, s.id, blob, s.timestamp, s.is_deleted):
+        self._next_lamport(s.lamport_clock)
+        if save_settlement_blob(
+            self._db, s.id, blob, s.timestamp, s.is_deleted,
+            lamport_clock=s.lamport_clock,
+            author_pubkey=s.from_pubkey,
+        ):
             self._refresh()
 
     def _on_net_member(self, pubkey, data):
@@ -2484,3 +2506,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+    
