@@ -1431,7 +1431,7 @@ class ExportDialog(tk.Toplevel):
         self._build()
         self.wait_window()
 
-    def _name(self, pk):
+    def _member_name(self, pk):
         return self.pk_to_name.get(pk, pk[:8] + "…")
 
     def _build(self):
@@ -1484,14 +1484,14 @@ class ExportDialog(tk.Toplevel):
                              "Original amount","Original currency"])
                 for e in sorted(self.expenses, key=lambda x: x.display_date()):
                     splits = "; ".join(
-                        f"{self._name(s.pubkey)}:{s.amount:.2f}"
+                        f"{self._member_name(s.pubkey)}:{s.amount:.2f}"
                         for s in e.splits)
                     w.writerow([
                         "Expense",
                         time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
                         e.description, e.category,
                         f"{e.amount:.2f}", e.currency,
-                        self._name(e.payer_pubkey), splits,
+                        self._member_name(e.payer_pubkey), splits,
                         e.original_amount or "", e.original_currency or "",
                     ])
             if self._incl_set.get():
@@ -1501,7 +1501,7 @@ class ExportDialog(tk.Toplevel):
                     w.writerow([
                         "Payment",
                         time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
-                        self._name(s.from_pubkey), self._name(s.to_pubkey),
+                        self._member_name(s.from_pubkey), self._member_name(s.to_pubkey),
                         f"{s.amount:.2f}", s.currency, s.note or "",
                     ])
             if self._incl_debt.get():
@@ -1512,7 +1512,7 @@ class ExportDialog(tk.Toplevel):
                 _total = sum(e.amount for e in self.expenses) or 1
                 for debt in get_settlements(self.expenses, self.settlements):
                     pct = debt.amount / _total * 100
-                    w.writerow([self._name(debt.debtor), self._name(debt.creditor),
+                    w.writerow([self._member_name(debt.debtor), self._member_name(debt.creditor),
                                 f"{debt.amount:.2f}", self.currency,
                                 f"{pct:.1f}%"])
         mb.showinfo("Exported", "CSV saved: " + path, parent=self)
@@ -1576,7 +1576,7 @@ class ExportDialog(tk.Toplevel):
                     time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
                     e.description, e.category,
                     f"{e.amount:.2f} {e.currency}",
-                    self._name(e.payer_pubkey),
+                    self._member_name(e.payer_pubkey),
                     f"{pct:.1f}%",
                 )
             total = sum(e.amount for e in self.expenses)
@@ -1590,7 +1590,7 @@ class ExportDialog(tk.Toplevel):
             for s in sorted(self.settlements, key=lambda x: x.display_date()):
                 row(
                     time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
-                    self._name(s.from_pubkey), self._name(s.to_pubkey),
+                    self._member_name(s.from_pubkey), self._member_name(s.to_pubkey),
                     f"{s.amount:.2f} {s.currency}", s.note or "", "",
                 )
             pdf.ln(4)
@@ -1626,7 +1626,7 @@ class ExportDialog(tk.Toplevel):
             if debts:
                 for d in debts:
                     pct = d.amount / _exp_total * 100
-                    row(self._name(d.debtor), "->", self._name(d.creditor),
+                    row(self._member_name(d.debtor), "->", self._member_name(d.creditor),
                         f"{d.amount:.2f} {self.currency}",
                         f"{pct:.1f}%", "")
             else:
@@ -1686,7 +1686,7 @@ class ActivityLogWindow(tk.Toplevel):
         self._build_chrome()
         self._populate(expenses, settlements, runtime_log)
 
-    def _name(self, pk: str) -> str:
+    def _member_name(self, pk: str) -> str:
         return self._pk_to_name.get(pk, pk[:10] + "…")
 
     # ── UI ──────────────────────────────────────────────────────────
@@ -1766,7 +1766,7 @@ class ActivityLogWindow(tk.Toplevel):
 
         # Reconstruct from expenses
         for e in expenses:
-            who = self._name(e.payer_pubkey)
+            who = self._member_name(e.payer_pubkey)
             is_own = e.payer_pubkey == self._own_pubkey
             lvl = "info" if is_own else "recv"
             self._all_entries.append((
@@ -1782,8 +1782,8 @@ class ActivityLogWindow(tk.Toplevel):
             lvl = "info" if is_own else "recv"
             self._all_entries.append((
                 s.timestamp, lvl,
-                f"Payment recorded: {self._name(s.from_pubkey)} -> "
-                f"{self._name(s.to_pubkey)}  {s.amount:.2f} {self._currency}"
+                f"Payment recorded: {self._member_name(s.from_pubkey)} -> "
+                f"{self._member_name(s.to_pubkey)}  {s.amount:.2f} {self._currency}"
                 + ('  "' + s.note + '"' if s.note else ""),
             ))
 
