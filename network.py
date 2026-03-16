@@ -338,8 +338,6 @@ class P2PNetwork:
                             if pid_str.startswith("Qm"):
                                 continue
                             current.add(pid_str)
-                            logger.debug("Fallback peer candidate: %s",
-                                         pid_str[:20])
                     except Exception as e:
                         logger.debug("Peerstore poll error: %s", e)
 
@@ -347,6 +345,9 @@ class P2PNetwork:
                 new_peers  = current - self._peers
                 gone_peers = self._peers - current
 
+                if new_peers:
+                    logger.debug("Poll: %d known, %d new, %d gone",
+                                 len(current), len(new_peers), len(gone_peers))
                 for pid in new_peers:
                     self._peers.add(pid)
                     self.callbacks.on_peer_connected(pid)
@@ -1011,4 +1012,3 @@ class P2PNetwork:
 
     def known_peers(self) -> list[str]:
         return list(self._peers)
-    

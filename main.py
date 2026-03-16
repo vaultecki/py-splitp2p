@@ -27,7 +27,7 @@ def _setup_logging():
     for lib in ("asyncio", "urllib3", "libp2p", "trio"):
         logging.getLogger(lib).setLevel(logging.WARNING)
     # Uncomment to debug P2P packet flow:
-    # logging.getLogger("network").setLevel(logging.DEBUG)
+    logging.getLogger("network").setLevel(logging.DEBUG)
 
 
 if __name__ == "__main__":
