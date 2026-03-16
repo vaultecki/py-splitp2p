@@ -5,6 +5,8 @@ Decentralized expense splitting — no server, no account, no internet required.
 Expenses are stored locally, automatically synchronized between peers over P2P,
 file attachments transferred peer-to-peer, and debts minimized automatically.
 
+This is a test project to test some concepts and maybe later port it to kotlin for android.
+
 ---
 
 ## Features
