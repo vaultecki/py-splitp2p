@@ -305,8 +305,6 @@ class P2PNetwork:
         import trio
         own_id = self._host.get_id().to_string()
         logger.info("Peer poll loop started")
-        logger.info("Mesh keys: %s", list(self._pubsub.router.mesh.keys()))
-        logger.info("Peerstore: %s", [str(p) for p in self._host.get_peerstore().peer_ids()])
         while self._running:
             try:
                 current: set[str] = set()
@@ -354,6 +352,8 @@ class P2PNetwork:
                     self.callbacks.on_peer_connected(pid)
                     self._cmd_queue.put({"cmd": "req_history_from",
                                          "peer_id": pid})
+                    # Re-announce our member info to the new peer
+                    self._cmd_queue.put({"cmd": "announce_member"})
                     logger.info("Group peer connected: %s", pid[:20])
 
                 for pid in gone_peers:
@@ -590,6 +590,8 @@ class P2PNetwork:
             return
 
         ptype = packet.get("type", "expense")
+        logger.debug("GossipSub packet received: type=%s id=%s",
+                     ptype, packet.get("id", "-")[:8])
         try:
             blob = bytes.fromhex(packet["blob"]) if "blob" in packet else b""
         except ValueError:
@@ -643,6 +645,8 @@ class P2PNetwork:
                             sha[:12], len(peers))
                 elif cmd["cmd"] == "req_history_from":
                     await self._request_history(cmd["peer_id"])
+                elif cmd["cmd"] == "announce_member":
+                    self.callbacks.on_peer_connected("self")  # triggers member publish
                 elif cmd["cmd"] == "req_history_all":
                     for pid in list(self._peers):
                         await self._request_history(pid)
@@ -707,6 +711,11 @@ class P2PNetwork:
             with open(path, "rb") as f:
                 while chunk := f.read(CHUNK_SIZE):
                     await stream.write(chunk)
+            # Write empty bytes to signal EOF before closing
+            try:
+                await stream.write(b"")
+            except Exception:
+                pass
             logger.info("Served file %s", sha256[:12])
         except Exception as e:
             logger.error("File serve error: %s", e)
@@ -791,7 +800,7 @@ class P2PNetwork:
                     PeerID.from_base58(peer_id_str), [FILE_PROTOCOL])
             except Exception as e:
                 logger.warning("Cannot open file stream to %s: %s",
-                               peer_id_str[:12], e)
+                               peer_id_str[:12], repr(e))
                 continue  # try next attempt
 
             try:
@@ -800,7 +809,13 @@ class P2PNetwork:
                 with open(temp, "wb") as f:
                     while True:
                         with trio.move_on_after(30) as cancel:
-                            chunk = await stream.read(CHUNK_SIZE)
+                            # Some py-libp2p versions need explicit
+                            # max_size argument
+                            try:
+                                chunk = await stream.read(CHUNK_SIZE)
+                            except TypeError:
+                                chunk = await stream.read(
+                                    max_size=CHUNK_SIZE)
                         if cancel.cancelled_caught:
                             raise TimeoutError("chunk timeout after 30s")
                         if not chunk:
@@ -823,7 +838,7 @@ class P2PNetwork:
 
             except Exception as e:
                 logger.warning("Download error %s attempt %d: %s",
-                               sha256[:12], attempt + 1, e)
+                               sha256[:12], attempt + 1, repr(e))
                 if os.path.exists(temp):
                     os.remove(temp)
             finally:
@@ -919,8 +934,11 @@ class P2PNetwork:
             return
 
         try:
-            since = _local_max_timestamp()
-            req   = json.dumps({"since_ts": since, "topic": self.topic_id})
+            # Request all records (since_ts=0) so we always get
+            # the peer's full state. CRDT merge on our side discards
+            # records we already have. This fixes the case where
+            # both peers have disjoint records with similar timestamps.
+            req = json.dumps({"since_ts": 0, "topic": self.topic_id})
             await stream.write(req.encode())
 
             buf = b""
@@ -993,3 +1011,4 @@ class P2PNetwork:
 
     def known_peers(self) -> list[str]:
         return list(self._peers)
+    

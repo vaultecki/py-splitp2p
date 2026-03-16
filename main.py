@@ -26,6 +26,8 @@ def _setup_logging():
     # Silence noisy third-party loggers
     for lib in ("asyncio", "urllib3", "libp2p", "trio"):
         logging.getLogger(lib).setLevel(logging.WARNING)
+    # Uncomment to debug P2P packet flow:
+    # logging.getLogger("network").setLevel(logging.DEBUG)
 
 
 if __name__ == "__main__":
