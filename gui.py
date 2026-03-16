@@ -2056,6 +2056,7 @@ class App(tk.Tk):
         _ghost(hdr, "🔑 Switch group", self._switch_group).pack(side="right", padx=4)
         _ghost(hdr, "📤 Show QR", self._show_qr).pack(side="right", padx=4)
         _ghost(hdr, "📥 Import QR", self._import_qr).pack(side="right", padx=4)
+        _ghost(hdr, "🔗 Connect peer", self._manual_connect).pack(side="right", padx=4)
 
     def _build_sidebar(self, paned):
         sb = tk.Frame(paned, bg=PANEL, width=250)
@@ -2359,6 +2360,103 @@ class App(tk.Tk):
             f"Gruppe '{r['name']}' wurde importiert.\n"
             "Wechsle zur Gruppe ueber 'Gruppe wechseln'.",
             parent=self)
+
+    def _manual_connect(self):
+        """
+        Opens a dialog to manually connect to a peer by entering
+        their multiaddr or just IP:port.  Useful when mDNS does not
+        work (e.g. different subnets, VMs, VPN).
+
+        The peer's listen address is shown in the log at startup:
+          INFO network  P2P node started, peer ID: 12D3KooW...
+        and can be read from the network status panel.
+        """
+        if not self._network or not self._network.is_online:
+            mb.showinfo("Offline",
+                        "Start the network first (needs a group open).",
+                        parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Connect to peer")
+        dlg.configure(bg=BG)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        pad = dict(padx=24)
+        _lbl(dlg, "CONNECT TO PEER", fg=GREEN, font=FONT_LARGE).pack(
+            anchor="w", pady=(20, 2), **pad)
+        _lbl(dlg,
+             "Enter the peer's multiaddr, IP:port or [IPv6]:port.\n"
+             "Example:  /ip4/192.168.1.42/tcp/8000/p2p/12D3KooW...\n"
+             "          /ip6/fe80::1/tcp/8000/p2p/12D3KooW...\n"
+             "          192.168.1.42:8000  or  [fe80::1%wlan0]:8000",
+             fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", **pad)
+        _div(dlg).pack(fill="x", **pad, pady=6)
+
+        frm = tk.Frame(dlg, bg=BG, padx=24)
+        frm.pack(fill="x")
+        _lbl(frm, "ADDRESS", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
+        addr_var = tk.StringVar()
+        tk.Entry(frm, textvariable=addr_var, font=FONT_MONO,
+                 bg=PANEL, fg=FG, insertbackground=GREEN,
+                 relief="flat", bd=6, width=52).pack(fill="x", pady=(2, 4))
+
+        # Show own peer ID + listen addresses for easy sharing
+        own_id  = self._network.peer_id or "?"
+        _lbl(frm, "YOUR PEER ID (share with the other side)",
+             fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", pady=(10, 0))
+        pid_frame = tk.Frame(frm, bg=BORDER, padx=1, pady=1)
+        pid_frame.pack(fill="x", pady=(2, 4))
+        pid_lbl = _lbl(pid_frame, own_id,
+                       fg=FG_MUTED, font=FONT_MONO, bg=PANEL,
+                       padx=6, pady=4)
+        pid_lbl.pack(anchor="w")
+
+        def copy_id():
+            dlg.clipboard_clear()
+            dlg.clipboard_append(own_id)
+        _ghost(frm, "Copy peer ID", copy_id).pack(anchor="w", pady=(0, 8))
+
+        status_lbl = _lbl(frm, "", fg=FG_DIM, font=FONT_SMALL, bg=BG)
+        status_lbl.pack(anchor="w", pady=(4, 0))
+
+        def do_connect():
+            addr = addr_var.get().strip()
+            if not addr:
+                mb.showerror("Error", "Address is required.", parent=dlg)
+                return
+            # Accept plain IP:port, [IPv6]:port or full multiaddr
+            if not addr.startswith("/"):
+                import re as _re
+                m6 = _re.match(r'^\[([0-9a-fA-F:]+(?:%[\w]+)?)\]:(\d+)$',
+                               addr)
+                m4 = _re.match(r'^([0-9.]+):(\d+)$', addr)
+                if m6:
+                    addr = f"/ip6/{m6.group(1)}/tcp/{m6.group(2)}"
+                elif m4:
+                    addr = f"/ip4/{m4.group(1)}/tcp/{m4.group(2)}"
+                else:
+                    mb.showerror("Error",
+                                 "Formats accepted:\n"
+                                 "/ip4/x.x.x.x/tcp/port/p2p/PeerID\n"
+                                 "/ip6/addr/tcp/port/p2p/PeerID\n"
+                                 "192.168.x.x:port  or  [fe80::1]:port",
+                                 parent=dlg)
+                    return
+            status_lbl.configure(text="Connecting...", fg=AMBER)
+            dlg.update_idletasks()
+            self._network.connect_to_peer(addr)
+            self._append_log("net", f"Manual connect: {addr[-50:]}")
+            status_lbl.configure(
+                text="Connect request sent. Check the log for result.",
+                fg=GREEN)
+
+        btn_row = tk.Frame(dlg, bg=BG, padx=24, pady=16)
+        btn_row.pack(fill="x")
+        _ghost(btn_row, "Close", dlg.destroy).pack(side="right", padx=(6, 0))
+        _btn(btn_row, "Connect", do_connect).pack(side="right")
+        dlg.wait_window()
 
     def _open_settings(self, first_run=False):
         dlg = tk.Toplevel(self)

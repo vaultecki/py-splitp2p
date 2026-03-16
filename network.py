@@ -52,6 +52,43 @@ IPFS_BOOTSTRAP = [
 ]
 
 
+def _build_listen_addrs(port: int) -> list:
+    """
+    Returns multiaddrs for both IPv4 and IPv6 wildcard interfaces.
+
+    /ip4/0.0.0.0/tcp/<port>   - all IPv4 interfaces
+    /ip6/::/tcp/<port>         - all IPv6 interfaces (link-local + GUA)
+
+    Having both means the node accepts connections from either
+    protocol version, and mDNS discovery works on whichever the
+    local network supports.
+
+    Falls back gracefully if get_available_interfaces() is available
+    (it returns per-interface addrs which is more specific, but
+    IPv4-only on most versions).
+    """
+    import multiaddr as _ma
+    addrs = []
+    # Always add explicit IPv4 + IPv6 wildcards first
+    addrs.append(_ma.Multiaddr(f"/ip4/0.0.0.0/tcp/{port}"))
+    try:
+        addrs.append(_ma.Multiaddr(f"/ip6/::/tcp/{port}"))
+    except Exception:
+        pass  # multiaddr version doesn't support ip6 syntax
+    # Try to also add per-interface addrs from libp2p helper
+    try:
+        from libp2p.utils.address_validation import get_available_interfaces
+        extra = get_available_interfaces(port)
+        # Avoid duplicates: only add if not already covered
+        seen = {str(a) for a in addrs}
+        for a in extra:
+            if str(a) not in seen:
+                addrs.append(a)
+    except Exception:
+        pass
+    return addrs
+
+
 def _local_max_timestamp() -> int:
     try:
         from storage import get_max_timestamp
@@ -154,15 +191,13 @@ class P2PNetwork:
 
         import trio
 
-        # Fixed port so mDNS advertises the correct address.
-        # Port 0 causes py-libp2p to announce port 8000 via mDNS
-        # regardless of the actual bound port, breaking connections.
-        try:
-            listen_addrs = get_available_interfaces(P2P_PORT)
-        except Exception:
-            import multiaddr
-            listen_addrs = [multiaddr.Multiaddr(
-                f"/ip4/0.0.0.0/tcp/{P2P_PORT}")]
+        # Listen on both IPv4 and IPv6 so the node works in
+        # IPv4-only, IPv6-only, and dual-stack LAN environments.
+        # mDNS uses ff02::fb (IPv6) or 224.0.0.251 (IPv4);
+        # libp2p picks whichever interface is available.
+        listen_addrs = _build_listen_addrs(P2P_PORT)
+        logger.info("Listening on: %s",
+                    ", ".join(str(a) for a in listen_addrs))
 
         # new_host with mDNS if supported by installed version
         try:
@@ -270,6 +305,8 @@ class P2PNetwork:
         import trio
         own_id = self._host.get_id().to_string()
         logger.info("Peer poll loop started")
+        logger.info("Mesh keys: %s", list(self._pubsub.router.mesh.keys()))
+        logger.info("Peerstore: %s", [str(p) for p in self._host.get_peerstore().peer_ids()])
         while self._running:
             try:
                 current: set[str] = set()
@@ -287,8 +324,11 @@ class P2PNetwork:
                 except Exception:
                     pass
 
-                # Fallback: all peers with open TCP connections,
-                # excluding own ID and DHT-only bootstrap nodes (Qm... prefix)
+                # Fallback: peers in peerstore that are not bootstrap nodes.
+                # connections_with_peer() is unreliable across py-libp2p
+                # versions so we skip that check and treat any known
+                # non-bootstrap peer as a candidate. GossipSub will naturally
+                # stop delivering messages from peers that disconnect.
                 if not current:
                     try:
                         for pid in self._host.get_peerstore().peer_ids():
@@ -296,16 +336,12 @@ class P2PNetwork:
                                 if hasattr(pid, 'to_string') else str(pid)
                             if pid_str == own_id:
                                 continue
-                            # Skip bootstrap/DHT-only nodes (legacy Qm IDs)
+                            # Skip legacy DHT-only bootstrap nodes (Qm... prefix)
                             if pid_str.startswith("Qm"):
                                 continue
-                            try:
-                                conns = self._host.get_network() \
-                                    .connections_with_peer(pid)
-                                if conns:
-                                    current.add(pid_str)
-                            except Exception:
-                                pass
+                            current.add(pid_str)
+                            logger.debug("Fallback peer candidate: %s",
+                                         pid_str[:20])
                     except Exception as e:
                         logger.debug("Peerstore poll error: %s", e)
 
@@ -805,8 +841,9 @@ class P2PNetwork:
         """
         Manually connect to a known peer.
         multiaddr_str examples:
-          /ip4/192.168.1.42/tcp/4001/p2p/12D3KooW...
-          /ip4/192.168.1.42/tcp/4001  (without peer ID, for older versions)
+          /ip4/192.168.1.42/tcp/8000/p2p/12D3KooW...
+          /ip6/fe80::1/tcp/8000/p2p/12D3KooW...  (IPv6 link-local)
+          /ip4/192.168.1.42/tcp/8000             (without peer ID)
         Thread-safe: schedules the connect in the trio event loop.
         """
         if self._running:
