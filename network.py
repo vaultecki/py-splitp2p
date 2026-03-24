@@ -700,6 +700,13 @@ class P2PNetwork:
     # ------------------------------------------------------------------
 
     async def _file_serve_handler(self, stream) -> None:
+        """
+        Serves a file encrypted with AES-256-GCM.
+        Each chunk is individually encrypted so the receiver can
+        verify chunks as they arrive without buffering the whole file.
+        Wire format per chunk: 4-byte big-endian length + nonce(12) + ciphertext
+        Sentinel: 4 zero bytes (length=0) signals end of file.
+        """
         import trio
         try:
             sha256 = (await stream.read(64)).decode().strip()
@@ -709,17 +716,29 @@ class P2PNetwork:
             path = os.path.join(STORAGE_DIR, sha256)
             if not os.path.exists(path):
                 return
-            with open(path, "rb") as f:
-                while chunk := f.read(CHUNK_SIZE):
-                    await stream.write(chunk)
-            # Write empty bytes to signal EOF before closing
-            try:
-                await stream.write(b"")
-            except Exception:
-                pass
-            logger.info("Served file %s", sha256[:12])
+            if not self._group_pw:
+                logger.warning("File serve: no group key, sending unencrypted")
+                # Fallback: send raw (no group context)
+                with open(path, "rb") as f:
+                    while chunk := f.read(CHUNK_SIZE):
+                        await stream.write(chunk)
+            else:
+                from crypto import _group_aes_key
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                key = _group_aes_key(self._group_pw, self._group_salt)
+                aes = AESGCM(key)
+                with open(path, "rb") as f:
+                    while chunk := f.read(CHUNK_SIZE):
+                        nonce = os.urandom(12)
+                        ct    = aes.encrypt(nonce, chunk, None)
+                        frame = nonce + ct
+                        # 4-byte length prefix so receiver knows frame size
+                        await stream.write(len(frame).to_bytes(4, 'big') + frame)
+                # Sentinel: 4 zero bytes = end of file
+                await stream.write(b'\x00\x00\x00\x00')
+            logger.info("Served file %s (encrypted)", sha256[:12])
         except Exception as e:
-            logger.error("File serve error: %s", e)
+            logger.error("File serve error: %s", repr(e))
         finally:
             try:
                 await stream.close()
@@ -807,31 +826,58 @@ class P2PNetwork:
             try:
                 h = hashlib.sha256()
                 await stream.write(sha256.encode())
+
+                # Set up decryption if we have a group key
+                aes = None
+                if self._group_pw:
+                    from crypto import _group_aes_key
+                    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                    aes = AESGCM(_group_aes_key(
+                        self._group_pw, self._group_salt))
+
                 with open(temp, "wb") as f:
+                    buf = b""
                     while True:
                         with trio.move_on_after(30) as cancel:
-                            # Some py-libp2p versions need explicit
-                            # max_size argument
                             try:
-                                chunk = await stream.read(CHUNK_SIZE)
+                                data = await stream.read(CHUNK_SIZE + 200)
                             except TypeError:
-                                chunk = await stream.read(
-                                    max_size=CHUNK_SIZE)
+                                data = await stream.read(
+                                    max_size=CHUNK_SIZE + 200)
                         if cancel.cancelled_caught:
                             raise TimeoutError("chunk timeout after 30s")
-                        if not chunk:
+                        if not data:
                             break
-                        f.write(chunk)
-                        h.update(chunk)
+                        buf += data
+                        # Process complete framed chunks
+                        while len(buf) >= 4:
+                            frame_len = int.from_bytes(buf[:4], 'big')
+                            if frame_len == 0:  # EOF sentinel
+                                buf = b""
+                                break
+                            if aes is None:
+                                # Unencrypted fallback: treat data as raw
+                                chunk = buf[:frame_len] if frame_len > 0 else b""
+                                buf = buf[frame_len:]
+                                f.write(chunk)
+                                h.update(chunk)
+                            else:
+                                if len(buf) < 4 + frame_len:
+                                    break  # wait for more data
+                                frame = buf[4:4 + frame_len]
+                                buf   = buf[4 + frame_len:]
+                                nonce, ct = frame[:12], frame[12:]
+                                plain = aes.decrypt(nonce, ct, None)
+                                f.write(plain)
+                                h.update(plain)
 
                 if h.hexdigest() == sha256:
                     os.rename(temp, os.path.join(STORAGE_DIR, sha256))
                     self.callbacks.on_file_received(sha256)
-                    logger.info("File %s downloaded (attempt %d)",
+                    logger.info("File %s downloaded and decrypted (attempt %d)",
                                 sha256[:12], attempt + 1)
                     return True
 
-                # Hash-Fehler: .tmp loeschen, Versuch wiederholen
                 logger.warning("Hash mismatch for %s (attempt %d/%d)",
                                sha256[:12], attempt + 1, DOWNLOAD_RETRIES)
                 if os.path.exists(temp):
@@ -1012,3 +1058,4 @@ class P2PNetwork:
 
     def known_peers(self) -> list[str]:
         return list(self._peers)
+    
