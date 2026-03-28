@@ -3011,6 +3011,8 @@ class App(tk.Tk):
 
         self._network = P2PNetwork(self._group_pw, _CB(self))
         self._network.set_group_salt(self._group_salt)
+        self._network.set_own_identity(
+            self._own_pubkey, self._own_name, int(time.time()))
         self._network.start_in_thread()
 
     def _on_net_status(self, online, peer_id):

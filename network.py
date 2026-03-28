@@ -139,9 +139,11 @@ class NetworkCallbacks:
 class P2PNetwork:
     def __init__(self, group_password: str, callbacks: NetworkCallbacks):
         self.callbacks = callbacks
-        self.callbacks = callbacks
         self._group_pw = group_password  # for blob verification
         self._group_salt = b""  # wird von gui.py gesetzt
+        self._own_pubkey = ""  # set via set_own_identity()
+        self._own_name = ""  # set via set_own_identity()
+        self._own_joined_at = 0
         self._host = None
         self._pubsub = None
         self._sub = None
@@ -267,6 +269,13 @@ class P2PNetwork:
         self._group_salt = salt
         self.topic_id = "splitp2p-" + group_topic_id(salt)
         logger.info("Topic ID set: %s", self.topic_id)
+
+    def set_own_identity(self, pubkey: str, display_name: str,
+                         joined_at: int) -> None:
+        """Store own identity so announce_member can publish without GUI callback."""
+        self._own_pubkey = pubkey
+        self._own_name = display_name
+        self._own_joined_at = joined_at
 
     def stop(self) -> None:
         self._running = False
@@ -664,7 +673,14 @@ class P2PNetwork:
                         nursery.start_soon(self._request_history, cmd["peer_id"])
 
                     elif cmd["cmd"] == "announce_member":
-                        self.callbacks.on_peer_connected("self")  # Löst im UI Update aus
+                        # Publish own member data to newly connected peer
+                        if self._own_pubkey and self._pubsub:
+                            nursery.start_soon(
+                                self.publish_member,
+                                self._own_pubkey,
+                                self._own_name,
+                                self._own_joined_at,
+                            )
 
                     elif cmd["cmd"] == "req_history_all":
                         for pid in list(self._peers):
@@ -1096,4 +1112,3 @@ class P2PNetwork:
 
     def known_peers(self) -> list[str]:
         return list(self._peers)
-    
