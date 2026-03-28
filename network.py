@@ -623,42 +623,52 @@ class P2PNetwork:
 
     async def _cmd_loop(self) -> None:
         import trio
-        while self._running:
-            try:
-                cmd = self._cmd_queue.get_nowait()
-                if cmd["cmd"] == "stop":
-                    self._running = False
-                    return
-                elif cmd["cmd"] == "publish":
-                    if self._pubsub:
-                        await self._pubsub.publish(self.topic_id, cmd["data"])
-                elif cmd["cmd"] == "req_file":
-                    sha = cmd["sha256"]
-                    peers = list(self._peers)
-                    ok = False
-                    for pid in peers:
-                        ok = await self._download_file(pid, sha)
-                        if ok:
-                            break
-                    if not ok:
-                        logger.warning(
-                            "File %s unavailable from any of %d peers",
-                            sha[:12], len(peers))
-                elif cmd["cmd"] == "req_history_from":
-                    await self._request_history(cmd["peer_id"])
-                elif cmd["cmd"] == "announce_member":
-                    self.callbacks.on_peer_connected("self")  # triggers member publish
-                elif cmd["cmd"] == "req_history_all":
-                    for pid in list(self._peers):
-                        await self._request_history(pid)
-                elif cmd["cmd"] == "connect":
-                    await self._connect_addr(cmd["addr"])
-            except _queue.Empty:
-                await trio.sleep(0.05)
-            except Exception as e:
-                logger.error("Command loop error: %s", e)
-                await trio.sleep(0.1)
 
+        # Wir öffnen eine Nursery für alle Hintergrundaufgaben dieser Schleife
+        async with trio.open_nursery() as nursery:
+            while self._running:
+                try:
+                    cmd = self._cmd_queue.get_nowait()
+
+                    if cmd["cmd"] == "stop":
+                        self._running = False
+                        nursery.cancel_scope.cancel()  # Bricht alle laufenden Downloads etc. ab
+                        return
+
+                    elif cmd["cmd"] == "publish":
+                        if self._pubsub:
+                            # Senden geht schnell, wir lagern es trotzdem sauber aus
+                            nursery.start_soon(self._pubsub.publish, self.topic_id, cmd["data"])
+
+                    elif cmd["cmd"] == "req_file":
+                        # Hilfsfunktion, um den Datei-Download in den Hintergrund zu schicken
+                        async def bg_download(sha, peers):
+                            for pid in peers:
+                                if await self._download_file(pid, sha):
+                                    break
+
+                        nursery.start_soon(bg_download, cmd["sha256"], list(self._peers))
+
+                    elif cmd["cmd"] == "req_history_from":
+                        # Ab in den Hintergrund damit!
+                        nursery.start_soon(self._request_history, cmd["peer_id"])
+
+                    elif cmd["cmd"] == "announce_member":
+                        self.callbacks.on_peer_connected("self")  # Löst im UI Update aus
+
+                    elif cmd["cmd"] == "req_history_all":
+                        for pid in list(self._peers):
+                            nursery.start_soon(self._request_history, pid)
+
+                    elif cmd["cmd"] == "connect":
+                        nursery.start_soon(self._connect_addr, cmd["addr"])
+
+                except _queue.Empty:
+                    await trio.sleep(0.05)
+                except Exception as e:
+                    logger.error("Command loop error: %s", e)
+                    await trio.sleep(0.1)
+                    
     # ------------------------------------------------------------------
     # GossipSub – Senden (thread-safe, von tkinter aufrufbar)
     # ------------------------------------------------------------------
