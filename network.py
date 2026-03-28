@@ -35,14 +35,14 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-SYNC_PROTOCOL    = "/splitp2p/sync/1.0"
-FILE_PROTOCOL    = "/splitp2p/files/1.0"
+SYNC_PROTOCOL = "/splitp2p/sync/1.0"
+FILE_PROTOCOL = "/splitp2p/files/1.0"
 HISTORY_PROTOCOL = "/splitp2p/history/1.0"
-CHUNK_SIZE       = 16_384
-P2P_PORT         = 8000    # fixed port so mDNS advertises the correct address
-                           # change if 4001 is already in use on your system
-DOWNLOAD_RETRIES = 3       # max Versuche pro Peer
-RETRY_BACKOFF    = (1, 3, 7)  # Wartezeit in Sekunden zwischen Versuchen
+CHUNK_SIZE = 16_384
+P2P_PORT = 8000  # fixed port so mDNS advertises the correct address
+# change if 4001 is already in use on your system
+DOWNLOAD_RETRIES = 3  # max Versuche pro Peer
+RETRY_BACKOFF = (1, 3, 7)  # Wartezeit in Sekunden zwischen Versuchen
 
 IPFS_BOOTSTRAP = [
     "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
@@ -113,14 +113,22 @@ def load_all_settlement_blobs_since(since: int):
 
 class NetworkCallbacks:
     def on_expense_received(self, expense_id: str, blob: bytes) -> None: pass
+
     def on_settlement_received(self, settlement_id: str, blob: bytes) -> None: pass
+
     def on_member_received(self, pubkey: str, data: dict) -> None: pass
+
     def on_peer_connected(self, peer_id: str) -> None: pass
+
     def on_peer_disconnected(self, peer_id: str) -> None: pass
+
     def on_status_changed(self, online: bool, peer_id: str) -> None: pass
+
     def on_file_received(self, sha256: str) -> None: pass
+
     def on_comment_received(self, comment_id: str, expense_id: str,
                             blob: bytes) -> None: pass
+
     def on_history_synced(self, n_expenses: int, n_settlements: int) -> None: pass
 
 
@@ -130,14 +138,14 @@ class NetworkCallbacks:
 
 class P2PNetwork:
     def __init__(self, group_password: str, callbacks: NetworkCallbacks):
-        self.callbacks     = callbacks
-        self.callbacks     = callbacks
-        self._group_pw     = group_password   # for blob verification
-        self._group_salt    = b""              # wird von gui.py gesetzt
-        self._host         = None
-        self._pubsub    = None
-        self._sub       = None
-        self._running   = False
+        self.callbacks = callbacks
+        self.callbacks = callbacks
+        self._group_pw = group_password  # for blob verification
+        self._group_salt = b""  # wird von gui.py gesetzt
+        self._host = None
+        self._pubsub = None
+        self._sub = None
+        self._running = False
         self._peers: set[str] = set()
         # Thread-safe queue: tkinter -> trio
         # Items: dicts mit "cmd" key:
@@ -146,9 +154,9 @@ class P2PNetwork:
         #   {"cmd": "req_history"}
         #   {"cmd": "stop"}
         self._cmd_queue: _queue.SimpleQueue = _queue.SimpleQueue()
-        self._dht        = None
-        self._autonat    = None
-        self._relay      = None
+        self._dht = None
+        self._autonat = None
+        self._relay = None
         self._behind_nat = True  # assume worst case until AutoNAT checks
         # Storage dir is configured via storage.configure_paths() before start
         # Do NOT hardcode "storage" here - use the configured path
@@ -228,7 +236,7 @@ class P2PNetwork:
                 logger.info("P2P node started, peer ID: %s", peer_id)
 
                 self._sub = await self._pubsub.subscribe(self.topic_id)
-                self._host.set_stream_handler(FILE_PROTOCOL,    self._file_serve_handler)
+                self._host.set_stream_handler(FILE_PROTOCOL, self._file_serve_handler)
                 self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
 
                 # Peer discovery via polling (works across all py-libp2p versions)
@@ -257,7 +265,7 @@ class P2PNetwork:
         """
         from crypto import group_topic_id
         self._group_salt = salt
-        self.topic_id    = "splitp2p-" + group_topic_id(salt)
+        self.topic_id = "splitp2p-" + group_topic_id(salt)
         logger.info("Topic ID set: %s", self.topic_id)
 
     def stop(self) -> None:
@@ -287,8 +295,11 @@ class P2PNetwork:
             self._net.callbacks.on_peer_disconnected(pid)
 
         def listen(self, *_): pass
+
         def listen_close(self, *_): pass
+
         def open_stream(self, *_): pass
+
         def close_stream(self, *_): pass
 
     # ------------------------------------------------------------------
@@ -342,7 +353,7 @@ class P2PNetwork:
                         logger.debug("Peerstore poll error: %s", e)
 
                 # Fire callbacks for changes
-                new_peers  = current - self._peers
+                new_peers = current - self._peers
                 gone_peers = self._peers - current
 
                 if new_peers:
@@ -398,7 +409,7 @@ class P2PNetwork:
         connected = 0
         for addr_str in IPFS_BOOTSTRAP:
             try:
-                ma        = multiaddr.Multiaddr(addr_str)
+                ma = multiaddr.Multiaddr(addr_str)
                 peer_info = info_from_p2p_addr(ma)
                 with trio.move_on_after(10):
                     await self._host.connect(peer_info)
@@ -475,7 +486,6 @@ class P2PNetwork:
             except Exception as e:
                 logger.warning("Circuit Relay v2 error: %s", e)
 
-
     # ------------------------------------------------------------------
     # GossipSub – Empfangen
     # ------------------------------------------------------------------
@@ -492,7 +502,7 @@ class P2PNetwork:
                 logger.error("Receive loop error: %s", e)
 
     def _verify_and_decode_blob(self, blob: bytes,
-                                 ptype: str) -> bool:
+                                ptype: str) -> bool:
         """
         Decrypts the blob and verifies the Ed25519 signature.
         Returns True if valid, False if rejected.
@@ -668,7 +678,7 @@ class P2PNetwork:
                 except Exception as e:
                     logger.error("Command loop error: %s", e)
                     await trio.sleep(0.1)
-                    
+
     # ------------------------------------------------------------------
     # GossipSub – Senden (thread-safe, von tkinter aufrufbar)
     # ------------------------------------------------------------------
@@ -692,11 +702,11 @@ class P2PNetwork:
     def publish_comment(self, comment_id: str, expense_id: str,
                         blob: bytes, timestamp: int) -> None:
         self._publish_raw(json.dumps({
-            "type":       "comment",
-            "id":         comment_id,
+            "type": "comment",
+            "id": comment_id,
             "expense_id": expense_id,
-            "timestamp":  timestamp,
-            "blob":       blob.hex(),
+            "timestamp": timestamp,
+            "blob": blob.hex(),
         }).encode())
 
     def publish_member(self, pubkey: str, display_name: str, joined_at: int) -> None:
@@ -740,7 +750,7 @@ class P2PNetwork:
                 with open(path, "rb") as f:
                     while chunk := f.read(CHUNK_SIZE):
                         nonce = os.urandom(12)
-                        ct    = aes.encrypt(nonce, chunk, None)
+                        ct = aes.encrypt(nonce, chunk, None)
                         frame = nonce + ct
                         # 4-byte length prefix so receiver knows frame size
                         await stream.write(len(frame).to_bytes(4, 'big') + frame)
@@ -885,7 +895,7 @@ class P2PNetwork:
                                 if len(buf) < 4 + frame_len:
                                     break  # wait for more data
                                 frame = buf[4:4 + frame_len]
-                                buf   = buf[4 + frame_len:]
+                                buf = buf[4 + frame_len:]
                                 nonce, ct = frame[:12], frame[12:]
                                 plain = aes.decrypt(nonce, ct, None)
                                 f.write(plain)
@@ -944,9 +954,9 @@ class P2PNetwork:
         import trio
         try:
             req_raw = await stream.read(4096)
-            req     = json.loads(req_raw.decode())
-            since   = int(req.get("since_ts", 0))
-            topic   = req.get("topic", "")
+            req = json.loads(req_raw.decode())
+            since = int(req.get("since_ts", 0))
+            topic = req.get("topic", "")
 
             if topic != self.topic_id:
                 logger.debug("History request for wrong topic")
@@ -968,8 +978,8 @@ class P2PNetwork:
             try:
                 from storage import load_all_comment_blobs_since
                 for cid, xid, cblob in load_all_comment_blobs_since(since):
-                    line = json.dumps({"type":"comment","id":cid,
-                        "expense_id":xid,"blob":cblob.hex()}) + "\n"
+                    line = json.dumps({"type": "comment", "id": cid,
+                                       "expense_id": xid, "blob": cblob.hex()}) + "\n"
                     await stream.write(line.encode())
                     sent += 1
             except Exception as _ce:
@@ -1032,8 +1042,8 @@ class P2PNetwork:
                         self.callbacks.on_history_synced(n_exp, n_set)
                         return
                     try:
-                        pkt   = json.loads(line.decode())
-                        blob  = bytes.fromhex(pkt["blob"])
+                        pkt = json.loads(line.decode())
+                        blob = bytes.fromhex(pkt["blob"])
                         ptype = pkt["type"]
                         if ptype in ("expense", "settlement", "comment"):
                             if not self._verify_and_decode_blob(blob, ptype):
@@ -1048,7 +1058,7 @@ class P2PNetwork:
                             n_set += 1
                         elif ptype == "comment":
                             self.callbacks.on_comment_received(
-                                pkt["id"], pkt.get("expense_id",""), blob)
+                                pkt["id"], pkt.get("expense_id", ""), blob)
                     except Exception as e:
                         logger.warning("History parse error: %s", e)
 
@@ -1086,3 +1096,4 @@ class P2PNetwork:
 
     def known_peers(self) -> list[str]:
         return list(self._peers)
+    
