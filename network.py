@@ -974,8 +974,16 @@ class P2PNetwork:
         import trio
         try:
             from libp2p.peer.id import ID as PeerID
-            stream = await self._host.new_stream(
-                PeerID.from_base58(peer_id_str), [HISTORY_PROTOCOL])
+
+            # --- NEU: Strenger 15-Sekunden-Timeout für den Verbindungsaufbau ---
+            with trio.move_on_after(15) as cancel_scope:
+                stream = await self._host.new_stream(
+                    PeerID.from_base58(peer_id_str), [HISTORY_PROTOCOL])
+
+            if cancel_scope.cancelled_caught:
+                logger.warning(f"Timeout beim History-Sync mit Peer {peer_id_str[:12]}")
+                return
+            # -------------------------------------------------------------------
         except Exception as e:
             logger.debug("Cannot open history stream to %s: %s", peer_id_str[:12], e)
             return
@@ -1058,4 +1066,3 @@ class P2PNetwork:
 
     def known_peers(self) -> list[str]:
         return list(self._peers)
-    
