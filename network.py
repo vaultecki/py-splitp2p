@@ -816,8 +816,18 @@ class P2PNetwork:
             stream = None
             try:
                 from libp2p.peer.id import ID as PeerID
-                stream = await self._host.new_stream(
-                    PeerID.from_base58(peer_id_str), [FILE_PROTOCOL])
+
+                # --- NEU: 15-Sekunden-Timeout für den Stream-Aufbau ---
+                with trio.move_on_after(15) as cancel_scope:
+                    stream = await self._host.new_stream(
+                        PeerID.from_base58(peer_id_str), [FILE_PROTOCOL])
+
+                if cancel_scope.cancelled_caught:
+                    logger.warning("Timeout beim Verbindungsaufbau für Datei %s (Versuch %d)",
+                                   sha256[:12], attempt + 1)
+                    continue  # Timeout -> direkt nächster Versuch
+                # ------------------------------------------------------
+
             except Exception as e:
                 logger.warning("Cannot open file stream to %s: %s",
                                peer_id_str[:12], repr(e))
