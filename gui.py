@@ -293,38 +293,52 @@ class GroupSelectDialog(tk.Toplevel):
 # Attachment Viewer
 # ---------------------------------------------------------------------------
 
-class AttachmentViewer(tk.Toplevel):
-    def __init__(self, parent, sha256: str, filename: str):
-        from storage import attachment_path
-        path = attachment_path(sha256)
-        if not path:
-            mb.showerror("Not found",
-                         "The file is not available locally.", parent=parent)
-            return
-        if filename.lower().endswith(".pdf"):
-            self._open_ext(path); return
-        super().__init__(parent)
-        self.title(filename)
-        self.configure(bg=BG)
-        self.grab_set()
-        try:
-            from PIL import Image, ImageTk
-            img = Image.open(path); img.thumbnail((800, 600))
-            photo = ImageTk.PhotoImage(img)
-            lbl = tk.Label(self, image=photo, bg=BG)
-            lbl.image = photo; lbl.pack(padx=10, pady=10)
-            _lbl(self, filename, fg=FG_DIM, font=FONT_SMALL).pack(pady=(0, 10))
-        except ImportError:
-            self._open_ext(path)
-            try: self.destroy()
-            except Exception: pass
+def AttachmentViewer(parent, sha256: str, filename: str):
+    """
+    Shows an attachment. Returns immediately if file is unavailable.
+    Uses a function instead of a Toplevel subclass to avoid the
+    tkinter _w attribute issue with early returns.
+    """
+    from storage import attachment_path
+    path = attachment_path(sha256)
+    if not path:
+        mb.showerror("Not found",
+                     "The file is not available locally.", parent=parent)
+        return
+    # PDFs and non-image files: open with system viewer
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    is_image = ext in ("jpg", "jpeg", "png", "gif", "webp", "bmp")
+    if not is_image:
+        _open_ext(path)
+        return
+    # Images: show inline with Pillow, fallback to system viewer
+    try:
+        from PIL import Image, ImageTk
+        win = tk.Toplevel(parent)
+        win.title(filename)
+        win.configure(bg=BG)
+        win.grab_set()
+        img = Image.open(path)
+        img.thumbnail((800, 600))
+        photo = ImageTk.PhotoImage(img)
+        lbl = tk.Label(win, image=photo, bg=BG)
+        lbl.image = photo
+        lbl.pack(padx=10, pady=10)
+        _lbl(win, filename, fg=FG_DIM, font=FONT_SMALL).pack(pady=(0, 10))
+    except ImportError:
+        _open_ext(path)
 
-    @staticmethod
-    def _open_ext(path):
-        import subprocess, sys
-        if sys.platform == "win32": os.startfile(path)
-        elif sys.platform == "darwin": subprocess.run(["open", path])
-        else: subprocess.run(["xdg-open", path])
+
+def _open_ext(path: str) -> None:
+    """Opens a file with the system default application."""
+    import subprocess, sys
+    if sys.platform == "win32":
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        subprocess.run(["open", path])
+    else:
+        subprocess.run(["xdg-open", path])
+
 
 
 # ---------------------------------------------------------------------------
@@ -640,36 +654,6 @@ class QRImportDialog(tk.Toplevel):
             self._set_status(f"Scan error: {e}", RED)
 
 
-class AttachmentViewer(tk.Toplevel):
-    def __init__(self, parent, sha256: str, filename: str):
-        from storage import attachment_path
-        path = attachment_path(sha256)
-        if not path:
-            mb.showerror("Nicht gefunden",
-                         "Die Datei ist lokal nicht vorhanden.", parent=parent)
-            return
-        if filename.lower().endswith(".pdf"):
-            self._open_ext(path); return
-        super().__init__(parent)
-        self.title(filename)
-        self.configure(bg=BG)
-        self.grab_set()
-        try:
-            from PIL import Image, ImageTk
-            img = Image.open(path); img.thumbnail((800, 600))
-            photo = ImageTk.PhotoImage(img)
-            lbl = tk.Label(self, image=photo, bg=BG)
-            lbl.image = photo; lbl.pack(padx=10, pady=10)
-            _lbl(self, filename, fg=FG_DIM, font=FONT_SMALL).pack(pady=(0, 10))
-        except ImportError:
-            self._open_ext(path)
-            try: self.destroy()
-            except Exception: pass
-
-    def _open_ext(self, path):
-        if sys.platform == "win32": os.startfile(path)
-        elif sys.platform == "darwin": subprocess.run(["open", path])
-        else: subprocess.run(["xdg-open", path])
 
 
 # ---------------------------------------------------------------------------
