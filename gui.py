@@ -2916,10 +2916,23 @@ class App(tk.Tk):
 
         if exp.attachment:
             from storage import attachment_exists
-            exists = attachment_exists(exp.attachment.sha256)
+            sha    = exp.attachment.sha256
+            exists = attachment_exists(sha)
+            # If file is missing and not already being downloaded: retry.
+            # _pending_downloads tracks active requests to avoid
+            # re-queuing on every _refresh() tick.
+            if (not exists
+                    and self._network
+                    and getattr(self._network, "_peers", None)
+                    and sha not in self._pending_downloads):
+                self._pending_downloads.add(sha)
+                self._network.request_file(sha)
+                import logging as _lg
+                _lg.getLogger(__name__).debug(
+                    "Re-requesting missing attachment %s", sha[:12])
             tk.Button(left,
                 text=f"📎 {exp.attachment.filename} ({exp.attachment.size_str()})"
-                     + ("" if exists else "  ⚠ fehlt lokal"),
+                     + ("" if exists else "  ⚠ missing locally"),
                 fg=BLUE if exists else FG_DIM, bg=PANEL,
                 font=FONT_SMALL, relief="flat", bd=0, cursor="hand2",
                 activebackground=PANEL, activeforeground=FG,
@@ -2986,9 +2999,12 @@ class App(tk.Tk):
                 self2._app.after(0, lambda: self2._app._append_log(
                     "sync", f"Mitglied empfangen: {name} ({pubkey[:12]}…)"))
             def on_peer_connected(self2, pid):
+                # Clear pending downloads so missing attachments
+                # are retried now that we have a new peer to ask
+                self2._app._pending_downloads.clear()
                 self2._app.after(0, lambda: self2._app._on_peer_change())
                 self2._app.after(0, lambda: self2._app._append_log(
-                    "net", f"Peer verbunden: {pid[:20]}…"))
+                    "net", f"Peer connected: {pid[:20]}..."))
             def on_peer_disconnected(self2, pid):
                 self2._app.after(0, lambda: self2._app._on_peer_change())
                 self2._app.after(0, lambda: self2._app._append_log(
