@@ -2983,12 +2983,15 @@ class App(tk.Tk):
                 self2._app.after(0, lambda: self2._app._append_log(
                     "sync", f"Mitglied empfangen: {name} ({pubkey[:12]}…)"))
             def on_peer_connected(self2, pid):
-                # Clear pending downloads so missing attachments
-                # are retried now that we have a new peer to ask
-                self2._app._pending_downloads.clear()
-                self2._app.after(0, lambda: self2._app._on_peer_change())
-                self2._app.after(0, lambda: self2._app._append_log(
-                    "net", f"Peer connected: {pid[:20]}..."))
+                # Move all state access into after() so it runs
+                # in the tkinter main thread, not the trio thread
+                def _on_connect(p=pid):
+                    if hasattr(self2._app, "_pending_downloads"):
+                        self2._app._pending_downloads.clear()
+                    self2._app._on_peer_change()
+                    self2._app._append_log("net",
+                        f"Peer connected: {p[:20]}...")
+                self2._app.after(0, _on_connect)
             def on_peer_disconnected(self2, pid):
                 self2._app.after(0, lambda: self2._app._on_peer_change())
                 self2._app.after(0, lambda: self2._app._append_log(
