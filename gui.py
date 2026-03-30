@@ -129,10 +129,14 @@ class DatePickerFrame(tk.Frame):
 # Group Dialogs
 # ---------------------------------------------------------------------------
 
-class NewGroupDialog(tk.Toplevel):  # _name_var statt _name wegen py3.14
+class NewGroupDialog(tk.Toplevel):
+    """
+    Create a new group. Password and salt are generated randomly —
+    no manual password entry needed. Members join via QR code.
+    """
     def __init__(self, parent, default_name=""):
         super().__init__(parent)
-        self.title("Neue Gruppe")
+        self.title("New Group")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
@@ -146,8 +150,8 @@ class NewGroupDialog(tk.Toplevel):  # _name_var statt _name wegen py3.14
         _lbl(self, "NEW GROUP", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(24, 4), **pad)
         _lbl(self,
-             "Das gemeinsame Passwort identifiziert die Gruppe im P2P-Netz\n"
-             "and encrypts all expenses. Stored once.",
+             "Password and key are generated automatically.\n"
+             "Share the QR code with members after creating the group.",
              fg=FG_DIM, font=FONT_SMALL, justify="left").pack(anchor="w", **pad)
         _div(self).pack(fill="x", padx=28, pady=10)
         frm = tk.Frame(self, bg=BG, padx=28)
@@ -158,11 +162,6 @@ class NewGroupDialog(tk.Toplevel):  # _name_var statt _name wegen py3.14
         tk.Entry(frm, textvariable=self._name_var, font=FONT, bg=PANEL, fg=FG,
                  insertbackground=GREEN, relief="flat", bd=6).pack(fill="x", pady=(2, 8))
 
-        _lbl(frm, "SHARED GROUP PASSWORD", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
-        self._pw = tk.Entry(frm, show="●", font=FONT, bg=PANEL, fg=FG,
-                            insertbackground=GREEN, relief="flat", bd=6)
-        self._pw.pack(fill="x", pady=(2, 8))
-
         _lbl(frm, "GROUP CURRENCY", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._currency = tk.StringVar(value="EUR")
         _combobox(frm, self._currency, SUPPORTED_CURRENCIES, width=10).pack(
@@ -171,16 +170,15 @@ class NewGroupDialog(tk.Toplevel):  # _name_var statt _name wegen py3.14
         btn_row = tk.Frame(self, bg=BG, padx=28, pady=20)
         btn_row.pack(fill="x")
         _ghost(btn_row, "Cancel", self.destroy).pack(side="right", padx=(6, 0))
-        _btn(btn_row, "CREATE / JOIN", self._confirm).pack(side="right")
+        _btn(btn_row, "CREATE", self._confirm).pack(side="right")
 
     def _confirm(self):
         name = self._name_var.get().strip()
-        pw   = self._pw.get().strip()
         if not name:
             mb.showerror("Error", "Group name is required.", parent=self); return
-        if len(pw) < 4:
-            mb.showerror("Error", "Password must be at least 4 characters.", parent=self); return
-        import os as _os
+        import os as _os, secrets as _sec
+        # Generate a strong random password (20 url-safe chars)
+        pw = _sec.token_urlsafe(15)  # 20 chars, 120 bits entropy
         self.result = {"group_name": name, "password": pw,
                        "group_currency": self._currency.get(),
                        "group_salt": _os.urandom(16)}
@@ -247,8 +245,10 @@ class GroupSelectDialog(tk.Toplevel):
         self.groups[dlg.result["group_name"]] = {
             "password": dlg.result["password"],
             "currency": dlg.result["group_currency"],
+            "salt": dlg.result["group_salt"].hex(),
         }
         self.result = dlg.result
+        self._show_qr_after = True  # signal App to show QR
         self.destroy()
 
     def _import_qr(self):
@@ -2051,7 +2051,6 @@ class App(tk.Tk):
         _div(sb).pack(fill="x")
         self._members_frame = tk.Frame(sb, bg=PANEL)
         self._members_frame.pack(fill="x", padx=12, pady=6)
-        _btn(sb, "+ Member", self._add_member, width=20).pack(padx=12, pady=4)
 
         _div(sb).pack(fill="x", pady=8)
         _lbl(sb, "MY BALANCE", fg=FG_DIM, font=FONT_SMALL, bg=PANEL, padx=14).pack(fill="x")
@@ -2297,6 +2296,10 @@ class App(tk.Tk):
         self._restore_lamport_clock()
         self._start_network()
         self._refresh()
+        # Auto-show QR code when a new group was just created
+        if getattr(dlg, "result", None) and \
+                getattr(dlg, "_show_qr_after", False):
+            self.after(500, self._show_qr)
 
     def _switch_group(self):
         self.withdraw()
@@ -3023,10 +3026,23 @@ class App(tk.Tk):
             short = peer_id[:20] + "..." if len(peer_id) > 20 else peer_id
             self._net_dot.configure(fg=GREEN)
             self._net_label.configure(text=f"online  {short}", fg=FG_MUTED)
-            # Eigenes Member-Paket senden damit andere uns kennen
+            # Announce own member data to the group
             if self._network:
                 self._network.publish_member(
                     self._own_pubkey, self._own_name, int(time.time()))
+            # Also save own member locally so we appear in the list
+            if self._db:
+                from storage import save_member
+                from models import Member
+                save_member(self._db, Member(
+                    self._own_pubkey, self._own_name))
+            # Re-announce after 3s to catch peers that connected
+            # before GossipSub mesh was established
+            if self._network:
+                self.after(3000, lambda: self._network and
+                    self._network.publish_member(
+                        self._own_pubkey, self._own_name,
+                        int(time.time())))
         else:
             self._net_dot.configure(fg=FG_DIM)
             self._net_label.configure(
