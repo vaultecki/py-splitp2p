@@ -1,32 +1,26 @@
 # SplitP2P – Python Dependencies
 # Install with: pip install -r requirements.txt
 
-# ── Pflicht ──────────────────────────────────────────────────────────────
+# ── Kern-Kryptografie & Sicherheit ───────────────────────────────────────
+# Für Ed25519 Signaturen und SecretBox (Salsa20/Poly1305)
+pynacl>=1.5.0
 cryptography>=41.0
 
-# ── P2P-Sync (empfohlen) ─────────────────────────────────────────────────
-# GossipSub, mDNS-Discovery, Bootstrap-Verbindungen
-libp2p>=0.1.5
-multiaddr>=0.0.9        # IPFS Bootstrap-Adressen parsen
+# ── P2P-Networking & Async ───────────────────────────────────────────────
+# Trio ist das Fundament für die asynchrone Netzwerk-Logik
+trio>=0.22.0
+# P2P-Protokoll-Stack (GossipSub, mDNS, Streams)
+py-libp2p>=0.2.0
+multiaddr>=0.0.9
 
-# ── Optional ─────────────────────────────────────────────────────────────
-# Bildvorschau für Anhänge direkt im App-Fenster (JPG, PNG, GIF, WEBP)
+# ── GUI & UX (Optional, degradieren bei Fehlen) ──────────────────────────
+# Bildvorschau für Belege
 Pillow>=10.0
-
-# ── Stdlib ───────────────────────────────────────────────────────────────
-# tkinter   – GUI; auf Debian/Ubuntu: sudo apt install python3-tk
-# sqlite3   – Datenbank
-# urllib    – Wechselkurs-Abruf
-# asyncio / threading – P2P-Hintergrundthread
-
-# ── Charts ───────────────────────────────────────────────────────────────
-matplotlib>=3.7          # Diagramme im Charts-Fenster
-
-# ── PDF-Export ───────────────────────────────────────────────────────────
-fpdf2>=2.7               # PDF-Generierung; CSV-Export funktioniert ohne
-
-# ── QR-Code ──────────────────────────────────────────────────────────────
-qrcode[pil]>=7.4       # QR-Code anzeigen (Bild); Pillow bereits oben
-                       # Ohne dieses Paket: Fallback auf kopierbaren Text-String
-opencv-python>=4.8     # QR-Code scannen (Kamera + Bilddatei)
-                       # Ohne dieses Paket: nur Text-Import verfuegbar
+# Diagramme im Charts-Fenster
+matplotlib>=3.7
+# PDF-Export der Abrechnungen
+fpdf2>=2.7
+# QR-Code Generierung (für Invites/Backup)
+qrcode[pil]>=7.4
+# QR-Code Scan via Kamera
+opencv-python>=4.8
