@@ -55,7 +55,7 @@ def compute_balances(
       from_pubkey paid -> debt decreases -> balance increases
       to_pubkey received -> credit decreases -> balance decreases
     """
-    balances: dict[str, float] = {}
+    balances: dict[str, int] = {}  # all values in minor currency units
 
     for exp in expenses:
         if exp.is_deleted:
@@ -70,7 +70,7 @@ def compute_balances(
         balances[rs.from_pubkey] = balances.get(rs.from_pubkey, 0.0) + rs.amount
         balances[rs.to_pubkey]   = balances.get(rs.to_pubkey,   0.0) - rs.amount
 
-    return {pk: round(bal, 2) for pk, bal in balances.items()}
+    return {pk: bal for pk, bal in balances.items()}
 
 
 def balance_summary(
@@ -84,9 +84,9 @@ def balance_summary(
       net           - net balance (positive = owed to me, negative = I owe)
     """
     net = balances.get(own_pubkey, 0.0)
-    owes  = sum(-b for pk, b in balances.items() if pk != own_pubkey and b < -0.005)
-    owed  = sum( b for pk, b in balances.items() if pk != own_pubkey and b >  0.005)
-    return {"net": net, "owes_total": round(owes, 2), "owed_total": round(owed, 2)}
+    owes = sum(-b for pk, b in balances.items() if pk != own_pubkey and b < 0)
+    owed = sum( b for pk, b in balances.items() if pk != own_pubkey and b > 0)
+    return {"net": net, "owes_total": owes, "owed_total": owed}
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ class Settlement:
     """Suggested settlement transfer (not persistent - display only)."""
     debtor:   str    # pubkey - who should pay
     creditor: str    # pubkey - who should receive
-    amount:   float
+    amount:   int    # minor currency units
 
     def __repr__(self) -> str:
         return f"{self.debtor[:8]}…→{self.creditor[:8]}… {self.amount:.2f}"
@@ -106,23 +106,23 @@ class Settlement:
 
 def compute_settlements(balances: dict[str, float]) -> list[Settlement]:
     """Greedy: minimizes number of required transfers."""
-    debtors  = sorted([(pk, -b) for pk, b in balances.items() if b < -0.005],
+    debtors  = sorted([(pk, -b) for pk, b in balances.items() if b < 0],
                       key=lambda x: -x[1])
-    creditors = sorted([(pk,  b) for pk, b in balances.items() if b >  0.005],
+    creditors = sorted([(pk,  b) for pk, b in balances.items() if b > 0],
                        key=lambda x: -x[1])
     result: list[Settlement] = []
     d_i = c_i = 0
     while d_i < len(debtors) and c_i < len(creditors):
         d_pk, d_amt = debtors[d_i]
         c_pk, c_amt = creditors[c_i]
-        pay = round(min(d_amt, c_amt), 2)
+        pay = min(d_amt, c_amt)
         if pay > 0:
             result.append(Settlement(debtor=d_pk, creditor=c_pk, amount=pay))
         d_amt = round(d_amt - pay, 2)
         c_amt = round(c_amt - pay, 2)
-        if d_amt < 0.005: d_i += 1
+        if d_amt == 0: d_i += 1
         else: debtors[d_i] = (d_pk, d_amt)
-        if c_amt < 0.005: c_i += 1
+        if c_amt == 0: c_i += 1
         else: creditors[c_i] = (c_pk, c_amt)
     return result
 

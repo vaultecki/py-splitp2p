@@ -15,6 +15,56 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 # ---------------------------------------------------------------------------
+# Currency precision (decimal places for smallest unit)
+# ---------------------------------------------------------------------------
+
+# Maps currency code -> number of decimal places in the smallest unit.
+# EUR: 1 euro = 100 cents -> precision 2 -> store as cents (integer)
+# JPY: no subunit -> precision 0 -> store as yen (integer)
+CURRENCY_PRECISION: dict[str, int] = {
+    "EUR": 2, "USD": 2, "GBP": 2, "CHF": 2, "CAD": 2, "AUD": 2,
+    "NZD": 2, "SGD": 2, "HKD": 2, "CNY": 2, "INR": 2, "BRL": 2,
+    "MXN": 2, "PLN": 2, "CZK": 2, "RON": 2, "BGN": 2, "TRY": 2,
+    "SEK": 2, "NOK": 2, "DKK": 2, "HUF": 2,
+    "JPY": 0, "KRW": 0, "ISK": 0,
+}
+
+
+def currency_precision(currency: str) -> int:
+    """Returns decimal places for the given currency (default 2)."""
+    return CURRENCY_PRECISION.get(currency.upper(), 2)
+
+
+def to_minor(amount: float, currency: str) -> int:
+    """
+    Converts a decimal amount to the smallest currency unit (integer).
+    Example: to_minor(12.50, 'EUR') -> 1250  (cents)
+             to_minor(1500, 'JPY') -> 1500  (yen, precision 0)
+    """
+    prec = currency_precision(currency)
+    return round(amount * 10 ** prec)
+
+
+def from_minor(amount: int, currency: str) -> float:
+    """
+    Converts a smallest-unit integer back to decimal.
+    Example: from_minor(1250, 'EUR') -> 12.5
+    """
+    prec = currency_precision(currency)
+    if prec == 0:
+        return float(amount)
+    return amount / 10 ** prec
+
+
+def format_amount(amount: int, currency: str) -> str:
+    """Human-readable amount string. format_amount(1250, 'EUR') -> '12.50'"""
+    prec = currency_precision(currency)
+    if prec == 0:
+        return str(amount)
+    return f"{amount / 10**prec:.{prec}f}"
+
+
+# ---------------------------------------------------------------------------
 # Kategorien
 # ---------------------------------------------------------------------------
 
@@ -92,7 +142,7 @@ class Attachment:
 @dataclass
 class Split:
     pubkey: str
-    amount: float
+    amount: int  # smallest currency unit
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -121,7 +171,7 @@ class Expense:
     """
     id: str
     description: str
-    amount: float
+    amount: int            # smallest currency unit (e.g. cents for EUR)
     currency: str
     payer_pubkey: str
     splits: list[Split]
@@ -144,7 +194,7 @@ class Expense:
     def create(
         cls,
         description: str,
-        amount: float,
+        amount: int,
         currency: str,
         payer_pubkey: str,
         splits: list[Split],
@@ -159,7 +209,7 @@ class Expense:
         return cls(
             id=str(uuid.uuid4()),
             description=description,
-            amount=round(amount, 2),
+            amount=int(amount),
             currency=currency,
             payer_pubkey=payer_pubkey,
             splits=splits,
@@ -230,7 +280,7 @@ class RecordedSettlement:
     id: str
     from_pubkey: str    # who paid
     to_pubkey: str      # to whom
-    amount: float
+    amount: int         # smallest currency unit
     currency: str
     timestamp: int      # wall clock
     signature: str      # Ed25519 over canonical_bytes(), signed by from_pubkey
@@ -260,7 +310,7 @@ class RecordedSettlement:
             id=str(uuid.uuid4()),
             from_pubkey=from_pubkey,
             to_pubkey=to_pubkey,
-            amount=round(amount, 2),
+            amount=int(amount),
             currency=currency,
             timestamp=int(time.time()),
             signature="",
@@ -302,23 +352,25 @@ class RecordedSettlement:
 # Split-Hilfsfunktionen
 # ---------------------------------------------------------------------------
 
-def split_equally(amount: float, pubkeys: list[str]) -> list[Split]:
+def split_equally(amount: int, pubkeys: list[str]) -> list[Split]:
+    """Splits an integer (minor unit) amount equally. Remainder goes to first."""
     n = len(pubkeys)
     if n == 0:
         return []
-    share = round(amount / n, 2)
+    share = amount // n
+    remainder = amount - share * n
     splits = [Split(pubkey=pk, amount=share) for pk in pubkeys]
-    diff = round(amount - sum(s.amount for s in splits), 2)
-    if diff:
-        splits[0] = Split(splits[0].pubkey, round(splits[0].amount + diff, 2))
+    if remainder:
+        splits[0] = Split(splits[0].pubkey, splits[0].amount + remainder)
     return splits
 
 
-def split_custom(amounts_by_pubkey: dict[str, float]) -> list[Split]:
-    return [Split(pubkey=pk, amount=round(amt, 2)) for pk, amt in amounts_by_pubkey.items()]
+def split_custom(amounts_by_pubkey: dict[str, int]) -> list[Split]:
+    """Creates splits from a dict of pubkey -> minor-unit amounts."""
+    return [Split(pubkey=pk, amount=int(amt)) for pk, amt in amounts_by_pubkey.items()]
 
 
-def split_by_percent(amount: float,
+def split_by_percent(amount: int,
                      percentages_by_pubkey: dict[str, float]) -> list[Split]:
     """
     Split an amount by percentages.
@@ -340,13 +392,13 @@ def split_by_percent(amount: float,
     # Normalize if sum != 100
     scale = 100.0 / total_pct
     splits = [
-        Split(pubkey=pk, amount=round(amount * (pct * scale) / 100.0, 2))
+        Split(pubkey=pk, amount=round(amount * (pct * scale) / 100.0))
         for pk, pct in percentages_by_pubkey.items()
     ]
-    # Compensate for rounding errors
-    diff = round(amount - sum(s.amount for s in splits), 2)
+    # Integer rounding: distribute remainder to first entry
+    diff = amount - sum(s.amount for s in splits)
     if diff:
-        splits[0] = Split(splits[0].pubkey, round(splits[0].amount + diff, 2))
+        splits[0] = Split(splits[0].pubkey, splits[0].amount + diff)
     return splits
 
 

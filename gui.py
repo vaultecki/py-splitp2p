@@ -2898,7 +2898,7 @@ class App(tk.Tk):
         _lbl(left, splits_txt, fg=FG_MUTED, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
 
         if exp.original_amount and exp.original_currency:
-            _lbl(left, f"originally: {exp.original_amount:.2f} {exp.original_currency}",
+            _lbl(left, f"originally: {exp.original_amount} {exp.original_currency}",
                  fg=AMBER, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
 
         if exp.attachment:
@@ -2929,7 +2929,8 @@ class App(tk.Tk):
 
         right = tk.Frame(row, bg=PANEL)
         right.pack(side="right")
-        _lbl(right, f"{exp.amount:.2f} {exp.currency}",
+        from models import format_amount as _fa
+        _lbl(right, f"{_fa(exp.amount, exp.currency)} {exp.currency}",
              fg=GREEN, font=FONT_LARGE, bg=PANEL).pack(anchor="e")
         btn_r = tk.Frame(right, bg=PANEL)
         btn_r.pack(anchor="e")
@@ -2958,12 +2959,13 @@ class App(tk.Tk):
         if s.note:
             _lbl(left, s.note, fg=FG_DIM, font=FONT_SMALL, bg=BG).pack(anchor="w")
         if s.original_amount and s.original_currency:
-            _lbl(left, f"originally: {s.original_amount:.2f} {s.original_currency}",
+            _lbl(left, f"originally: {s.original_amount} {s.original_currency}",
                  fg=AMBER, font=FONT_SMALL, bg=BG).pack(anchor="w")
 
         right = tk.Frame(row, bg=BG)
         right.pack(side="right")
-        _lbl(right, f"{s.amount:.2f} {s.currency}",
+        from models import format_amount as _fa3
+        _lbl(right, f"{_fa3(s.amount, s.currency)} {s.currency}",
              fg=PURPLE, font=FONT_LARGE, bg=BG).pack(anchor="e")
         _ghost(right, "✕", lambda s=s: self._delete_settlement(s)).pack(anchor="e")
 

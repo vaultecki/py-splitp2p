@@ -5,28 +5,25 @@
 Crypto Module
 
 Two layers:
-  1. Ed25519     - every expense is signed by the payer (authenticity)
-  2. AES-256-GCM - all group expenses are encrypted with the
-     group password (confidentiality between groups)
+  1. Ed25519  (pynacl SigningKey)  — every expense/settlement/comment is
+     signed by the author (authenticity + creator integrity)
+  2. SecretBox (XSalsa20-Poly1305) — all group data encrypted with a key
+     derived from the group password (confidentiality between groups)
 
 Key derivation:
-  AES key: PBKDF2-HMAC-SHA256 (600,000 iterations, random 16-byte salt
-           per group). Salt is generated when the group is created and
-           shared with all members via QR code.
-           Much more expensive than raw SHA256, prevents rainbow-table attacks.
-  Topic ID: SHA256(salt)[:16] - no PBKDF2 needed, routing identifier only,
-            not a cryptographic secret.
+  SecretBox key: Argon2id (OPSLIMIT_MODERATE / MEMLIMIT_MODERATE) from
+  password + random 16-byte salt per group. The salt is shared via QR code.
+  Argon2id is memory-hard and resistant to GPU/ASIC brute-force attacks.
 
-Saving an expense:
-  expense -> canonical JSON -> Ed25519 signature
-  expense.to_dict() -> AES-GCM(pbkdf2_key) -> encrypted blob in DB
+Why pynacl / libsodium:
+  - Battle-tested, audited C library (libsodium) with thin Python bindings
+  - SecretBox nonce management is built-in (random 24-byte nonce prepended)
+  - Argon2id is the Password Hashing Competition winner (2015)
+  - Consistent API across Python, Kotlin (TweetNaCl / lazysodium), Swift
 
-Loading an expense:
-  encrypted blob -> AES-GCM decryption -> Expense.from_dict()
-  -> verify_expense() -> display
-
-SHA-256 for attachments: hash is included in the expense signature
-so nobody can silently swap the attachment.
+Wire format for encrypted blobs:
+  SecretBox.encrypt() returns nonce (24 bytes) + ciphertext + MAC (16 bytes)
+  The result is opaque — without the key neither content nor length is known.
 """
 
 import hashlib
@@ -35,12 +32,15 @@ import logging
 import os
 from typing import TYPE_CHECKING, Optional
 
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import nacl.signing
+import nacl.secret
+import nacl.pwhash
+import nacl.utils
+import nacl.encoding
+import nacl.exceptions
 
 if TYPE_CHECKING:
-    from models import Expense, Attachment
+    from models import Expense, RecordedSettlement, Comment
 
 logger = logging.getLogger(__name__)
 
@@ -49,149 +49,235 @@ logger = logging.getLogger(__name__)
 # Key management
 # ---------------------------------------------------------------------------
 
-def generate_private_key() -> ed25519.Ed25519PrivateKey:
-    return ed25519.Ed25519PrivateKey.generate()
+def generate_private_key() -> nacl.signing.SigningKey:
+    """Generates a new random Ed25519 signing key."""
+    return nacl.signing.SigningKey.generate()
 
 
-def private_key_to_bytes(key: ed25519.Ed25519PrivateKey) -> bytes:
-    return key.private_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PrivateFormat.Raw,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
+def private_key_to_bytes(key: nacl.signing.SigningKey) -> bytes:
+    """Serializes the signing key seed (32 bytes)."""
+    return bytes(key)
 
 
-def private_key_from_bytes(raw: bytes) -> ed25519.Ed25519PrivateKey:
-    return ed25519.Ed25519PrivateKey.from_private_bytes(raw)
+def private_key_from_bytes(raw: bytes) -> nacl.signing.SigningKey:
+    """Restores a signing key from its 32-byte seed."""
+    return nacl.signing.SigningKey(raw)
 
 
-def get_public_key_hex(key: ed25519.Ed25519PrivateKey) -> str:
-    return key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    ).hex()
+def get_public_key_hex(key: nacl.signing.SigningKey) -> str:
+    """Returns the 32-byte verify key as a hex string."""
+    return key.verify_key.encode(nacl.encoding.HexEncoder).decode()
 
 
 # ---------------------------------------------------------------------------
-# Ed25519 – Ausgaben signieren
+# Argon2id KDF + SecretBox
 # ---------------------------------------------------------------------------
-
-def sign_expense(expense: "Expense", private_key: ed25519.Ed25519PrivateKey) -> str:
-    """Signs canonical_bytes() of the expense, returns hex signature."""
-    sig = private_key.sign(expense.canonical_bytes())
-    return sig.hex()
-
-
-def verify_expense(expense: "Expense") -> bool:
-    """Verifies the Ed25519 signature. Returns False if missing or invalid."""
-    if not expense.signature:
-        return False
-    try:
-        pub_key = ed25519.Ed25519PublicKey.from_public_bytes(
-            bytes.fromhex(expense.payer_pubkey)
-        )
-        pub_key.verify(bytes.fromhex(expense.signature), expense.canonical_bytes())
-        return True
-    except Exception as e:
-        logger.warning("Invalid signature for expense %s: %s", expense.id[:8], e)
-        return False
-
-
-# ---------------------------------------------------------------------------
-# AES-256-GCM - group encryption
-# ---------------------------------------------------------------------------
-
-# PBKDF2 iterations: 600,000 is the OWASP minimum recommendation (2024)
-# for PBKDF2-HMAC-SHA256. ~0.2s on modern hardware -
-# acceptable at app startup, expensive for brute-force attacks.
-_PBKDF2_ITERATIONS = 600_000
-
 
 def generate_group_salt() -> bytes:
     """
     Generates a cryptographically secure 16-byte salt for a new group.
-    Generated once when the group is created and distributed to all
-    members via QR code.
+    Generated once at group creation, shared via QR code with all members.
     """
-    return os.urandom(16)
+    return nacl.utils.random(16)
 
 
-def _group_aes_key(group_password: str, group_salt: bytes) -> bytes:
+def _group_box(group_password: str, group_salt: bytes) -> nacl.secret.SecretBox:
     """
-    Derives a 32-byte AES key via PBKDF2-HMAC-SHA256.
+    Derives a 32-byte key via Argon2id and returns a SecretBox.
 
-    group_salt: random 16-byte salt, generated once per group
-                and shared via QR code. Prevents rainbow-table attacks
-                and strengthens isolation between groups.
+    Argon2id advantages over PBKDF2:
+      - Memory-hard: requires significant RAM, defeating GPU/ASIC attacks
+      - Winner of the Password Hashing Competition (2015)
+      - Same API available in libsodium (Kotlin/Swift/Rust/Go)
 
-    Why PBKDF2 over Scrypt:
-      PBKDF2 is available in Python stdlib (hashlib); Scrypt requires
-      OpenSSL >= 1.1. Both are sufficient for this use case.
+    OPSLIMIT_MODERATE / MEMLIMIT_MODERATE: ~64 MB RAM, ~0.1s on modern HW.
+    For interactive use this is acceptable; for bulk attacks it's expensive.
+
+    Salt must be exactly 16 bytes (nacl.pwhash.argon2id.SALTBYTES).
     """
-    return hashlib.pbkdf2_hmac(
-        hash_name="sha256",
-        password=group_password.encode("utf-8"),
-        salt=group_salt,
-        iterations=_PBKDF2_ITERATIONS,
-        dklen=32,
+    if len(group_salt) != nacl.pwhash.argon2id.SALTBYTES:
+        raise ValueError(
+            f"Salt must be {nacl.pwhash.argon2id.SALTBYTES} bytes, "
+            f"got {len(group_salt)}"
+        )
+    key = nacl.pwhash.argon2id.kdf(
+        nacl.secret.SecretBox.KEY_SIZE,
+        group_password.encode("utf-8"),
+        group_salt,
+        opslimit=nacl.pwhash.argon2id.OPSLIMIT_MODERATE,
+        memlimit=nacl.pwhash.argon2id.MEMLIMIT_MODERATE,
     )
+    return nacl.secret.SecretBox(key)
 
 
 def group_topic_id(group_salt: bytes) -> str:
     """
-    Topic ID for P2P routing, derived from the group salt.
+    P2P routing topic ID derived from the group salt.
 
-    Why salt instead of password:
-      - Salt is random (128 bit) -> topic ID cannot be guessed from password.
-      - Password is never exposed as a hash anywhere.
-      - Salt IS the group identifier; password IS the crypto key.
-      - Salt is shared in the QR code, it is not a secret.
+    Why salt, not password:
+      - Salt is random (128 bit) → topic ID cannot be guessed from password
+      - Password is never exposed as a hash
+      - Salt IS the group identifier; password IS the crypto key
+      - Salt is shared in the QR code, it is not secret
     """
     if not group_salt:
-        return "legacy-no-salt"  # backward compatibility for groups without salt
+        return "legacy-no-salt"
     return hashlib.sha256(group_salt).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Ed25519 — signing (generic helper)
+# ---------------------------------------------------------------------------
+
+def _sign(data: bytes, key: nacl.signing.SigningKey) -> str:
+    """Signs data and returns the 64-byte signature as hex."""
+    return key.sign(data).signature.hex()
+
+
+def _verify(data: bytes, signature_hex: str, pubkey_hex: str) -> bool:
+    """Verifies an Ed25519 signature. Returns False on any error."""
+    try:
+        vk = nacl.signing.VerifyKey(
+            bytes.fromhex(pubkey_hex), encoder=nacl.encoding.RawEncoder)
+        vk.verify(data, bytes.fromhex(signature_hex))
+        return True
+    except (nacl.exceptions.BadSignatureError, Exception) as e:
+        logger.debug("Signature verification failed: %s", e)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Expense
+# ---------------------------------------------------------------------------
+
+def sign_expense(expense: "Expense", key: nacl.signing.SigningKey) -> str:
+    return _sign(expense.canonical_bytes(), key)
+
+
+def verify_expense(expense: "Expense") -> bool:
+    if not expense.signature:
+        return False
+    ok = _verify(expense.canonical_bytes(), expense.signature,
+                 expense.payer_pubkey)
+    if not ok:
+        logger.warning("Invalid signature for expense %s", expense.id[:8])
+    return ok
 
 
 def encrypt_expense(expense: "Expense", group_password: str,
                     group_salt: bytes = b"") -> bytes:
-    """
-    Serializes and encrypts an expense with the group key.
-
-    Returns: nonce (12 bytes) || ciphertext (variable length)
-    The result is an opaque blob - without the password
-    description, amount and participants are not recoverable.
-    """
-    key  = _group_aes_key(group_password, group_salt)
-    aes  = AESGCM(key)
+    """Serializes and encrypts an expense. Returns nonce+ciphertext+MAC."""
+    box  = _group_box(group_password, group_salt)
     data = json.dumps(expense.to_dict(), ensure_ascii=False).encode()
-    nonce = os.urandom(12)
-    ciphertext = aes.encrypt(nonce, data, None)
-    return nonce + ciphertext
+    return bytes(box.encrypt(data))
 
 
 def decrypt_expense(blob: bytes, group_password: str,
                     group_salt: bytes = b"") -> Optional["Expense"]:
-    """
-    Decrypts a blob and returns an Expense.
-    Returns None if the password is wrong or the blob is corrupt.
-    """
+    """Decrypts an expense blob. Returns None on error."""
     from models import Expense
-    if len(blob) < 28:   # 12 nonce + mindestens 16 GCM-Tag
-        return None
     try:
-        key   = _group_aes_key(group_password, group_salt)
-        aes   = AESGCM(key)
-        nonce = blob[:12]
-        ct    = blob[12:]
-        data  = aes.decrypt(nonce, ct, None)
+        box  = _group_box(group_password, group_salt)
+        data = box.decrypt(blob)
         return Expense.from_dict(json.loads(data))
     except Exception as e:
-        logger.warning("Decryption failed: %s", e)
+        logger.warning("Expense decryption failed: %s", e)
         return None
 
 
 # ---------------------------------------------------------------------------
-# SHA-256 - file attachments
+# Settlement
+# ---------------------------------------------------------------------------
+
+def sign_settlement(settlement, key: nacl.signing.SigningKey) -> str:
+    return _sign(settlement.canonical_bytes(), key)
+
+
+def verify_settlement(settlement) -> bool:
+    if not settlement.signature:
+        return False
+    ok = _verify(settlement.canonical_bytes(), settlement.signature,
+                 settlement.from_pubkey)
+    if not ok:
+        logger.warning("Invalid signature for settlement %s",
+                       settlement.id[:8])
+    return ok
+
+
+def encrypt_settlement(settlement, group_password: str,
+                       group_salt: bytes = b"") -> bytes:
+    box  = _group_box(group_password, group_salt)
+    data = json.dumps(settlement.to_dict(), ensure_ascii=False).encode()
+    return bytes(box.encrypt(data))
+
+
+def decrypt_settlement(blob: bytes, group_password: str,
+                       group_salt: bytes = b"") -> Optional["RecordedSettlement"]:
+    from models import RecordedSettlement
+    try:
+        box  = _group_box(group_password, group_salt)
+        data = box.decrypt(blob)
+        return RecordedSettlement.from_dict(json.loads(data))
+    except Exception as e:
+        logger.warning("Settlement decryption failed: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Comment
+# ---------------------------------------------------------------------------
+
+def sign_comment(comment, key: nacl.signing.SigningKey) -> str:
+    return _sign(comment.canonical_bytes(), key)
+
+
+def verify_comment(comment) -> bool:
+    if not comment.signature:
+        return False
+    ok = _verify(comment.canonical_bytes(), comment.signature,
+                 comment.author_pubkey)
+    if not ok:
+        logger.warning("Invalid signature for comment %s", comment.id[:8])
+    return ok
+
+
+def encrypt_comment(comment, group_password: str,
+                    group_salt: bytes = b"") -> bytes:
+    box  = _group_box(group_password, group_salt)
+    data = json.dumps(comment.to_dict(), ensure_ascii=False).encode()
+    return bytes(box.encrypt(data))
+
+
+def decrypt_comment(blob: bytes, group_password: str,
+                    group_salt: bytes = b"") -> Optional["Comment"]:
+    from models import Comment
+    try:
+        box  = _group_box(group_password, group_salt)
+        data = box.decrypt(blob)
+        return Comment.from_dict(json.loads(data))
+    except Exception as e:
+        logger.warning("Comment decryption failed: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# File attachment encryption (used in network.py for P2P transfer)
+# ---------------------------------------------------------------------------
+
+def encrypt_chunk(data: bytes, group_password: str,
+                  group_salt: bytes) -> bytes:
+    """Encrypts a single file chunk. Returns nonce+ciphertext+MAC."""
+    return bytes(_group_box(group_password, group_salt).encrypt(data))
+
+
+def decrypt_chunk(blob: bytes, group_password: str,
+                  group_salt: bytes) -> bytes:
+    """Decrypts a file chunk. Raises nacl.exceptions.CryptoError on failure."""
+    return bytes(_group_box(group_password, group_salt).decrypt(blob))
+
+
+# ---------------------------------------------------------------------------
+# SHA-256 — file attachments
 # ---------------------------------------------------------------------------
 
 def hash_file(file_path: str) -> str:
@@ -218,103 +304,3 @@ def mime_type_from_path(path: str) -> str:
         ".gif":  "image/gif",
         ".webp": "image/webp",
     }.get(ext, "application/octet-stream")
-
-
-# ---------------------------------------------------------------------------
-# Settlement-Krypto (analog zu Expense)
-# ---------------------------------------------------------------------------
-
-def sign_settlement(settlement, private_key: ed25519.Ed25519PrivateKey) -> str:
-    """Signs canonical_bytes() of the settlement."""
-    return private_key.sign(settlement.canonical_bytes()).hex()
-
-
-def verify_settlement(settlement) -> bool:
-    """Verifies the Ed25519 signature of the settlement."""
-    if not settlement.signature:
-        return False
-    try:
-        pub_key = ed25519.Ed25519PublicKey.from_public_bytes(
-            bytes.fromhex(settlement.from_pubkey)
-        )
-        pub_key.verify(bytes.fromhex(settlement.signature), settlement.canonical_bytes())
-        return True
-    except Exception as e:
-        logger.warning("Invalid signature for settlement %s: %s", settlement.id[:8], e)
-        return False
-
-
-def encrypt_settlement(settlement, group_password: str,
-                       group_salt: bytes = b"") -> bytes:
-    """Serializes and encrypts a settlement."""
-    key   = _group_aes_key(group_password, group_salt)
-    aes   = AESGCM(key)
-    data  = json.dumps(settlement.to_dict(), ensure_ascii=False).encode()
-    nonce = os.urandom(12)
-    return nonce + aes.encrypt(nonce, data, None)
-
-
-def decrypt_settlement(blob: bytes, group_password: str,
-                       group_salt: bytes = b"") -> Optional["RecordedSettlement"]:
-    """Decrypts a settlement blob. Returns None on error."""
-    from models import RecordedSettlement
-    if len(blob) < 28:
-        return None
-    try:
-        key  = _group_aes_key(group_password, group_salt)
-        aes  = AESGCM(key)
-        data = aes.decrypt(blob[:12], blob[12:], None)
-        return RecordedSettlement.from_dict(json.loads(data))
-    except Exception as e:
-        logger.warning("Settlement decryption failed: %s", e)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Comment crypto (same pattern as Expense)
-# ---------------------------------------------------------------------------
-
-def sign_comment(comment, private_key: ed25519.Ed25519PrivateKey) -> str:
-    """Signs canonical_bytes() of the comment."""
-    return private_key.sign(comment.canonical_bytes()).hex()
-
-
-def verify_comment(comment) -> bool:
-    """Verifies the Ed25519 signature of the comment."""
-    if not comment.signature:
-        return False
-    try:
-        pub_key = ed25519.Ed25519PublicKey.from_public_bytes(
-            bytes.fromhex(comment.author_pubkey)
-        )
-        pub_key.verify(bytes.fromhex(comment.signature), comment.canonical_bytes())
-        return True
-    except Exception as e:
-        logger.warning("Invalid signature for comment %s: %s", comment.id[:8], e)
-        return False
-
-
-def encrypt_comment(comment, group_password: str,
-                    group_salt: bytes = b"") -> bytes:
-    """Serializes and encrypts a comment blob."""
-    key   = _group_aes_key(group_password, group_salt)
-    aes   = AESGCM(key)
-    data  = json.dumps(comment.to_dict(), ensure_ascii=False).encode()
-    nonce = os.urandom(12)
-    return nonce + aes.encrypt(nonce, data, None)
-
-
-def decrypt_comment(blob: bytes, group_password: str,
-                    group_salt: bytes = b"") -> Optional["Comment"]:
-    """Decrypts a comment blob. Returns None on error."""
-    from models import Comment
-    if len(blob) < 28:
-        return None
-    try:
-        key  = _group_aes_key(group_password, group_salt)
-        aes  = AESGCM(key)
-        data = aes.decrypt(blob[:12], blob[12:], None)
-        return Comment.from_dict(json.loads(data))
-    except Exception as e:
-        logger.warning("Comment decryption failed: %s", e)
-        return None

@@ -394,6 +394,87 @@ def get_comment_count(db: sqlite3.Connection, expense_id: str) -> int:
 # History sync helpers (used by network.py)
 # ---------------------------------------------------------------------------
 
+def get_lamport_map(db_path: str = None) -> dict:
+    """
+    Returns {"expenses": {id: lamport}, "settlements": {id: lamport},
+             "comments": {id: lamport}} for all local records.
+    Used for delta history sync: client sends this map, server sends
+    only records that are newer or unknown to the client.
+    """
+    import sqlite3 as _sq
+    path = db_path or DB_PATH
+    conn = _sq.connect(path, check_same_thread=False)
+    conn.row_factory = _sq.Row
+    result = {"expenses": {}, "settlements": {}, "comments": {}}
+    try:
+        for row in conn.execute(
+                "SELECT id, lamport_clock FROM expenses").fetchall():
+            result["expenses"][row["id"]] = row["lamport_clock"]
+        for row in conn.execute(
+                "SELECT id, lamport_clock FROM settlements").fetchall():
+            result["settlements"][row["id"]] = row["lamport_clock"]
+        try:
+            for row in conn.execute(
+                    "SELECT id, lamport_clock FROM comments").fetchall():
+                result["comments"][row["id"]] = row["lamport_clock"]
+        except Exception:
+            pass  # comments table may not exist yet
+    finally:
+        conn.close()
+    return result
+
+
+def load_expense_blobs_unknown_to(known: dict[str, int]) -> list[tuple[str, bytes]]:
+    """Returns expense blobs the caller does not have or has older versions of."""
+    import sqlite3 as _sq
+    conn = _sq.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = _sq.Row
+    rows = conn.execute(
+        "SELECT id, blob, lamport_clock FROM expenses").fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        rid, lc = row["id"], row["lamport_clock"]
+        if rid not in known or known[rid] < lc:
+            result.append((rid, bytes(row["blob"])))
+    return result
+
+
+def load_settlement_blobs_unknown_to(known: dict[str, int]) -> list[tuple[str, bytes]]:
+    """Returns settlement blobs the caller does not have or has older versions of."""
+    import sqlite3 as _sq
+    conn = _sq.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = _sq.Row
+    rows = conn.execute(
+        "SELECT id, blob, lamport_clock FROM settlements").fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        rid, lc = row["id"], row["lamport_clock"]
+        if rid not in known or known[rid] < lc:
+            result.append((rid, bytes(row["blob"])))
+    return result
+
+
+def load_comment_blobs_unknown_to(known: dict[str, int]) -> list[tuple[str, str, bytes]]:
+    """Returns (id, expense_id, blob) for comments the caller does not have."""
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = _sq.Row
+        rows = conn.execute(
+            "SELECT id, expense_id, blob, lamport_clock FROM comments").fetchall()
+        conn.close()
+        result = []
+        for row in rows:
+            rid, lc = row["id"], row["lamport_clock"]
+            if rid not in known or known[rid] < lc:
+                result.append((rid, row["expense_id"], bytes(row["blob"])))
+        return result
+    except Exception:
+        return []
+
+
 def load_all_expense_blobs_since(since_ts: int) -> list[tuple[str, bytes]]:
     """All expense blobs with timestamp > since_ts (incl. deleted for tombstone sync)."""
     import sqlite3 as _sq
