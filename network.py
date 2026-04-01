@@ -14,7 +14,7 @@ Thread-Kommunikation:
 Drei Protokolle:
   /splitp2p/sync/1.0     – GossipSub (Expenses, Settlements, Members)
   /splitp2p/files/1.0    - direct stream: SHA-256 request -> binary data
-  /splitp2p/history/1.0  – Direkt-Stream: Delta-Sync beim Peer-Connect
+  /splitp2p/history/1.0  - direct stream: delta sync on peer connect
 
 NAT-Traversal-Stack (alle optional, graceful fallback):
   AutoNAT           – Erkennt ob wir hinter NAT/Firewall sind
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 SYNC_PROTOCOL    = "/splitp2p/sync/1.0"
 FILE_PROTOCOL    = "/splitp2p/files/1.0"
-HISTORY_PROTOCOL = "/splitp2p/history/2.0"  # v2: delta sync via lamport maps
+HISTORY_PROTOCOL = "/splitp2p/history/2.0"  # delta sync via lamport maps
 CHUNK_SIZE       = 16_384
 P2P_PORT         = 8000    # fixed port so mDNS advertises the correct address
                            # change if 4001 is already in use on your system
@@ -129,10 +129,9 @@ class NetworkCallbacks:
 # ---------------------------------------------------------------------------
 
 class P2PNetwork:
-    def __init__(self, group_password: str, callbacks: NetworkCallbacks):
-        self.callbacks     = callbacks
-        self._group_pw     = group_password   # for blob verification
-        self._group_salt    = b""              # wird von gui.py gesetzt
+    def __init__(self, group_key: bytes, topic_id: str,
+                 callbacks: NetworkCallbacks):
+        self._group_key    = group_key         # 32-byte SecretBox key
         self._own_pubkey    = ""               # set via set_own_identity()
         self._own_name      = ""               # set via set_own_identity()
         self._own_joined_at = 0
@@ -140,6 +139,7 @@ class P2PNetwork:
         self._pubsub    = None
         self._sub       = None
         self._running   = False
+        self.topic_id      = f"splitp2p-{topic_id}"
         self._peers: set[str] = set()
         # Thread-safe queue: tkinter -> trio
         # Items: dicts mit "cmd" key:
@@ -227,7 +227,8 @@ class P2PNetwork:
             async with self._host.run(listen_addrs=listen_addrs):
                 peer_id = self._host.get_id().to_string()
                 self._running = True
-                logger.info("P2P node started, peer ID: %s", peer_id)
+                logger.info("P2P node started: %s  topic: %s",
+                            peer_id, self.topic_id)
 
                 self._sub = await self._pubsub.subscribe(self.topic_id)
                 self._host.set_stream_handler(FILE_PROTOCOL,    self._file_serve_handler)
@@ -251,16 +252,6 @@ class P2PNetwork:
             logger.error("P2P run error: %s", e)
             self.callbacks.on_status_changed(False, "")
 
-    def set_group_salt(self, salt: bytes) -> None:
-        """
-        Sets the group salt and derives the topic ID from it.
-        Must be called BEFORE start_in_thread().
-        Topic ID = SHA256(salt)[:16] - random, not guessable from password.
-        """
-        from crypto import group_topic_id
-        self._group_salt = salt
-        self.topic_id    = "splitp2p-" + group_topic_id(salt)
-        logger.info("Topic ID set: %s", self.topic_id)
 
     def set_own_identity(self, pubkey: str, display_name: str,
                          joined_at: int) -> None:
@@ -520,11 +511,11 @@ class P2PNetwork:
             from crypto import (decrypt_expense, verify_expense,
                                 decrypt_settlement, verify_settlement)
         except ImportError:
-            return True  # crypto not available -> no filter
+            return True
 
         try:
             if ptype == "expense":
-                obj = decrypt_expense(blob, self._group_pw, self._group_salt)
+                obj = decrypt_expense(blob, self._group_key)
                 if obj is None:
                     logger.warning("Expense blob not decryptable "
                                    "(falscher Key oder korrupt)")
@@ -550,7 +541,7 @@ class P2PNetwork:
                     _c.close()
                     if _r:
                         existing = decrypt_expense(
-                            bytes(_r[0]), self._group_pw, self._group_salt)
+                            bytes(_r[0]), self._group_key)
                         if existing and existing.payer_pubkey != obj.payer_pubkey:
                             logger.warning(
                                 "Expense %s: payer_pubkey changed - rejected",
@@ -563,7 +554,7 @@ class P2PNetwork:
                 return True
 
             elif ptype == "settlement":
-                obj = decrypt_settlement(blob, self._group_pw, self._group_salt)
+                obj = decrypt_settlement(blob, self._group_key)
                 if obj is None:
                     logger.warning("Settlement blob not decryptable")
                     return False
@@ -576,7 +567,7 @@ class P2PNetwork:
 
             elif ptype == "comment":
                 from crypto import decrypt_comment, verify_comment
-                obj = decrypt_comment(blob, self._group_pw, self._group_salt)
+                obj = decrypt_comment(blob, self._group_key)
                 if obj is None:
                     logger.warning("Comment blob not decryptable")
                     return False
@@ -748,7 +739,7 @@ class P2PNetwork:
             path = os.path.join(STORAGE_DIR, sha256)
             if not os.path.exists(path):
                 return
-            if not self._group_pw:
+            if not self._group_key:
                 logger.warning("File serve: no group key, sending unencrypted")
                 # Fallback: send raw (no group context)
                 with open(path, "rb") as f:
@@ -757,7 +748,7 @@ class P2PNetwork:
             else:
                 from crypto import _group_aes_key
                 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-                key = _group_aes_key(self._group_pw, self._group_salt)
+                key = _group_aes_key(self._group_key)
                 aes = AESGCM(key)
                 with open(path, "rb") as f:
                     while chunk := f.read(CHUNK_SIZE):
@@ -871,11 +862,11 @@ class P2PNetwork:
 
                 # Set up decryption if we have a group key
                 aes = None
-                if self._group_pw:
+                if self._group_key:
                     from crypto import _group_aes_key
                     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
                     aes = AESGCM(_group_aes_key(
-                        self._group_pw, self._group_salt))
+                        self._group_key))
 
                 with open(temp, "wb") as f:
                     buf = b""
@@ -897,21 +888,13 @@ class P2PNetwork:
                             if frame_len == 0:  # EOF sentinel
                                 buf = b""
                                 break
-                            if aes is None:
-                                # Unencrypted fallback: treat data as raw
-                                chunk = buf[:frame_len] if frame_len > 0 else b""
-                                buf = buf[frame_len:]
-                                f.write(chunk)
-                                h.update(chunk)
-                            else:
-                                if len(buf) < 4 + frame_len:
-                                    break  # wait for more data
-                                frame = buf[4:4 + frame_len]
-                                buf   = buf[4 + frame_len:]
-                                nonce, ct = frame[:12], frame[12:]
-                                plain = aes.decrypt(nonce, ct, None)
-                                f.write(plain)
-                                h.update(plain)
+                            if len(buf) < 4 + frame_len:
+                                break  # wait for more data
+                            frame = buf[4:4 + frame_len]
+                            buf   = buf[4 + frame_len:]
+                            plain = _dc(frame, self._group_key)
+                            f.write(plain)
+                            h.update(plain)
 
                 if h.hexdigest() == sha256:
                     os.rename(temp, os.path.join(STORAGE_DIR, sha256))

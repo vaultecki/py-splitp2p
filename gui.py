@@ -176,12 +176,12 @@ class NewGroupDialog(tk.Toplevel):
         name = self._name_var.get().strip()
         if not name:
             mb.showerror("Error", "Group name is required.", parent=self); return
-        import os as _os, secrets as _sec
-        # Generate a strong random password (20 url-safe chars)
-        pw = _sec.token_urlsafe(15)  # 20 chars, 120 bits entropy
-        self.result = {"group_name": name, "password": pw,
-                       "group_currency": self._currency.get(),
-                       "group_salt": _os.urandom(16)}
+        from crypto import generate_group_key as _gk
+        import uuid as _uuid
+        self.result = {"group_name":     name,
+                       "group_key":      _gk(),
+                       "group_topic":    str(_uuid.uuid4()),
+                       "group_currency": self._currency.get()}
         self.destroy()
 
 
@@ -243,9 +243,9 @@ class GroupSelectDialog(tk.Toplevel):
         dlg = NewGroupDialog(self)
         if not dlg.result: return
         self.groups[dlg.result["group_name"]] = {
-            "password": dlg.result["password"],
+            "key":      dlg.result["group_key"].hex(),
+            "topic":    dlg.result.get("group_topic", ""),
             "currency": dlg.result["group_currency"],
-            "salt": dlg.result["group_salt"].hex(),
         }
         self.result = dlg.result
         self._show_qr_after = True  # signal App to show QR
@@ -256,16 +256,15 @@ class GroupSelectDialog(tk.Toplevel):
         if not dlg.result: return
         r = dlg.result
         self.groups[r["name"]] = {
-            "password": r["pw"],
+            "key":      r["key"],
+            "topic":    r["topic"],
             "currency": r["currency"],
-            "salt":     r["salt"],
         }
-        import os as _os
         self.result = {
             "group_name":     r["name"],
-            "password":       r["pw"],
+            "group_key":      bytes.fromhex(r["key"]),
+            "group_topic":    r["topic"],
             "group_currency": r["currency"],
-            "group_salt":     bytes.fromhex(r["salt"]),
         }
         self.destroy()
 
@@ -283,9 +282,11 @@ class GroupSelectDialog(tk.Toplevel):
         if not name or name not in self.groups:
             mb.showerror("Error", "No group selected.", parent=self); return
         info = self.groups[name]
-        self.result = {"group_name": name, "password": info["password"],
-                       "group_currency": info.get("currency", "EUR"),
-                       "group_salt": None}  # wird in _do_group_select aus Config geladen
+        key_hex = info.get("key", "")
+        self.result = {"group_name":     name,
+                       "group_key":      bytes.fromhex(key_hex) if key_hex else b"",
+                       "group_topic":    info.get("topic", ""),
+                       "group_currency": info.get("currency", "EUR")}
         self.destroy()
 
 
@@ -358,15 +359,15 @@ def _open_ext(path: str) -> None:
 import base64 as _b64
 
 
-def _encode_group_qr(name: str, password: str, salt: bytes,
+def _encode_group_qr(name: str, group_key: bytes, topic: str,
                      currency: str) -> str:
-    """Encodes group info as a compact base64 JSON string."""
+    """Encodes group info as a compact base64 JSON string (v3)."""
     import json as _json
     payload = _json.dumps({
-        "v":        1,
+        "v":        3,
         "name":     name,
-        "pw":       password,
-        "salt":     salt.hex(),
+        "key":      group_key.hex(),
+        "topic":    topic,
         "currency": currency,
     }, separators=(",", ":"), ensure_ascii=False)
     return _b64.b64encode(payload.encode()).decode()
@@ -401,14 +402,14 @@ class QRShowDialog(tk.Toplevel):
     Zweiter Fallback: ASCII-QR im Textfeld.
     """
 
-    def __init__(self, parent, group_name: str, password: str,
-                 salt: bytes, currency: str):
+    def __init__(self, parent, group_name: str, group_key: bytes,
+                 topic: str, currency: str):
         super().__init__(parent)
         self.title(f"QR-Code – {group_name}")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
-        self._payload = _encode_group_qr(group_name, password, salt, currency)
+        self._payload = _encode_group_qr(group_name, group_key, topic, currency)
         self._build(group_name, currency)
         self.wait_window()
 
@@ -1688,7 +1689,7 @@ class ActivityLogWindow(tk.Toplevel):
 
     def __init__(self, parent, expenses, settlements, members,
                  runtime_log, group_currency, own_pubkey,
-                 db=None, group_pw="", group_salt=b""):
+                 db=None, group_key=b""):
         super().__init__(parent)
         self.title("Activity Log")
         self.configure(bg=BG)
@@ -1699,8 +1700,7 @@ class ActivityLogWindow(tk.Toplevel):
         self._currency    = group_currency
         self._pk_to_name  = {m.pubkey: m.display_name for m in members}
         self._db          = db
-        self._group_pw    = group_pw
-        self._group_salt  = group_salt
+        self._group_key   = group_key
 
         self._build_chrome()
         self._populate(expenses, settlements, runtime_log)
@@ -1815,7 +1815,7 @@ class ActivityLogWindow(tk.Toplevel):
                 exp_map = {e.id: e.description for e in expenses}
                 for exp_id, exp_desc in exp_map.items():
                     for _, blob in load_comments_for_expense(self._db, exp_id):
-                        c = decrypt_comment(blob, self._group_pw, self._group_salt)
+                        c = decrypt_comment(blob, self._group_key)
                         if c is None:
                             continue
                         is_own = c.author_pubkey == self._own_pubkey
@@ -1987,8 +1987,8 @@ class App(tk.Tk):
         self._own_pubkey     = ""
         self._own_name       = ""
         self._group_name     = ""
-        self._group_pw       = ""
-        self._group_salt     = b""  # 16 random bytes, stored with group config
+        self._group_key      = b""  # 32-byte SecretBox key
+        self._group_topic    = ""   # UUID, P2P routing topic
         self._group_currency = "EUR"
         self._lamport_clock  = 0    # lokale Lamport-Uhr
         # Ledger-Cache: Salden + Settlements nur neu berechnen wenn noetig
@@ -2264,18 +2264,20 @@ class App(tk.Tk):
             self._do_group_select(); return
 
         self._group_name     = dlg.result["group_name"]
-        self._group_pw       = dlg.result["password"]
         self._group_currency = dlg.result["group_currency"]
-        # Salt: aus result (neue Gruppe) oder aus bestehender Config
-        raw_salt = dlg.result.get("group_salt")
-        if raw_salt is None:
-            # Bestehende Gruppe: salt aus Config laden
-            salt_hex = groups.get(self._group_name, {}).get("salt", "")
-            raw_salt = bytes.fromhex(salt_hex) if salt_hex else b""
-        self._group_salt = raw_salt
-        groups[self._group_name] = {"password": self._group_pw,
-                                    "currency": self._group_currency,
-                                    "salt": self._group_salt.hex()}
+        # Load group key from result or config
+        raw_key = dlg.result.get("group_key")
+        if not raw_key:
+            key_hex = groups.get(self._group_name, {}).get("key", "")
+            raw_key = bytes.fromhex(key_hex) if key_hex else b""
+        self._group_key   = raw_key
+        self._group_topic = dlg.result.get("group_topic", "")
+        if not self._group_topic:
+            import uuid as _uuid
+            self._group_topic = str(_uuid.uuid4())
+        groups[self._group_name] = {"key":      self._group_key.hex(),
+                                    "topic":    self._group_topic,
+                                    "currency": self._group_currency}
         self._cfg.set("groups", groups)
         self._cfg.set("last_group", self._group_name)
         self._cfg.save()
@@ -2303,8 +2305,8 @@ class App(tk.Tk):
 
     def _switch_group(self):
         self.withdraw()
-        self._group_pw   = ""
-        self._group_salt = b""
+        self._group_key   = b""
+        self._group_topic = ""
         self._rates      = {}
         if self._network:
             self._network.stop()
@@ -2315,18 +2317,12 @@ class App(tk.Tk):
 
     def _show_qr(self):
         """QR-Code der aktuellen Gruppe anzeigen."""
-        if not self._group_name or not self._group_pw:
+        if not self._group_name or not self._group_key:
             mb.showinfo("No group",
                         "Please open a group first.", parent=self)
             return
-        if not self._group_salt:
-            mb.showwarning(
-                "No salt",
-                "This group has no salt (old group).\n"
-                "Please create a new group.", parent=self)
-            return
-        QRShowDialog(self, self._group_name, self._group_pw,
-                     self._group_salt, self._group_currency)
+        QRShowDialog(self, self._group_name, self._group_key,
+                     self._group_topic, self._group_currency)
 
     def _import_qr(self):
         """QR-Code einer anderen Gruppe einlesen."""
@@ -2336,9 +2332,9 @@ class App(tk.Tk):
         # Gruppe in Config speichern
         groups = self._cfg.get("groups", {})
         groups[r["name"]] = {
-            "password": r["pw"],
+            "key":      r["key"],
+            "topic":    r["topic"],
             "currency": r["currency"],
-            "salt":     r["salt"],
         }
         self._cfg.set("groups", groups)
         self._cfg.save()
@@ -2597,20 +2593,20 @@ class App(tk.Tk):
         from storage import load_all_expense_blobs
         from crypto import decrypt_expense
         return [exp for _, blob in load_all_expense_blobs(self._db)
-                if (exp := decrypt_expense(blob, self._group_pw, self._group_salt)) is not None]
+                if (exp := decrypt_expense(blob, self._group_key)) is not None]
 
     def _load_settlements(self):
         from storage import load_all_settlement_blobs
         from crypto import decrypt_settlement
         return [s for _, blob in load_all_settlement_blobs(self._db)
-                if (s := decrypt_settlement(blob, self._group_pw, self._group_salt)) is not None]
+                if (s := decrypt_settlement(blob, self._group_key)) is not None]
 
     def _save_expense(self, expense):
         from crypto import sign_expense, encrypt_expense
         from storage import save_expense_blob
         expense.lamport_clock = self._next_lamport()
         expense.signature = sign_expense(expense, self._own_key)
-        blob = encrypt_expense(expense, self._group_pw, self._group_salt)
+        blob = encrypt_expense(expense, self._group_key)
         save_expense_blob(self._db, expense.id, blob, expense.timestamp,
                           lamport_clock=expense.lamport_clock,
                           author_pubkey=expense.payer_pubkey)
@@ -2622,7 +2618,7 @@ class App(tk.Tk):
         from storage import save_settlement_blob
         settlement.lamport_clock = self._next_lamport()
         settlement.signature = sign_settlement(settlement, self._own_key)
-        blob = encrypt_settlement(settlement, self._group_pw, self._group_salt)
+        blob = encrypt_settlement(settlement, self._group_key)
         save_settlement_blob(self._db, settlement.id, blob, settlement.timestamp,
                              lamport_clock=settlement.lamport_clock,
                              author_pubkey=settlement.from_pubkey)
@@ -2685,7 +2681,7 @@ class App(tk.Tk):
         expense.is_deleted = True
         expense.timestamp  = int(time.time())
         expense.signature  = sign_expense(expense, self._own_key)
-        blob = encrypt_expense(expense, self._group_pw, self._group_salt)
+        blob = encrypt_expense(expense, self._group_key)
         soft_delete_expense_blob(self._db, expense.id, blob, expense.timestamp)
         if self._network:
             self._network.publish_expense(expense.id, blob, expense.timestamp)
@@ -2723,7 +2719,7 @@ class App(tk.Tk):
         settlement.is_deleted = True
         settlement.timestamp  = int(time.time())
         settlement.signature  = sign_settlement(settlement, self._own_key)
-        blob = encrypt_settlement(settlement, self._group_pw, self._group_salt)
+        blob = encrypt_settlement(settlement, self._group_key)
         soft_delete_settlement_blob(self._db, settlement.id, blob, settlement.timestamp)
         if self._network:
             self._network.publish_settlement(settlement.id, blob, settlement.timestamp)
@@ -3017,8 +3013,8 @@ class App(tk.Tk):
                 self2._app.after(0, lambda: self2._app._append_log(
                     "sync", f"History-Sync: +{n_exp} Ausgaben, +{n_set} Zahlungen"))
 
-        self._network = P2PNetwork(self._group_pw, _CB(self))
-        self._network.set_group_salt(self._group_salt)
+        self._network = P2PNetwork(self._group_key, self._group_topic,
+                                   _CB(self))
         self._network.set_own_identity(
             self._own_pubkey, self._own_name, int(time.time()))
         self._network.start_in_thread()
@@ -3060,7 +3056,7 @@ class App(tk.Tk):
     def _on_net_expense(self, expense_id, blob):
         from storage import save_expense_blob, delete_attachment_if_unreferenced
         from crypto import decrypt_expense
-        exp = decrypt_expense(blob, self._group_pw, self._group_salt)
+        exp = decrypt_expense(blob, self._group_key)
         if exp is None: return
         self._next_lamport(exp.lamport_clock)
         if not save_expense_blob(
@@ -3089,7 +3085,7 @@ class App(tk.Tk):
     def _on_net_settlement(self, settlement_id, blob):
         from storage import save_settlement_blob
         from crypto import decrypt_settlement
-        s = decrypt_settlement(blob, self._group_pw, self._group_salt)
+        s = decrypt_settlement(blob, self._group_key)
         if s is None: return
         self._next_lamport(s.lamport_clock)
         if save_settlement_blob(
@@ -3147,8 +3143,7 @@ class App(tk.Tk):
             group_currency=self._group_currency,
             own_pubkey=self._own_pubkey,
             db=self._db,
-            group_pw=self._group_pw,
-            group_salt=self._group_salt,
+            group_key=self._group_key,
         )
 
     # ── P2P History-Sync ─────────────────────────────────────────────
