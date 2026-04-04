@@ -2,143 +2,107 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Ledger Module – Debt and balance calculation.
+Ledger — debt and balance calculation.
 
-compute_balances()   accounts for expenses AND already recorded payments.
-compute_settlements() minimizes remaining open amounts (greedy).
+Works on model objects (Expense, Settlement) — not DB rows directly.
+All amounts are integers in the smallest currency unit (e.g. cents for EUR).
+
+compute_balances():   net balance per pubkey
+compute_settlements(): minimize number of transfers (greedy)
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Sequence, Optional
-
-from models import Expense, RecordedSettlement, Member
+from typing import Sequence
 
 
 # ---------------------------------------------------------------------------
-# Cache-Key
+# Cache key
 # ---------------------------------------------------------------------------
 
-def ledger_cache_key(
-        expenses: Sequence[Expense],
-        recorded: Sequence[RecordedSettlement] = (),
-) -> int:
-    """
-    Schneller Cache key for the current ledger state.
-
-    Computes a hash over (id, timestamp, is_deleted) of all entries.
-    Changes if and only if the content changes.
-    Uses Python's built-in hash() - sufficient for in-process caching.
-    """
-    return hash(tuple(
-        (e.id, e.timestamp, e.is_deleted, e.lamport_clock) for e in expenses
-    ) + tuple(
-        (s.id, s.timestamp, s.is_deleted, s.lamport_clock) for s in recorded
-    ))
+def ledger_cache_key(expenses: Sequence, settlements: Sequence = ()) -> int:
+    """Hash of current state. Recompute ledger only when this changes."""
+    return hash(
+        tuple((e.id, e.timestamp, e.is_deleted, e.lamport_clock)
+              for e in expenses)
+        + tuple((s.id, s.timestamp, s.is_deleted, s.lamport_clock)
+                for s in settlements))
 
 
 # ---------------------------------------------------------------------------
-# Saldo-Berechnung
+# Balance calculation
 # ---------------------------------------------------------------------------
 
-def compute_balances(
-    expenses: Sequence[Expense],
-    recorded: Sequence[RecordedSettlement] = (),
-) -> dict[str, float]:
+def compute_balances(expenses: Sequence,
+                     settlements: Sequence = ()) -> dict[str, int]:
     """
-    Net balance per person.
+    Net balance per pubkey in minor currency units.
+      Positive = owed money (paid more than share)
+      Negative = owes money (paid less than share)
 
-    Positive balance -> person is owed money.
-    Negative balance -> person owes money.
-
-    Recorded settlements reduce open amounts:
-      from_pubkey paid -> debt decreases -> balance increases
-      to_pubkey received -> credit decreases -> balance decreases
+    expenses:    Expense model objects with .splits (list of Split)
+    settlements: Settlement model objects (recorded payments)
     """
-    balances: dict[str, int] = {}  # all values in minor currency units
+    bal: dict[str, int] = {}
 
     for exp in expenses:
         if exp.is_deleted:
             continue
-        balances[exp.payer_pubkey] = balances.get(exp.payer_pubkey, 0.0) + exp.amount
-        for split in exp.splits:
-            balances[split.pubkey] = balances.get(split.pubkey, 0.0) - split.amount
+        # Payer gets credit for the full amount
+        bal[exp.author_pubkey] = bal.get(exp.author_pubkey, 0) + exp.amount
+        # Each debtor owes their share
+        for s in exp.splits:
+            bal[s.debtor_key] = bal.get(s.debtor_key, 0) - s.amount
 
-    for rs in recorded:
-        if rs.is_deleted:
+    for s in settlements:
+        if s.is_deleted:
             continue
-        balances[rs.from_pubkey] = balances.get(rs.from_pubkey, 0.0) + rs.amount
-        balances[rs.to_pubkey]   = balances.get(rs.to_pubkey,   0.0) - rs.amount
+        # from_key paid → their debt decreases
+        bal[s.from_key] = bal.get(s.from_key, 0) + s.amount
+        # to_key received → their credit decreases
+        bal[s.to_key] = bal.get(s.to_key, 0) - s.amount
 
-    return {pk: bal for pk, bal in balances.items()}
+    return bal
 
 
-def balance_summary(
-    own_pubkey: str,
-    balances: dict[str, float],
-) -> dict:
-    """
-    Summary for the sidebar:
-      owes_total    - sum of amounts I owe others
-      owed_total    - sum of amounts others owe me
-      net           - net balance (positive = owed to me, negative = I owe)
-    """
-    net = balances.get(own_pubkey, 0.0)
+def balance_summary(own_pubkey: str, balances: dict[str, int]) -> dict:
+    """Summary for sidebar display."""
+    net  = balances.get(own_pubkey, 0)
     owes = sum(-b for pk, b in balances.items() if pk != own_pubkey and b < 0)
     owed = sum( b for pk, b in balances.items() if pk != own_pubkey and b > 0)
     return {"net": net, "owes_total": owes, "owed_total": owed}
 
 
 # ---------------------------------------------------------------------------
-# Schulden minimieren (berechnete Vorschläge)
+# Suggested settlements (display only, not persisted)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class Settlement:
-    """Suggested settlement transfer (not persistent - display only)."""
-    debtor:   str    # pubkey - who should pay
-    creditor: str    # pubkey - who should receive
-    amount:   int    # minor currency units
-
-    def __repr__(self) -> str:
-        return f"{self.debtor[:8]}…→{self.creditor[:8]}… {self.amount:.2f}"
+class SuggestedSettlement:
+    """A suggested debt payment. Not stored — computed on the fly."""
+    debtor:   str   # pubkey — should pay
+    creditor: str   # pubkey — should receive
+    amount:   int   # minor currency units
 
 
-def compute_settlements(balances: dict[str, float]) -> list[Settlement]:
-    """Greedy: minimizes number of required transfers."""
-    debtors  = sorted([(pk, -b) for pk, b in balances.items() if b < 0],
-                      key=lambda x: -x[1])
+def compute_settlements(balances: dict[str, int]) -> list[SuggestedSettlement]:
+    """Greedy: minimize number of transfers to settle all debts."""
+    debtors   = sorted([(pk, -b) for pk, b in balances.items() if b < 0],
+                       key=lambda x: -x[1])
     creditors = sorted([(pk,  b) for pk, b in balances.items() if b > 0],
                        key=lambda x: -x[1])
-    result: list[Settlement] = []
+    result: list[SuggestedSettlement] = []
     d_i = c_i = 0
     while d_i < len(debtors) and c_i < len(creditors):
         d_pk, d_amt = debtors[d_i]
         c_pk, c_amt = creditors[c_i]
         pay = min(d_amt, c_amt)
         if pay > 0:
-            result.append(Settlement(debtor=d_pk, creditor=c_pk, amount=pay))
-        d_amt = round(d_amt - pay, 2)
-        c_amt = round(c_amt - pay, 2)
+            result.append(SuggestedSettlement(d_pk, c_pk, pay))
+        d_amt -= pay
+        c_amt -= pay
         if d_amt == 0: d_i += 1
         else: debtors[d_i] = (d_pk, d_amt)
         if c_amt == 0: c_i += 1
         else: creditors[c_i] = (c_pk, c_amt)
     return result
-
-
-def get_settlements(
-    expenses: Sequence[Expense],
-    recorded: Sequence[RecordedSettlement] = (),
-) -> list[Settlement]:
-    return compute_settlements(compute_balances(expenses, recorded))
-
-
-def describe_settlements(
-    settlements: list[Settlement],
-    members: list[Member],
-) -> list[str]:
-    pk_to_name = {m.pubkey: m.display_name for m in members}
-    def name(pk): return pk_to_name.get(pk, pk[:8] + "…")
-    return [f"{name(s.debtor)} schuldet {name(s.creditor)} {s.amount:.2f}"
-            for s in settlements]
