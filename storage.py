@@ -2,230 +2,476 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Storage Module – SQLite-Persistenz.
+storage.py — SQLite persistence layer
 
-Expenses and settlements stored as encrypted blobs.
-File attachments as binary data under storage/<sha256>.
-CRDT: Lamport clock + deterministic tiebreaking.
-Merge priority: lamport_clock > timestamp > author_pubkey (lexicographic).
+Schema design:
+  - Fully normalized, no blobs. Encryption lives above this layer.
+  - group_id on every synced table — supports multiple groups per device.
+  - Lamport clocks + author_pubkey on every synced record for CRDT merge.
+  - Local-only fields (is_stored, group_info, comments_system) are never
+    included in canonical_bytes() / signatures / network sync.
+  - group_info: written once from QR code, never synced, never modified.
+
+Sync status:
+  group_info       local-only
+  users            synced
+  expenses         synced
+  split            synced (child of expense, no is_deleted)
+  settlements      synced
+  comments_user    synced
+  comments_system  local-only
+  attachments      synced (is_stored is local-only)
+  exchange_rates   local-only
 """
 
-import json
 import logging
 import os
 import sqlite3
-from typing import Optional
+import time
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
-STORAGE_DIR = "storage"
-DB_PATH     = "splitp2p.db"
+DB_PATH     = ""
+STORAGE_DIR = ""
 
-
-def configure_paths(db_path: str, storage_dir: str) -> None:
-    global DB_PATH, STORAGE_DIR
-    DB_PATH     = db_path
-    STORAGE_DIR = storage_dir
-    logger.info("Paths set: db=%s  storage=%s", db_path, storage_dir)
-
-
-from currency import RATES_DDL as _RATES_DDL
 
 _DDL = """
+CREATE TABLE IF NOT EXISTS group_info (
+    group_id  TEXT PRIMARY KEY,
+    name      TEXT NOT NULL,
+    currency  TEXT NOT NULL,
+    group_key TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    public_key    TEXT PRIMARY KEY,
+    name          TEXT    NOT NULL,
+    timestamp     INTEGER NOT NULL DEFAULT 0,
+    group_id      TEXT    NOT NULL,
+    lamport_clock INTEGER NOT NULL DEFAULT 0,
+    signature     TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS expenses (
-    id            TEXT PRIMARY KEY,
-    blob          BLOB NOT NULL,
+    id                TEXT    PRIMARY KEY,
+    group_id          TEXT    NOT NULL,
+    timestamp         INTEGER NOT NULL,
+    expense_date      INTEGER NOT NULL DEFAULT 0,
+    lamport_clock     INTEGER NOT NULL DEFAULT 0,
+    author_pubkey     TEXT    NOT NULL,
+    is_deleted        INTEGER NOT NULL DEFAULT 0,
+    amount            INTEGER NOT NULL DEFAULT 0,
+    description       TEXT,
+    category          TEXT,
+    original_amount   INTEGER,
+    original_currency TEXT,
+    signature         TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS split (
+    id            TEXT    PRIMARY KEY,
+    belongs_to    TEXT    NOT NULL,
     timestamp     INTEGER NOT NULL,
     lamport_clock INTEGER NOT NULL DEFAULT 0,
-    author_pubkey TEXT    NOT NULL DEFAULT '',
-    is_deleted    INTEGER NOT NULL DEFAULT 0
+    author_pubkey TEXT    NOT NULL,
+    payer_key     TEXT    NOT NULL,
+    debtor_key    TEXT    NOT NULL,
+    amount        INTEGER NOT NULL DEFAULT 0,
+    signature     TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS settlements (
-    id            TEXT PRIMARY KEY,
-    blob          BLOB NOT NULL,
+    id            TEXT    PRIMARY KEY,
+    group_id      TEXT    NOT NULL,
     timestamp     INTEGER NOT NULL,
     lamport_clock INTEGER NOT NULL DEFAULT 0,
-    author_pubkey TEXT    NOT NULL DEFAULT '',
-    is_deleted    INTEGER NOT NULL DEFAULT 0
+    author_pubkey TEXT    NOT NULL,
+    is_deleted    INTEGER NOT NULL DEFAULT 0,
+    from_key      TEXT    NOT NULL,
+    to_key        TEXT    NOT NULL,
+    amount        INTEGER NOT NULL DEFAULT 0,
+    signature     TEXT    NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS members (
-    pubkey      TEXT PRIMARY KEY,
-    data_json   TEXT NOT NULL,
-    updated_at  INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS comments_user (
+    id            TEXT    PRIMARY KEY,
+    belongs_to    TEXT    NOT NULL,
+    timestamp     INTEGER NOT NULL,
+    lamport_clock INTEGER NOT NULL DEFAULT 0,
+    author_pubkey TEXT    NOT NULL,
+    is_deleted    INTEGER NOT NULL DEFAULT 0,
+    comment       TEXT,
+    signature     TEXT    NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_expenses_ts    ON expenses(timestamp);
-CREATE INDEX IF NOT EXISTS idx_expenses_lc    ON expenses(lamport_clock);
-CREATE INDEX IF NOT EXISTS idx_settlements_ts ON settlements(timestamp);
-CREATE INDEX IF NOT EXISTS idx_settlements_lc ON settlements(lamport_clock);
-""" + "\n" + _RATES_DDL
+CREATE TABLE IF NOT EXISTS comments_system (
+    id         TEXT    PRIMARY KEY,
+    belongs_to TEXT    NOT NULL,
+    timestamp  INTEGER NOT NULL,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    comment    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    id            TEXT    PRIMARY KEY,
+    belongs_to    TEXT    NOT NULL,
+    timestamp     INTEGER NOT NULL,
+    lamport_clock INTEGER NOT NULL DEFAULT 0,
+    author_pubkey TEXT    NOT NULL,
+    sha256        TEXT    NOT NULL,
+    filename      TEXT    NOT NULL,
+    mime          TEXT,
+    size          INTEGER,
+    is_stored     INTEGER NOT NULL DEFAULT 0,
+    signature     TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS exchange_rates (
+    base        TEXT    NOT NULL,
+    target      TEXT    NOT NULL,
+    rate        REAL    NOT NULL,
+    fetched_at  INTEGER NOT NULL,
+    PRIMARY KEY (base, target)
+);
+
+CREATE INDEX IF NOT EXISTS idx_expenses_group    ON expenses(group_id, is_deleted, expense_date);
+CREATE INDEX IF NOT EXISTS idx_expenses_lamport  ON expenses(group_id, lamport_clock);
+CREATE INDEX IF NOT EXISTS idx_split_belongs     ON split(belongs_to);
+CREATE INDEX IF NOT EXISTS idx_settlements_group ON settlements(group_id, is_deleted);
+CREATE INDEX IF NOT EXISTS idx_comments_belongs  ON comments_user(belongs_to, is_deleted);
+CREATE INDEX IF NOT EXISTS idx_attach_belongs    ON attachments(belongs_to);
+CREATE INDEX IF NOT EXISTS idx_attach_sha256     ON attachments(sha256);
+CREATE INDEX IF NOT EXISTS idx_users_group       ON users(group_id);
+"""
+
+
+def set_paths(db_path: str, storage_dir: str) -> None:
+    global DB_PATH, STORAGE_DIR
+    DB_PATH     = db_path
+    STORAGE_DIR = storage_dir
+    os.makedirs(storage_dir, exist_ok=True)
+    logger.info("Paths set: db=%s  storage=%s", db_path, storage_dir)
 
 
 def init_db(db_path: str = None) -> sqlite3.Connection:
-    if db_path is None:
-        db_path = DB_PATH
-    os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-    os.makedirs(STORAGE_DIR, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    path = db_path or DB_PATH
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    for stmt in _DDL.strip().split(";"):
-        s = stmt.strip()
-        if s:
-            conn.execute(s)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(_DDL)
     conn.commit()
-    logger.info("DB ready: %s", db_path)
+    logger.info("DB ready: %s", path)
     return conn
 
 
+@contextmanager
+def _conn() -> Iterator[sqlite3.Connection]:
+    c = sqlite3.connect(DB_PATH, check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield c
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
 # ---------------------------------------------------------------------------
-# Generisches CRDT-Blob-Store (Expenses + Settlements teilen die Logik)
+# group_info — local-only
 # ---------------------------------------------------------------------------
 
-def _wins_over(new_lc: int, new_ts: int, new_pk: str,
-               old_lc: int, old_ts: int, old_pk: str) -> bool:
-    """
-    Merge decision: does the new version win over the stored one?
-
-    Priority:
-      1. Lamport clock  - clock-drift-independent, causally correct
-      2. Wall clock     - tiebreaker when Lamport clocks are equal
-                         (possible with simultaneous creation)
-      3. author_pubkey  - deterministic final tiebreaker;
-                         lexicographically larger key wins.
-                         Both sides reach the same result without
-                         communication -> no split-brain possible.
-    """
-    if new_lc != old_lc:
-        return new_lc > old_lc
-    if new_ts != old_ts:
-        return new_ts > old_ts
-    return new_pk > old_pk  # lexikografisch
-
-
-def _save_blob(db: sqlite3.Connection, table: str, obj_id: str,
-               blob: bytes, timestamp: int, is_deleted: bool = False,
-               lamport_clock: int = 0, author_pubkey: str = "") -> bool:
-    row = db.execute(
-        f"SELECT timestamp, lamport_clock, author_pubkey FROM {table} WHERE id = ?",
-        (obj_id,)
-    ).fetchone()
-    if row and not _wins_over(
-        lamport_clock, timestamp, author_pubkey,
-        row["lamport_clock"], row["timestamp"], row["author_pubkey"],
-    ):
-        logger.debug("CRDT: rejected (Lamport %d <= %d, ts %d <= %d)",
-                     lamport_clock, row["lamport_clock"],
-                     timestamp, row["timestamp"])
-        return False
+def save_group_info(db: sqlite3.Connection, group_id: str, name: str,
+                    currency: str, group_key: bytes) -> None:
     db.execute(
-        f"INSERT OR REPLACE INTO {table}"
-        f" (id, blob, timestamp, lamport_clock, author_pubkey, is_deleted)"
-        f" VALUES (?,?,?,?,?,?)",
-        (obj_id, blob, timestamp, lamport_clock, author_pubkey, int(is_deleted)),
-    )
+        "INSERT OR IGNORE INTO group_info(group_id,name,currency,group_key)"
+        " VALUES(?,?,?,?)",
+        (group_id, name, currency, group_key.hex()))
+    db.commit()
+
+
+def get_group_info(db: sqlite3.Connection,
+                   group_id: str) -> Optional[sqlite3.Row]:
+    return db.execute(
+        "SELECT * FROM group_info WHERE group_id=?", (group_id,)).fetchone()
+
+
+def get_group_key(db: sqlite3.Connection, group_id: str) -> Optional[bytes]:
+    row = db.execute(
+        "SELECT group_key FROM group_info WHERE group_id=?",
+        (group_id,)).fetchone()
+    return bytes.fromhex(row["group_key"]) if row else None
+
+
+# ---------------------------------------------------------------------------
+# users
+# ---------------------------------------------------------------------------
+
+def save_user(db: sqlite3.Connection, *, group_id: str, public_key: str,
+              name: str, timestamp: int, lamport_clock: int,
+              signature: str) -> bool:
+    ex = db.execute(
+        "SELECT lamport_clock,timestamp FROM users WHERE public_key=?",
+        (public_key,)).fetchone()
+    if ex and not _wins(lamport_clock, timestamp,
+                        ex["lamport_clock"], ex["timestamp"]):
+        return False
+    if ex:
+        db.execute(
+            "UPDATE users SET name=?,timestamp=?,lamport_clock=?,"
+            "signature=? WHERE public_key=?",
+            (name, timestamp, lamport_clock, signature, public_key))
+    else:
+        db.execute(
+            "INSERT INTO users(public_key,name,timestamp,group_id,"
+            "lamport_clock,signature) VALUES(?,?,?,?,?,?)",
+            (public_key, name, timestamp, group_id, lamport_clock, signature))
     db.commit()
     return True
 
 
-def _load_blobs(db: sqlite3.Connection, table: str) -> list[tuple[str, bytes]]:
-    rows = db.execute(
-        f"SELECT id, blob FROM {table} WHERE is_deleted = 0 ORDER BY timestamp ASC"
-    ).fetchall()
-    return [(r["id"], bytes(r["blob"])) for r in rows]
+def get_user(db: sqlite3.Connection,
+             public_key: str) -> Optional[sqlite3.Row]:
+    return db.execute(
+        "SELECT * FROM users WHERE public_key=?", (public_key,)).fetchone()
 
 
-def _soft_delete_blob(db: sqlite3.Connection, table: str, obj_id: str,
-                      new_blob: bytes, new_timestamp: int,
-                      lamport_clock: int = 0, author_pubkey: str = "") -> None:
-    db.execute(
-        f"INSERT OR REPLACE INTO {table}"
-        f" (id, blob, timestamp, lamport_clock, author_pubkey, is_deleted)"
-        f" VALUES (?,?,?,?,?,1)",
-        (obj_id, new_blob, new_timestamp, lamport_clock, author_pubkey),
-    )
+def get_all_users(db: sqlite3.Connection,
+                  group_id: str) -> list[sqlite3.Row]:
+    return db.execute(
+        "SELECT * FROM users WHERE group_id=? ORDER BY name",
+        (group_id,)).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# expenses
+# ---------------------------------------------------------------------------
+
+def save_expense(db: sqlite3.Connection, *, id: str, group_id: str,
+                 timestamp: int, expense_date: int, lamport_clock: int,
+                 author_pubkey: str, is_deleted: int = 0, amount: int,
+                 description: str = None, category: str = None,
+                 original_amount: int = None, original_currency: str = None,
+                 signature: str) -> bool:
+    ex = db.execute(
+        "SELECT lamport_clock,timestamp,author_pubkey FROM expenses"
+        " WHERE id=?", (id,)).fetchone()
+    if ex and not _wins(lamport_clock, timestamp,
+                        ex["lamport_clock"], ex["timestamp"],
+                        author_pubkey, ex["author_pubkey"]):
+        return False
+    if ex:
+        db.execute(
+            "UPDATE expenses SET timestamp=?,expense_date=?,lamport_clock=?,"
+            "author_pubkey=?,is_deleted=?,amount=?,description=?,category=?,"
+            "original_amount=?,original_currency=?,signature=? WHERE id=?",
+            (timestamp, expense_date, lamport_clock, author_pubkey, is_deleted,
+             amount, description, category, original_amount, original_currency,
+             signature, id))
+    else:
+        db.execute(
+            "INSERT INTO expenses(id,group_id,timestamp,expense_date,"
+            "lamport_clock,author_pubkey,is_deleted,amount,description,"
+            "category,original_amount,original_currency,signature)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (id, group_id, timestamp, expense_date, lamport_clock,
+             author_pubkey, is_deleted, amount, description, category,
+             original_amount, original_currency, signature))
+    db.commit()
+    return True
+
+
+def get_expenses(db: sqlite3.Connection, group_id: str,
+                 include_deleted: bool = False) -> list[sqlite3.Row]:
+    q = ("SELECT * FROM expenses WHERE group_id=?"
+         + ("" if include_deleted else " AND is_deleted=0")
+         + " ORDER BY expense_date DESC, timestamp DESC")
+    return db.execute(q, (group_id,)).fetchall()
+
+
+def get_expense(db: sqlite3.Connection, id: str) -> Optional[sqlite3.Row]:
+    return db.execute(
+        "SELECT * FROM expenses WHERE id=?", (id,)).fetchone()
+
+
+# ---------------------------------------------------------------------------
+# split
+# ---------------------------------------------------------------------------
+
+def save_splits(db: sqlite3.Connection, expense_id: str,
+                splits: list[dict]) -> None:
+    """Replace all splits for an expense atomically."""
+    db.execute("DELETE FROM split WHERE belongs_to=?", (expense_id,))
+    for s in splits:
+        db.execute(
+            "INSERT INTO split(id,belongs_to,timestamp,lamport_clock,"
+            "author_pubkey,payer_key,debtor_key,amount,signature)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (s["id"], expense_id, s["timestamp"], s["lamport_clock"],
+             s["author_pubkey"], s["payer_key"], s["debtor_key"],
+             s["amount"], s["signature"]))
     db.commit()
 
 
-# ---------------------------------------------------------------------------
-# Ausgaben
-# ---------------------------------------------------------------------------
-
-def save_expense_blob(db, eid, blob, ts, is_deleted=False,
-                      lamport_clock=0, author_pubkey=""):
-    return _save_blob(db, "expenses", eid, blob, ts, is_deleted,
-                     lamport_clock, author_pubkey)
-
-def load_all_expense_blobs(db):
-    return _load_blobs(db, "expenses")
-
-def soft_delete_expense_blob(db, eid, blob, ts,
-                             lamport_clock=0, author_pubkey=""):
-    _soft_delete_blob(db, "expenses", eid, blob, ts, lamport_clock, author_pubkey)
+def get_splits(db: sqlite3.Connection,
+               expense_id: str) -> list[sqlite3.Row]:
+    return db.execute(
+        "SELECT * FROM split WHERE belongs_to=?", (expense_id,)).fetchall()
 
 
 # ---------------------------------------------------------------------------
-# Ausgleichszahlungen
+# settlements
 # ---------------------------------------------------------------------------
 
-def save_settlement_blob(db, sid, blob, ts, is_deleted=False,
-                         lamport_clock=0, author_pubkey=""):
-    return _save_blob(db, "settlements", sid, blob, ts, is_deleted,
-                     lamport_clock, author_pubkey)
+def save_settlement(db: sqlite3.Connection, *, id: str, group_id: str,
+                    timestamp: int, lamport_clock: int, author_pubkey: str,
+                    is_deleted: int = 0, from_key: str, to_key: str,
+                    amount: int, signature: str) -> bool:
+    ex = db.execute(
+        "SELECT lamport_clock,timestamp,author_pubkey FROM settlements"
+        " WHERE id=?", (id,)).fetchone()
+    if ex and not _wins(lamport_clock, timestamp,
+                        ex["lamport_clock"], ex["timestamp"],
+                        author_pubkey, ex["author_pubkey"]):
+        return False
+    if ex:
+        db.execute(
+            "UPDATE settlements SET timestamp=?,lamport_clock=?,"
+            "author_pubkey=?,is_deleted=?,from_key=?,to_key=?,"
+            "amount=?,signature=? WHERE id=?",
+            (timestamp, lamport_clock, author_pubkey, is_deleted,
+             from_key, to_key, amount, signature, id))
+    else:
+        db.execute(
+            "INSERT INTO settlements(id,group_id,timestamp,lamport_clock,"
+            "author_pubkey,is_deleted,from_key,to_key,amount,signature)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (id, group_id, timestamp, lamport_clock, author_pubkey,
+             is_deleted, from_key, to_key, amount, signature))
+    db.commit()
+    return True
 
-def load_all_settlement_blobs(db):
-    return _load_blobs(db, "settlements")
 
-def soft_delete_settlement_blob(db, sid, blob, ts,
-                                lamport_clock=0, author_pubkey=""):
-    _soft_delete_blob(db, "settlements", sid, blob, ts, lamport_clock, author_pubkey)
+def get_settlements(db: sqlite3.Connection, group_id: str,
+                    include_deleted: bool = False) -> list[sqlite3.Row]:
+    q = ("SELECT * FROM settlements WHERE group_id=?"
+         + ("" if include_deleted else " AND is_deleted=0")
+         + " ORDER BY timestamp DESC")
+    return db.execute(q, (group_id,)).fetchall()
 
 
 # ---------------------------------------------------------------------------
-# Mitglieder
+# comments
 # ---------------------------------------------------------------------------
 
-def save_member(db: sqlite3.Connection, member) -> None:
+def save_comment_user(db: sqlite3.Connection, *, id: str, belongs_to: str,
+                      timestamp: int, lamport_clock: int, author_pubkey: str,
+                      is_deleted: int = 0, comment: str,
+                      signature: str) -> bool:
+    ex = db.execute(
+        "SELECT lamport_clock,timestamp FROM comments_user"
+        " WHERE id=?", (id,)).fetchone()
+    if ex and not _wins(lamport_clock, timestamp,
+                        ex["lamport_clock"], ex["timestamp"]):
+        return False
+    if ex:
+        db.execute(
+            "UPDATE comments_user SET timestamp=?,lamport_clock=?,"
+            "author_pubkey=?,is_deleted=?,comment=?,signature=? WHERE id=?",
+            (timestamp, lamport_clock, author_pubkey, is_deleted,
+             comment, signature, id))
+    else:
+        db.execute(
+            "INSERT INTO comments_user(id,belongs_to,timestamp,lamport_clock,"
+            "author_pubkey,is_deleted,comment,signature) VALUES(?,?,?,?,?,?,?,?)",
+            (id, belongs_to, timestamp, lamport_clock, author_pubkey,
+             is_deleted, comment, signature))
+    db.commit()
+    return True
+
+
+def save_comment_system(db: sqlite3.Connection, *, id: str, belongs_to: str,
+                        timestamp: int, comment: str) -> None:
+    """Local-only. No signature, no sync."""
     db.execute(
-        "INSERT OR REPLACE INTO members (pubkey, data_json, updated_at) VALUES (?,?,?)",
-        (member.pubkey, json.dumps(member.to_dict()), member.joined_at),
-    )
+        "INSERT OR IGNORE INTO comments_system"
+        "(id,belongs_to,timestamp,comment) VALUES(?,?,?,?)",
+        (id, belongs_to, timestamp, comment))
     db.commit()
 
 
-def load_all_members(db: sqlite3.Connection):
-    from models import Member
-    rows = db.execute("SELECT data_json FROM members").fetchall()
-    result = []
-    for row in rows:
-        try:
-            result.append(Member.from_dict(json.loads(row["data_json"])))
-        except Exception as e:
-            logger.warning("Member parse error: %s", e)
+def get_comments(db: sqlite3.Connection,
+                 belongs_to: str) -> list[sqlite3.Row]:
+    """User + system comments merged and sorted by timestamp."""
+    user = db.execute(
+        "SELECT id,belongs_to,timestamp,author_pubkey,comment,'user' as kind"
+        " FROM comments_user WHERE belongs_to=? AND is_deleted=0",
+        (belongs_to,)).fetchall()
+    sys_ = db.execute(
+        "SELECT id,belongs_to,timestamp,'' as author_pubkey,comment,'system' as kind"
+        " FROM comments_system WHERE belongs_to=? AND is_deleted=0",
+        (belongs_to,)).fetchall()
+    result = list(user) + list(sys_)
+    result.sort(key=lambda r: r["timestamp"])
     return result
 
 
-def get_member(db: sqlite3.Connection, pubkey: str):
-    from models import Member
-    row = db.execute(
-        "SELECT data_json FROM members WHERE pubkey = ?", (pubkey,)
-    ).fetchone()
-    return Member.from_dict(json.loads(row["data_json"])) if row else None
-
-
 # ---------------------------------------------------------------------------
-# File attachments
+# attachments
 # ---------------------------------------------------------------------------
 
-def save_attachment(data: bytes, sha256: str) -> str:
-    os.makedirs(STORAGE_DIR, exist_ok=True)
-    path = os.path.join(STORAGE_DIR, sha256)
-    if not os.path.exists(path):
-        with open(path, "wb") as f:
-            f.write(data)
-        logger.info("Attachment saved: %s (%d B)", sha256[:12], len(data))
-    return path
+def save_attachment(db: sqlite3.Connection, *, id: str, belongs_to: str,
+                    timestamp: int, lamport_clock: int, author_pubkey: str,
+                    sha256: str, filename: str, mime: str = None,
+                    size: int = None, signature: str) -> bool:
+    ex = db.execute(
+        "SELECT lamport_clock,timestamp FROM attachments"
+        " WHERE id=?", (id,)).fetchone()
+    if ex and not _wins(lamport_clock, timestamp,
+                        ex["lamport_clock"], ex["timestamp"]):
+        return False
+    if ex:
+        db.execute(
+            "UPDATE attachments SET timestamp=?,lamport_clock=?,"
+            "author_pubkey=?,sha256=?,filename=?,mime=?,size=?,"
+            "signature=? WHERE id=?",
+            (timestamp, lamport_clock, author_pubkey, sha256, filename,
+             mime, size, signature, id))
+    else:
+        db.execute(
+            "INSERT INTO attachments(id,belongs_to,timestamp,lamport_clock,"
+            "author_pubkey,sha256,filename,mime,size,is_stored,signature)"
+            " VALUES(?,?,?,?,?,?,?,?,?,0,?)",
+            (id, belongs_to, timestamp, lamport_clock, author_pubkey,
+             sha256, filename, mime, size, signature))
+    db.commit()
+    return True
+
+
+def mark_attachment_stored(db: sqlite3.Connection, sha256: str) -> None:
+    """Mark file as present on disk. Local state only — never synced."""
+    db.execute(
+        "UPDATE attachments SET is_stored=1 WHERE sha256=?", (sha256,))
+    db.commit()
+
+
+def get_attachments(db: sqlite3.Connection,
+                    expense_id: str) -> list[sqlite3.Row]:
+    return db.execute(
+        "SELECT * FROM attachments WHERE belongs_to=?",
+        (expense_id,)).fetchall()
+
+
+def attachment_exists(sha256: str) -> bool:
+    if not STORAGE_DIR:
+        return False
+    return os.path.exists(os.path.join(STORAGE_DIR, sha256))
 
 
 def attachment_path(sha256: str) -> Optional[str]:
@@ -233,303 +479,105 @@ def attachment_path(sha256: str) -> Optional[str]:
     return path if os.path.exists(path) else None
 
 
-def attachment_exists(sha256: str) -> bool:
-    return os.path.exists(os.path.join(STORAGE_DIR, sha256))
-
-
-def delete_attachment_if_unreferenced(
-        db: sqlite3.Connection, sha256: str) -> bool:
-    """
-    Deletes the attachment file from disk if no active (non-deleted)
-    expense entry references this SHA-256 anymore.
-
-    Why check 'unreferenced'?
-      Two expenses can reference the same file (same receipt added twice).
-      In that case the file is kept.
-      The DB tombstone (is_deleted=1) always stays so other peers
-      receive the deletion via sync.
-
-    Returns True if the file was deleted, False otherwise.
-    """
-    path = os.path.join(STORAGE_DIR, sha256)
-    if not os.path.exists(path):
-        return False  # file already gone
-
-    # Load all blobs and check if any active entry still references this hash.
-    # We check at blob level (without decryption) whether the hex string
-    # appears in the blob - fast heuristic filter.
-    # Only non-deleted entries count.
-    rows = db.execute(
-        "SELECT blob FROM expenses WHERE is_deleted = 0"
-    ).fetchall()
-    sha_bytes = sha256.encode()
-    for row in rows:
-        if sha_bytes in bytes(row["blob"]):
-            logger.debug("Attachment %s still referenced, not deleted",
-                         sha256[:12])
-            return False
-
-    try:
-        os.remove(path)
-        logger.info("Attachment deleted: %s", sha256[:12])
-        return True
-    except OSError as e:
-        logger.warning("Failed to delete attachment %s: %s",
-                       sha256[:12], e)
-        return False
-
-
 # ---------------------------------------------------------------------------
-# Comments
+# exchange_rates
 # ---------------------------------------------------------------------------
 
-_COMMENTS_DDL = """
-CREATE TABLE IF NOT EXISTS comments (
-    id            TEXT PRIMARY KEY,
-    expense_id    TEXT NOT NULL,
-    blob          BLOB NOT NULL,
-    timestamp     INTEGER NOT NULL,
-    lamport_clock INTEGER NOT NULL DEFAULT 0,
-    author_pubkey TEXT    NOT NULL DEFAULT '',
-    is_deleted    INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_comments_exp ON comments(expense_id);
-CREATE INDEX IF NOT EXISTS idx_comments_lc  ON comments(lamport_clock);
-"""
-
-
-def _ensure_comments_table(db: sqlite3.Connection) -> None:
-    """Idempotent: creates comments table if not present (migration helper)."""
-    for stmt in _COMMENTS_DDL.strip().split(";"):
-        s = stmt.strip()
-        if s:
-            db.execute(s)
-    db.commit()
-
-
-def save_comment_blob(db: sqlite3.Connection, comment_id: str,
-                      expense_id: str, blob: bytes,
-                      timestamp: int, is_deleted: bool = False,
-                      lamport_clock: int = 0,
-                      author_pubkey: str = "") -> bool:
-    """CRDT-safe save: same merge rules as expenses."""
-    _ensure_comments_table(db)
-    row = db.execute(
-        "SELECT timestamp, lamport_clock, author_pubkey FROM comments WHERE id = ?",
-        (comment_id,)
-    ).fetchone()
-    if row and not _wins_over(
-        lamport_clock, timestamp, author_pubkey,
-        row["lamport_clock"], row["timestamp"], row["author_pubkey"],
-    ):
-        return False
+def save_rate(db: sqlite3.Connection, base: str, target: str,
+              rate: float) -> None:
     db.execute(
-        "INSERT OR REPLACE INTO comments"
-        " (id, expense_id, blob, timestamp, lamport_clock, author_pubkey, is_deleted)"
-        " VALUES (?,?,?,?,?,?,?)",
-        (comment_id, expense_id, blob, timestamp,
-         lamport_clock, author_pubkey, int(is_deleted)),
-    )
-    db.commit()
-    return True
-
-
-def load_comments_for_expense(db: sqlite3.Connection,
-                               expense_id: str) -> list[tuple[str, bytes]]:
-    """Returns (id, blob) pairs for all non-deleted comments on an expense."""
-    _ensure_comments_table(db)
-    rows = db.execute(
-        "SELECT id, blob FROM comments"
-        " WHERE expense_id = ? AND is_deleted = 0"
-        " ORDER BY lamport_clock ASC, timestamp ASC",
-        (expense_id,)
-    ).fetchall()
-    return [(r["id"], bytes(r["blob"])) for r in rows]
-
-
-def load_all_comment_blobs_since(since_ts: int) -> list[tuple[str, str, bytes]]:
-    """Returns (id, expense_id, blob) for delta history sync."""
-    import sqlite3 as _sq
-    try:
-        conn = _sq.connect(DB_PATH, check_same_thread=False)
-        conn.row_factory = _sq.Row
-        rows = conn.execute(
-            "SELECT id, expense_id, blob FROM comments"
-            " WHERE timestamp > ? ORDER BY timestamp ASC",
-            (since_ts,),
-        ).fetchall()
-        conn.close()
-        return [(r["id"], r["expense_id"], bytes(r["blob"])) for r in rows]
-    except Exception:
-        return []
-
-
-def soft_delete_comment_blob(db: sqlite3.Connection, comment_id: str,
-                              blob: bytes, timestamp: int,
-                              lamport_clock: int = 0,
-                              author_pubkey: str = "") -> None:
-    """Tombstone a comment (keeps id for sync propagation)."""
-    _ensure_comments_table(db)
-    db.execute(
-        "INSERT OR REPLACE INTO comments"
-        " (id, expense_id, blob, timestamp, lamport_clock, author_pubkey, is_deleted)"
-        " VALUES ((SELECT expense_id FROM comments WHERE id=?),?,?,?,?,?,1)",
-        (comment_id, blob, timestamp, lamport_clock, author_pubkey, comment_id),
-    )
+        "INSERT OR REPLACE INTO exchange_rates(base,target,rate,fetched_at)"
+        " VALUES(?,?,?,?)", (base, target, rate, int(time.time())))
     db.commit()
 
 
-def get_comment_count(db: sqlite3.Connection, expense_id: str) -> int:
-    """Fast count of non-deleted comments for an expense (for the badge)."""
-    _ensure_comments_table(db)
+def get_rate(db: sqlite3.Connection, base: str,
+             target: str) -> Optional[float]:
     row = db.execute(
-        "SELECT COUNT(*) as n FROM comments"
-        " WHERE expense_id = ? AND is_deleted = 0",
-        (expense_id,)
-    ).fetchone()
-    return int(row["n"] if row else 0)
+        "SELECT rate FROM exchange_rates WHERE base=? AND target=?",
+        (base, target)).fetchone()
+    return row["rate"] if row else None
 
 
 # ---------------------------------------------------------------------------
-# History sync helpers (used by network.py)
+# Delta sync — used by network.py history protocol
 # ---------------------------------------------------------------------------
 
-def get_lamport_map(db_path: str = None) -> dict:
+def get_lamport_map(db: sqlite3.Connection,
+                    group_id: str = None) -> dict:
     """
-    Returns {"expenses": {id: lamport}, "settlements": {id: lamport},
-             "comments": {id: lamport}} for all local records.
-    Used for delta history sync: client sends this map, server sends
-    only records that are newer or unknown to the client.
+    Returns {expenses:{id:lamport}, settlements:{id:lamport},
+             comments:{id:lamport}, splits:{id:lamport},
+             users:{pubkey:lamport}, attachments:{id:lamport}}
+    Sent to peers so they can compute what we are missing.
     """
-    import sqlite3 as _sq
-    path = db_path or DB_PATH
-    conn = _sq.connect(path, check_same_thread=False)
-    conn.row_factory = _sq.Row
-    result = {"expenses": {}, "settlements": {}, "comments": {}}
-    try:
-        for row in conn.execute(
-                "SELECT id, lamport_clock FROM expenses").fetchall():
-            result["expenses"][row["id"]] = row["lamport_clock"]
-        for row in conn.execute(
-                "SELECT id, lamport_clock FROM settlements").fetchall():
-            result["settlements"][row["id"]] = row["lamport_clock"]
-        try:
-            for row in conn.execute(
-                    "SELECT id, lamport_clock FROM comments").fetchall():
-                result["comments"][row["id"]] = row["lamport_clock"]
-        except Exception:
-            pass  # comments table may not exist yet
-    finally:
-        conn.close()
-    return result
+    def _m(rows) -> dict:
+        return {r[0]: r[1] for r in rows}
+
+    w    = " WHERE group_id=?" if group_id else ""
+    args = (group_id,) if group_id else ()
+    return {
+        "expenses":    _m(db.execute(
+            f"SELECT id,lamport_clock FROM expenses{w}", args).fetchall()),
+        "settlements": _m(db.execute(
+            f"SELECT id,lamport_clock FROM settlements{w}", args).fetchall()),
+        "users":       _m(db.execute(
+            f"SELECT public_key,lamport_clock FROM users{w}", args).fetchall()),
+        "comments":    _m(db.execute(
+            "SELECT id,lamport_clock FROM comments_user").fetchall()),
+        "splits":      _m(db.execute(
+            "SELECT id,lamport_clock FROM split").fetchall()),
+        "attachments": _m(db.execute(
+            "SELECT id,lamport_clock FROM attachments").fetchall()),
+    }
 
 
-def load_expense_blobs_unknown_to(known: dict[str, int]) -> list[tuple[str, bytes]]:
-    """Returns expense blobs the caller does not have or has older versions of."""
-    import sqlite3 as _sq
-    conn = _sq.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = _sq.Row
-    rows = conn.execute(
-        "SELECT id, blob, lamport_clock FROM expenses").fetchall()
-    conn.close()
-    result = []
-    for row in rows:
-        rid, lc = row["id"], row["lamport_clock"]
-        if rid not in known or known[rid] < lc:
-            result.append((rid, bytes(row["blob"])))
-    return result
+def get_records_unknown_to(db: sqlite3.Connection,
+                            known: dict,
+                            group_id: str) -> dict:
+    """Records the remote peer doesn't have or has older versions of."""
+    def _new(rows, table_known: dict, key: str = "id") -> list:
+        return [r for r in rows
+                if r[key] not in table_known
+                or table_known[r[key]] < r["lamport_clock"]]
+
+    w    = " WHERE group_id=?" if group_id else ""
+    args = (group_id,) if group_id else ()
+    return {
+        "expenses":    _new(db.execute(
+            f"SELECT * FROM expenses{w}", args).fetchall(),
+            known.get("expenses", {})),
+        "settlements": _new(db.execute(
+            f"SELECT * FROM settlements{w}", args).fetchall(),
+            known.get("settlements", {})),
+        "users":       _new(db.execute(
+            f"SELECT * FROM users{w}", args).fetchall(),
+            known.get("users", {}), key="public_key"),
+        "comments":    _new(db.execute(
+            "SELECT * FROM comments_user").fetchall(),
+            known.get("comments", {})),
+        "splits":      _new(db.execute(
+            "SELECT * FROM split").fetchall(),
+            known.get("splits", {})),
+        "attachments": _new(db.execute(
+            "SELECT * FROM attachments").fetchall(),
+            known.get("attachments", {})),
+    }
 
 
-def load_settlement_blobs_unknown_to(known: dict[str, int]) -> list[tuple[str, bytes]]:
-    """Returns settlement blobs the caller does not have or has older versions of."""
-    import sqlite3 as _sq
-    conn = _sq.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = _sq.Row
-    rows = conn.execute(
-        "SELECT id, blob, lamport_clock FROM settlements").fetchall()
-    conn.close()
-    result = []
-    for row in rows:
-        rid, lc = row["id"], row["lamport_clock"]
-        if rid not in known or known[rid] < lc:
-            result.append((rid, bytes(row["blob"])))
-    return result
+# ---------------------------------------------------------------------------
+# CRDT merge
+# ---------------------------------------------------------------------------
 
-
-def load_comment_blobs_unknown_to(known: dict[str, int]) -> list[tuple[str, str, bytes]]:
-    """Returns (id, expense_id, blob) for comments the caller does not have."""
-    try:
-        import sqlite3 as _sq
-        conn = _sq.connect(DB_PATH, check_same_thread=False)
-        conn.row_factory = _sq.Row
-        rows = conn.execute(
-            "SELECT id, expense_id, blob, lamport_clock FROM comments").fetchall()
-        conn.close()
-        result = []
-        for row in rows:
-            rid, lc = row["id"], row["lamport_clock"]
-            if rid not in known or known[rid] < lc:
-                result.append((rid, row["expense_id"], bytes(row["blob"])))
-        return result
-    except Exception:
-        return []
-
-
-def load_all_expense_blobs_since(since_ts: int) -> list[tuple[str, bytes]]:
-    """All expense blobs with timestamp > since_ts (incl. deleted for tombstone sync)."""
-    import sqlite3 as _sq
-    conn = _sq.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = _sq.Row
-    rows = conn.execute(
-        "SELECT id, blob FROM expenses WHERE timestamp > ? ORDER BY timestamp ASC",
-        (since_ts,),
-    ).fetchall()
-    conn.close()
-    return [(r["id"], bytes(r["blob"])) for r in rows]
-
-
-def load_all_settlement_blobs_since(since_ts: int) -> list[tuple[str, bytes]]:
-    """All settlement blobs with timestamp > since_ts."""
-    import sqlite3 as _sq
-    conn = _sq.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = _sq.Row
-    rows = conn.execute(
-        "SELECT id, blob FROM settlements WHERE timestamp > ? ORDER BY timestamp ASC",
-        (since_ts,),
-    ).fetchall()
-    conn.close()
-    return [(r["id"], bytes(r["blob"])) for r in rows]
-
-
-def get_max_timestamp() -> int:
-    """Highest known timestamp across expenses and settlements."""
-    import sqlite3 as _sq
-    conn = _sq.connect(DB_PATH, check_same_thread=False)
-    row = conn.execute(
-        "SELECT MAX(ts) as m FROM ("
-        "  SELECT MAX(timestamp) as ts FROM expenses"
-        "  UNION ALL"
-        "  SELECT MAX(timestamp) as ts FROM settlements"
-        ")"
-    ).fetchone()
-    conn.close()
-    return int(row[0] or 0)
-
-
-def get_max_lamport_clock() -> int:
+def _wins(new_lc: int, new_ts: int,
+          old_lc: int, old_ts: int,
+          new_author: str = "", old_author: str = "") -> bool:
     """
-    Highest known Lamport clock value across expenses and settlements.
-    Used to restore the local Lamport clock after a restart so that
-    new entries always have a higher clock than any stored entry.
+    Three-level priority:
+      1. Lamport clock (higher = newer)
+      2. Wall-clock timestamp (tiebreak)
+      3. Author pubkey lexicographic order (deterministic tiebreak)
     """
-    import sqlite3 as _sq
-    conn = _sq.connect(DB_PATH, check_same_thread=False)
-    row = conn.execute(
-        "SELECT MAX(lc) as m FROM ("
-        "  SELECT MAX(lamport_clock) as lc FROM expenses"
-        "  UNION ALL"
-        "  SELECT MAX(lamport_clock) as lc FROM settlements"
-        ")"
-    ).fetchone()
-    conn.close()
-    return int(row[0] or 0)
+    if new_lc != old_lc:   return new_lc > old_lc
+    if new_ts != old_ts:   return new_ts > old_ts
+    return new_author > old_author
