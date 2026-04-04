@@ -3024,23 +3024,24 @@ class App(tk.Tk):
             short = peer_id[:20] + "..." if len(peer_id) > 20 else peer_id
             self._net_dot.configure(fg=GREEN)
             self._net_label.configure(text=f"online  {short}", fg=FG_MUTED)
-            # Announce own member data to the group
-            if self._network:
-                self._network.publish_member(
-                    self._own_pubkey, self._own_name, int(time.time()))
-            # Also save own member locally so we appear in the list
+            # Save own member locally so we appear in the member list
             if self._db:
                 from storage import save_member
                 from models import Member
-                save_member(self._db, Member(
-                    self._own_pubkey, self._own_name))
-            # Re-announce after 3s to catch peers that connected
-            # before GossipSub mesh was established
+                save_member(self._db, Member(self._own_pubkey, self._own_name))
+                self._refresh()
+            # Announce own identity via GossipSub
             if self._network:
-                self.after(3000, lambda: self._network and
+                self._network.publish_member(
+                    self._own_pubkey, self._own_name, int(time.time()))
+                self._append_log("net",
+                    f"Member announced: {self._own_name}")
+            # Re-announce after 3s — mesh may not be ready immediately
+            def _reannounce():
+                if self._network:
                     self._network.publish_member(
-                        self._own_pubkey, self._own_name,
-                        int(time.time())))
+                        self._own_pubkey, self._own_name, int(time.time()))
+            self.after(3000, _reannounce)
         else:
             self._net_dot.configure(fg=FG_DIM)
             self._net_label.configure(
@@ -3066,8 +3067,8 @@ class App(tk.Tk):
         ):
             return
         if exp.is_deleted:
-            # Tombstone empfangen: Anhang loeschen falls unreferenziert.
-            # Tombstone-Eintrag in DB bleibt fuer weitere Sync-Partner erhalten.
+            # Tombstone received: delete attachment if unreferenced.
+            # DB tombstone stays for further sync partners.
             if exp.attachment:
                 deleted = delete_attachment_if_unreferenced(
                     self._db, exp.attachment.sha256)
@@ -3076,7 +3077,7 @@ class App(tk.Tk):
                         'sync',
                         f"Attachment deleted via sync: {exp.attachment.filename}")
         elif exp.attachment:
-            # Neue/aktualisierte Ausgabe: fehlenden Anhang vom Peer anfordern.
+            # New/updated expense: request missing attachment from peer.
             from storage import attachment_exists
             if not attachment_exists(exp.attachment.sha256) and self._network:
                 self._network.request_file(exp.attachment.sha256)
@@ -3100,12 +3101,20 @@ class App(tk.Tk):
         from models import Member
         existing = get_member(self._db, pubkey)
         new_name = data.get("display_name", "?")
-        if not existing or existing.display_name != new_name:
+        is_new = not existing
+        name_changed = existing and existing.display_name != new_name
+        if is_new or name_changed:
             save_member(self._db, Member(
                 pubkey=pubkey,
                 display_name=new_name,
                 joined_at=data.get("joined_at", int(time.time())),
             ))
+            if is_new:
+                self._append_log("recv",
+                    f"Member joined: {new_name} ({pubkey[:12]}...)")
+            else:
+                self._append_log("recv",
+                    f"Member renamed: {existing.display_name} -> {new_name}")
             self._refresh()
 
 

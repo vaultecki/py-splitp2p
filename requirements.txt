@@ -1,26 +1,29 @@
 # SplitP2P – Python Dependencies
-# Install with: pip install -r requirements.txt
+# Install: pip install -r requirements.txt
 
-# ── Kern-Kryptografie & Sicherheit ───────────────────────────────────────
-# Für Ed25519 Signaturen und SecretBox (Salsa20/Poly1305)
-pynacl>=1.5.0
-cryptography>=41.0
+# ── Crypto ───────────────────────────────────────────────────────────────
+pynacl>=1.5             # Ed25519 signing, SecretBox (XSalsa20-Poly1305)
+                        # Wraps libsodium — same API as lazysodium (Android)
 
-# ── P2P-Networking & Async ───────────────────────────────────────────────
-# Trio ist das Fundament für die asynchrone Netzwerk-Logik
-trio>=0.22.0
-# P2P-Protokoll-Stack (GossipSub, mDNS, Streams)
-py-libp2p>=0.2.0
-multiaddr>=0.0.9
+# ── P2P networking ───────────────────────────────────────────────────────
+libp2p>=0.1.5           # GossipSub, mDNS discovery, noise transport
+multiaddr>=0.0.9        # IPFS bootstrap address parsing
 
-# ── GUI & UX (Optional, degradieren bei Fehlen) ──────────────────────────
-# Bildvorschau für Belege
-Pillow>=10.0
-# Diagramme im Charts-Fenster
-matplotlib>=3.7
-# PDF-Export der Abrechnungen
-fpdf2>=2.7
-# QR-Code Generierung (für Invites/Backup)
-qrcode[pil]>=7.4
-# QR-Code Scan via Kamera
-opencv-python>=4.8
+# ── QR code ──────────────────────────────────────────────────────────────
+qrcode[pil]>=7.4        # QR code display (requires Pillow)
+opencv-python>=4.8      # QR code scanning via camera or image file
+                        # Without this: text import only
+
+# ── Image previews ───────────────────────────────────────────────────────
+Pillow>=10.0            # Inline attachment preview (JPG, PNG, GIF, WEBP)
+
+# ── Charts & export ──────────────────────────────────────────────────────
+matplotlib>=3.7         # Balance charts
+fpdf2>=2.7              # PDF export; CSV export works without this
+
+# ── Stdlib (no install needed) ───────────────────────────────────────────
+# tkinter   – GUI          (Debian/Ubuntu: sudo apt install python3-tk)
+# sqlite3   – local DB
+# urllib    – exchange rate fetching
+# threading – P2P background thread
+# uuid      – group topic IDs
