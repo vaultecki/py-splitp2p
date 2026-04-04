@@ -461,6 +461,13 @@ def mark_attachment_stored(db: sqlite3.Connection, sha256: str) -> None:
     db.commit()
 
 
+def mark_attachment_deleted(db: sqlite3.Connection, sha256: str) -> None:
+    """Mark file as present on disk. Local state only — never synced."""
+    db.execute(
+        "UPDATE attachments SET is_stored=2 WHERE sha256=?", (sha256,))
+    db.commit()
+
+
 def get_attachments(db: sqlite3.Connection,
                     expense_id: str) -> list[sqlite3.Row]:
     return db.execute(
