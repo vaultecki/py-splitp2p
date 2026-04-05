@@ -770,12 +770,15 @@ class P2PNetwork:
                     await stream.write(line.encode())
                     sent += 1
 
-            # Users are sent unencrypted (but signed) — different format
+            # Users: plaintext + signed, composite key in id field
             for row in delta.get("users", []):
+                d = dict(row)
                 line = json.dumps({
                     "type":      "user",
-                    "user_data": dict(row),
-                    "signature": row["signature"],
+                    "id":        f"{d['public_key']}:{d['group_id']}",
+                    "timestamp": d["timestamp"],
+                    "user_data": d,
+                    "signature": d["signature"],
                 }) + "\n"
                 await stream.write(line.encode())
                 sent += 1
@@ -950,10 +953,13 @@ class P2PNetwork:
                 to_push.append(pkt)
 
         for row in delta.get("users", []):
+            d = dict(row)
             pkt = json.dumps({
                 "type":      "user",
-                "user_data": dict(row),
-                "signature": row["signature"],
+                "id":        f"{d['public_key']}:{d['group_id']}",
+                "timestamp": d["timestamp"],
+                "user_data": d,
+                "signature": d["signature"],
             }).encode()
             to_push.append(pkt)
 

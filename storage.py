@@ -46,12 +46,13 @@ CREATE TABLE IF NOT EXISTS group_info (
 );
 
 CREATE TABLE IF NOT EXISTS users (
-    public_key    TEXT PRIMARY KEY,
+    public_key    TEXT    NOT NULL,
+    group_id      TEXT    NOT NULL,
     name          TEXT    NOT NULL,
     timestamp     INTEGER NOT NULL DEFAULT 0,
-    group_id      TEXT    NOT NULL,
     lamport_clock INTEGER NOT NULL DEFAULT 0,
-    signature     TEXT    NOT NULL
+    signature     TEXT    NOT NULL,
+    PRIMARY KEY (public_key, group_id)
 );
 
 CREATE TABLE IF NOT EXISTS expenses (
@@ -217,16 +218,18 @@ def save_user(db: sqlite3.Connection, *, group_id: str, public_key: str,
               name: str, timestamp: int, lamport_clock: int,
               signature: str) -> bool:
     ex = db.execute(
-        "SELECT lamport_clock,timestamp FROM users WHERE public_key=?",
-        (public_key,)).fetchone()
+        "SELECT lamport_clock,timestamp FROM users"
+        " WHERE public_key=? AND group_id=?",
+        (public_key, group_id)).fetchone()
     if ex and not _wins(lamport_clock, timestamp,
                         ex["lamport_clock"], ex["timestamp"]):
         return False
     if ex:
         db.execute(
             "UPDATE users SET name=?,timestamp=?,lamport_clock=?,"
-            "signature=? WHERE public_key=?",
-            (name, timestamp, lamport_clock, signature, public_key))
+            "signature=? WHERE public_key=? AND group_id=?",
+            (name, timestamp, lamport_clock, signature,
+             public_key, group_id))
     else:
         db.execute(
             "INSERT INTO users(public_key,name,timestamp,group_id,"
@@ -237,9 +240,12 @@ def save_user(db: sqlite3.Connection, *, group_id: str, public_key: str,
 
 
 def get_user(db: sqlite3.Connection,
-             public_key: str) -> Optional[sqlite3.Row]:
+             public_key: str,
+             group_id: str = "") -> Optional[sqlite3.Row]:
+    """group_id required for composite PK lookup."""
     return db.execute(
-        "SELECT * FROM users WHERE public_key=?", (public_key,)).fetchone()
+        "SELECT * FROM users WHERE public_key=? AND group_id=?",
+        (public_key, group_id)).fetchone()
 
 
 def get_all_users(db: sqlite3.Connection,
@@ -528,8 +534,11 @@ def get_lamport_map(db: sqlite3.Connection,
             f"SELECT id,lamport_clock FROM expenses{w}", args).fetchall()),
         "settlements": _m(db.execute(
             f"SELECT id,lamport_clock FROM settlements{w}", args).fetchall()),
-        "users":       _m(db.execute(
-            f"SELECT public_key,lamport_clock FROM users{w}", args).fetchall()),
+        # Users: composite key encoded as "public_key:group_id"
+        "users":       {f"{r[0]}:{r[1]}": r[2] for r in db.execute(
+            "SELECT public_key,group_id,lamport_clock FROM users"
+            + (" WHERE group_id=?" if group_id else ""),
+            (group_id,) if group_id else ()).fetchall()},
         "comments":    _m(db.execute(
             "SELECT id,lamport_clock FROM comments_user").fetchall()),
         "splits":      _m(db.execute(
@@ -557,9 +566,15 @@ def get_records_unknown_to(db: sqlite3.Connection,
         "settlements": _new(db.execute(
             f"SELECT * FROM settlements{w}", args).fetchall(),
             known.get("settlements", {})),
-        "users":       _new(db.execute(
-            f"SELECT * FROM users{w}", args).fetchall(),
-            known.get("users", {}), key="public_key"),
+        # Users: match against composite "public_key:group_id" key
+        "users":       [r for r in db.execute(
+            "SELECT * FROM users"
+            + (" WHERE group_id=?" if group_id else ""),
+            (group_id,) if group_id else ()).fetchall()
+                        if f"{r['public_key']}:{r['group_id']}"
+                        not in known.get("users", {})
+                        or known["users"]
+                        [f"{r['public_key']}:{r['group_id']}"] < r["lamport_clock"]],
         "comments":    _new(db.execute(
             "SELECT * FROM comments_user").fetchall(),
             known.get("comments", {})),

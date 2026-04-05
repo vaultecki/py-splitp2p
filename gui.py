@@ -2302,7 +2302,7 @@ class App(tk.Tk):
 
         if self._group_id:
             from storage import save_user, get_user
-            me = get_user(self._db, self._own_pubkey)
+            me = get_user(self._db, self._own_pubkey, self._group_id)
             if not me or me["name"] != self._own_name:
                 save_user(self._db, group_id=self._group_id,
                           public_key=self._own_pubkey, name=self._own_name,
@@ -3192,7 +3192,7 @@ class App(tk.Tk):
 
     def _on_net_user(self, user):
         from storage import save_user, get_user
-        existing = get_user(self._db, user.public_key)
+        existing = get_user(self._db, user.public_key, user.group_id)
         is_new   = not existing
         changed  = save_user(self._db, group_id=user.group_id,
                              public_key=user.public_key, name=user.name,
