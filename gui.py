@@ -358,6 +358,13 @@ def _open_ext(path: str) -> None:
 
 import base64 as _b64
 
+def _u(m):
+    """Normalize a user row/object to (pubkey, name)."""
+    if isinstance(m, dict):
+        return m.get("public_key", ""), m.get("name", "?")
+    return getattr(m, "pubkey", getattr(m, "public_key", "")),            getattr(m, "display_name", getattr(m, "name", "?"))
+
+
 
 def _encode_group_qr(name: str, group_key: bytes, topic: str,
                      currency: str) -> str:
@@ -825,13 +832,13 @@ class ExpenseDialog(tk.Toplevel):
         # Bezahlt von
         _lbl(frm, "PAID BY", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
         self._payer_var = tk.StringVar()
-        payer_names = [m.display_name for m in self.members]
+        payer_names = [_u(m)[1] for m in self.members]
         default_payer = next(
-            (m.display_name for m in self.members if m.pubkey == self.own_pubkey),
+            (_u(m)[1] for m in self.members if _u(m)[0] == self.own_pubkey),
             payer_names[0] if payer_names else "")
         if exp:
             default_payer = next(
-                (m.display_name for m in self.members if m.pubkey == exp.payer_pubkey),
+                (_u(m)[1] for m in self.members if _u(m)[0] == exp.author_pubkey),
                 default_payer)
         self._payer_var.set(default_payer)
         _combobox(frm, self._payer_var, payer_names).pack(fill="x", pady=(2, 8))
@@ -857,9 +864,10 @@ class ExpenseDialog(tk.Toplevel):
         self._percent_vars: dict[str, tk.StringVar]  = {}
         self._split_widgets: list = []
         for m in self.members:
-            self._member_vars[m.pubkey]  = tk.BooleanVar(value=True)
-            self._amount_vars[m.pubkey]  = tk.StringVar(value="")
-            self._percent_vars[m.pubkey] = tk.StringVar(value="")
+            _pk, _nm = _u(m)
+            self._member_vars[_pk]  = tk.BooleanVar(value=True)
+            self._amount_vars[_pk]  = tk.StringVar(value="")
+            self._percent_vars[_pk] = tk.StringVar(value="")
         self._update_splits()
 
         # Anhang
@@ -889,19 +897,20 @@ class ExpenseDialog(tk.Toplevel):
             row = tk.Frame(self._split_frame, bg=BG)
             row.pack(fill="x", pady=1)
             self._split_widgets.append(row)
-            tk.Checkbutton(row, text=m.display_name,
-                           variable=self._member_vars[m.pubkey],
+            _pk, _nm = _u(m)
+            tk.Checkbutton(row, text=_nm,
+                           variable=self._member_vars[_pk],
                            bg=BG, fg=FG, selectcolor=BG,
                            activebackground=BG, activeforeground=FG,
                            font=FONT, width=18, anchor="w").pack(side="left")
             if mode == "custom":
-                tk.Entry(row, textvariable=self._amount_vars[m.pubkey],
+                tk.Entry(row, textvariable=self._amount_vars[_pk],
                          font=FONT, bg=PANEL, fg=FG,
                          insertbackground=GREEN, relief="flat", bd=4, width=10).pack(
                     side="left", padx=6)
                 _lbl(row, self.group_currency, fg=FG_DIM, font=FONT_SMALL, bg=BG).pack(side="left")
             elif mode == "percent":
-                e = tk.Entry(row, textvariable=self._percent_vars[m.pubkey],
+                e = tk.Entry(row, textvariable=self._percent_vars[_pk],
                              font=FONT, bg=PANEL, fg=FG,
                              insertbackground=GREEN, relief="flat", bd=4, width=6)
                 e.pack(side="left", padx=6)
@@ -909,7 +918,7 @@ class ExpenseDialog(tk.Toplevel):
                 # Live-Vorschau des absoluten Betrags
                 preview = _lbl(row, "", fg=FG_DIM, font=FONT_SMALL, bg=BG)
                 preview.pack(side="left", padx=(4, 0))
-                def _upd_prev(_, pv=preview, pk=m.pubkey):
+                def _upd_prev(_, pv=preview, pk=_pk):
                     try:
                         pct = float(self._percent_vars[pk].get().replace(",", "."))
                         raw = float(self._amount.get().replace(",", ".") or "0")
@@ -921,7 +930,7 @@ class ExpenseDialog(tk.Toplevel):
                         pv.configure(text=f"= {raw * pct / 100:.2f} {self.group_currency}")
                     except ValueError:
                         pv.configure(text="")
-                self._percent_vars[m.pubkey].trace_add("write", _upd_prev)
+                self._percent_vars[_pk].trace_add("write", _upd_prev)
                 self._amount.trace_add("write", _upd_prev)
 
     def _pick_file(self):
@@ -974,20 +983,20 @@ class ExpenseDialog(tk.Toplevel):
         else:
             amount = raw_amount
 
-        payer = next((m for m in self.members if m.display_name == self._payer_var.get()), None)
+        payer = next((m for m in self.members if _u(m)[1] == self._payer_var.get()), None)
         if not payer:
             mb.showerror("Error", "Zahler nicht gefunden.", parent=self); return
 
-        selected = [m for m in self.members if self._member_vars[m.pubkey].get()]
+        selected = [m for m in self.members if self._member_vars[_u(m)[0]].get()]
         if not selected:
             mb.showerror("Error", "Select at least one member.", parent=self); return
 
         mode = self._split_mode.get()
         if mode == "equal":
-            splits = split_equally(amount, [m.pubkey for m in selected])
+            splits = split_equally(amount, [_u(m)[0] for m in selected])
         elif mode == "percent":
             try:
-                pcts = {m.pubkey: float(self._percent_vars[m.pubkey].get().replace(",", "."))
+                pcts = {_u(m)[0]: float(self._percent_vars[_u(m)[0]].get().replace(",", "."))
                         for m in selected}
                 total_pct = sum(pcts.values())
                 if total_pct <= 0:
@@ -1004,7 +1013,7 @@ class ExpenseDialog(tk.Toplevel):
             splits = split_by_percent(amount, pcts)
         else:
             try:
-                custom = {m.pubkey: float(self._amount_vars[m.pubkey].get().replace(",", "."))
+                custom = {_u(m)[0]: float(self._amount_vars[_u(m)[0]].get().replace(",", "."))
                           for m in selected}
             except ValueError:
                 mb.showerror("Error", "Individual amounts are invalid.", parent=self); return
@@ -1022,7 +1031,7 @@ class ExpenseDialog(tk.Toplevel):
 
         self.result = {
             "description": desc, "amount": amount, "currency": self.group_currency,
-            "payer_pubkey": payer.pubkey, "splits": splits,
+            "author_pubkey": _u(payer)[0],
             "category": self._category.get(),
             "expense_date": self._date_picker.get_date(),
             "attachment": attachment,
@@ -1066,14 +1075,14 @@ class SettlementDialog(tk.Toplevel):
         frm = tk.Frame(self, bg=BG, padx=24, pady=12)
         frm.pack(fill="x")
 
-        member_names = [m.display_name for m in self.members]
+        member_names = [_u(m)[1] for m in self.members]
         default_from = next(
-            (m.display_name for m in self.members
-             if m.pubkey == prefill.get("from_pubkey", self.own_pubkey)),
+            (_u(m)[1] for m in self.members
+             if _u(m)[0] == prefill.get("from_key", self.own_pubkey)),
             member_names[0] if member_names else "")
         default_to = next(
-            (m.display_name for m in self.members
-             if m.pubkey == prefill.get("to_pubkey", "")),
+            (_u(m)[1] for m in self.members
+             if _u(m)[0] == prefill.get("to_key", "")),
             member_names[-1] if len(member_names) > 1 else member_names[0] if member_names else "")
 
         _lbl(frm, "FROM (who paid)", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
@@ -1143,8 +1152,8 @@ class SettlementDialog(tk.Toplevel):
         if frm_name == to_name:
             mb.showerror("Error", "From and To must be different.", parent=self); return
 
-        frm_m = next((m for m in self.members if m.display_name == frm_name), None)
-        to_m  = next((m for m in self.members if m.display_name == to_name),  None)
+        frm_m = next((m for m in self.members if _u(m)[1] == frm_name), None)
+        to_m  = next((m for m in self.members if _u(m)[1] == to_name),  None)
         if not frm_m or not to_m:
             mb.showerror("Error", "Member not found.", parent=self); return
 
@@ -1170,8 +1179,8 @@ class SettlementDialog(tk.Toplevel):
             amount = raw
 
         self.result = {
-            "from_pubkey":       frm_m.pubkey,
-            "to_pubkey":         to_m.pubkey,
+            "from_key": _u(frm_m)[0],
+            "to_key":   _u(to_m)[0],
             "amount":            amount,
             "currency":          self.group_currency,
             "settlement_date":   self._date_picker.get_date(),
@@ -1264,7 +1273,7 @@ class ChartsWindow(tk.Toplevel):
             _lbl(self, "pip install matplotlib", fg=FG_DIM, font=FONT_MONO).pack()
             return
 
-        pk_to_name = {m.pubkey: m.display_name for m in members}
+        pk_to_name = {_u(m)[0]: _u(m)[1] for m in members}
         def name(pk): return pk_to_name.get(pk, pk[:8] + "…")
 
         # Farben passend zum App-Theme
@@ -1379,7 +1388,7 @@ class ChartsWindow(tk.Toplevel):
             all_events.sort(key=lambda x: x[0])
             # Saldo schrittweise berechnen
             running_exp, running_set = [], []
-            pk_series = {m.pubkey: [] for m in members}
+            pk_series = {_u(m)[0]: [] for m in members}
             ts_series = []
             for ts, etype, obj in all_events:
                 if etype == "expense":
@@ -1389,13 +1398,13 @@ class ChartsWindow(tk.Toplevel):
                 bals = compute_balances(running_exp, running_set)
                 ts_series.append(datetime.datetime.fromtimestamp(ts))
                 for m in members:
-                    pk_series[m.pubkey].append(bals.get(m.pubkey, 0.0))
+                    pk_series[_u(m)[0]].append(bals.get(_u(m)[0], 0))
             if ts_series:
                 for i, m in enumerate(members):
-                    vals = pk_series[m.pubkey]
+                    vals = pk_series[_u(m)[0]]
                     col  = COLS[i % len(COLS)]
                     ax4.plot(ts_series, vals, color=col,
-                             linewidth=1.8, label=name(m.pubkey))
+                             linewidth=1.8, label=name(_u(m)[0]))
                     ax4.fill_between(ts_series, vals, alpha=0.08, color=col)
                 ax4.axhline(0, color=DIM_, linewidth=0.8, linestyle="--")
                 ax4.set_ylabel(group_currency, color=DIM_, fontsize=9)
@@ -1447,7 +1456,7 @@ class ExportDialog(tk.Toplevel):
         self.members     = members
         self.currency    = group_currency
         self.group_name  = group_name
-        self.pk_to_name  = {m.pubkey: m.display_name for m in members}
+        self.pk_to_name  = {_u(m)[0]: _u(m)[1] for m in members}
         self._build()
         self.wait_window()
 
@@ -1504,14 +1513,14 @@ class ExportDialog(tk.Toplevel):
                              "Original amount","Original currency"])
                 for e in sorted(self.expenses, key=lambda x: x.display_date()):
                     splits = "; ".join(
-                        f"{self._member_name(s.pubkey)}:{s.amount:.2f}"
+                        f"{self._member_name(s.debtor_key)}:{__import__('models').format_amount(s.amount, self._group_currency)}"
                         for s in e.splits)
                     w.writerow([
                         "Expense",
                         time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
                         e.description, e.category,
                         f"{e.amount:.2f}", e.currency,
-                        self._member_name(e.payer_pubkey), splits,
+                        self._member_name(e.author_pubkey), splits,
                         e.original_amount or "", e.original_currency or "",
                     ])
             if self._incl_set.get():
@@ -1521,7 +1530,7 @@ class ExportDialog(tk.Toplevel):
                     w.writerow([
                         "Payment",
                         time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
-                        self._member_name(s.from_pubkey), self._member_name(s.to_pubkey),
+                        self._member_name(s.from_key), self._member_name(s.to_key),
                         f"{s.amount:.2f}", s.currency, s.note or "",
                     ])
             if self._incl_debt.get():
@@ -1596,7 +1605,7 @@ class ExportDialog(tk.Toplevel):
                     time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
                     e.description, e.category,
                     f"{e.amount:.2f} {e.currency}",
-                    self._member_name(e.payer_pubkey),
+                    self._member_name(e.author_pubkey),
                     f"{pct:.1f}%",
                 )
             total = sum(e.amount for e in self.expenses)
@@ -1610,7 +1619,7 @@ class ExportDialog(tk.Toplevel):
             for s in sorted(self.settlements, key=lambda x: x.display_date()):
                 row(
                     time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
-                    self._member_name(s.from_pubkey), self._member_name(s.to_pubkey),
+                    self._member_name(s.from_key), self._member_name(s.to_key),
                     f"{s.amount:.2f} {s.currency}", s.note or "", "",
                 )
             pdf.ln(4)
@@ -1627,14 +1636,14 @@ class ExportDialog(tk.Toplevel):
                 bold=True, color=(80,80,80))
             for m in self.members:
                 paid   = sum(e.amount for e in self.expenses
-                             if e.payer_pubkey == m.pubkey and not e.is_deleted)
+                             if e.author_pubkey == _u(m)[0] and not e.is_deleted)
                 owes   = sum(s.amount for e in self.expenses
                              if not e.is_deleted
-                             for s in e.splits if s.pubkey == m.pubkey)
-                net    = balances.get(m.pubkey, 0.0)
+                             for s in e.splits if s.debtor_key == _u(m)[0])
+                net    = balances.get(_u(m)[0], 0)
                 pct    = paid / _exp_total * 100
                 sign   = "+" if net >= 0 else ""
-                row(m.display_name,
+                row(_u(m)[1],
                     f"{sign}{net:.2f} {self.currency}",
                     f"{paid:.2f}",
                     f"{owes:.2f}",
@@ -1698,7 +1707,7 @@ class ActivityLogWindow(tk.Toplevel):
 
         self._own_pubkey  = own_pubkey
         self._currency    = group_currency
-        self._pk_to_name  = {m.pubkey: m.display_name for m in members}
+        self._pk_to_name  = {_u(m)[0]: _u(m)[1] for m in members}
         self._db          = db
         self._group_key   = group_key
 
@@ -1785,8 +1794,8 @@ class ActivityLogWindow(tk.Toplevel):
 
         # Reconstruct from expenses
         for e in expenses:
-            who = self._member_name(e.payer_pubkey)
-            is_own = e.payer_pubkey == self._own_pubkey
+            who = self._member_name(e.author_pubkey)
+            is_own = e.author_pubkey == self._own_pubkey
             lvl = "info" if is_own else "recv"
             self._all_entries.append((
                 e.timestamp, lvl,
@@ -1797,12 +1806,12 @@ class ActivityLogWindow(tk.Toplevel):
 
         # Reconstruct from settlements
         for s in settlements:
-            is_own = s.from_pubkey == self._own_pubkey
+            is_own = s.from_key == self._own_pubkey
             lvl = "info" if is_own else "recv"
             self._all_entries.append((
                 s.timestamp, lvl,
-                f"Payment recorded: {self._member_name(s.from_pubkey)} -> "
-                f"{self._member_name(s.to_pubkey)}  {s.amount:.2f} {self._currency}"
+                f"Payment recorded: {self._member_name(s.from_key)} -> "
+                f"{self._member_name(s.to_key)}  {s.amount:.2f} {self._currency}"
                 + ('  "' + s.note + '"' if s.note else ""),
             ))
 
@@ -1989,6 +1998,7 @@ class App(tk.Tk):
         self._group_name     = ""
         self._group_key      = b""  # 32-byte SecretBox key
         self._group_topic    = ""   # UUID, P2P routing topic
+        self._group_id       = ""   # = group_topic, used as PK in group_info
         self._group_currency = "EUR"
         self._lamport_clock  = 0    # lokale Lamport-Uhr
         # Ledger-Cache: Salden + Settlements nur neu berechnen wenn noetig
@@ -2272,6 +2282,7 @@ class App(tk.Tk):
             raw_key = bytes.fromhex(key_hex) if key_hex else b""
         self._group_key   = raw_key
         self._group_topic = dlg.result.get("group_topic", "")
+        self._group_id    = self._group_topic
         if not self._group_topic:
             import uuid as _uuid
             self._group_topic = str(_uuid.uuid4())
@@ -2284,12 +2295,19 @@ class App(tk.Tk):
 
         self._group_badge.configure(text=f"[{self._group_name}  ·  {self._group_currency}]")
         self._identity_label.configure(text=f"{self._own_name}  ·  {self._own_pubkey[:12]}…")
+        if self._db and self._group_id and self._group_key:
+            from storage import save_group_info
+            save_group_info(self._db, self._group_id, self._group_name,
+                            self._group_currency, self._group_key)
 
-        from storage import save_member, get_member
-        from models import Member
-        me = get_member(self._db, self._own_pubkey)
-        if not me or me.display_name != self._own_name:
-            save_member(self._db, Member(self._own_pubkey, self._own_name))
+        if self._group_id:
+            from storage import save_user, get_user
+            me = get_user(self._db, self._own_pubkey)
+            if not me or me["name"] != self._own_name:
+                save_user(self._db, group_id=self._group_id,
+                          public_key=self._own_pubkey, name=self._own_name,
+                          timestamp=int(time.time()), lamport_clock=0,
+                          signature="")
 
         self.deiconify()
         self._load_rates_async()
@@ -2307,6 +2325,7 @@ class App(tk.Tk):
         self.withdraw()
         self._group_key   = b""
         self._group_topic = ""
+        self._group_id    = ""
         self._rates      = {}
         if self._network:
             self._network.stop()
@@ -2500,9 +2519,12 @@ class App(tk.Tk):
                 mb.showerror("Error", "Name must not be empty.", parent=dlg); return
             self._own_name = n
             self._cfg.set("display_name", n); self._cfg.save()
-            from storage import save_member
-            from models import Member
-            save_member(self._db, Member(self._own_pubkey, self._own_name))
+            if self._db and self._group_id:
+                from storage import save_user
+                save_user(self._db, group_id=self._group_id,
+                          public_key=self._own_pubkey, name=self._own_name,
+                          timestamp=int(time.time()), lamport_clock=0,
+                          signature="")
             self._identity_label.configure(text=f"{self._own_name}  ·  {self._own_pubkey[:12]}…")
             if not first_run:
                 new_db  = db_var.get().strip()
@@ -2569,190 +2591,237 @@ class App(tk.Tk):
 
     # ── Mitglieder ──────────────────────────────────────────────────
 
-    def _add_member(self):
-        dlg = AddMemberDialog(self)
-        if not dlg.result: return
-        from storage import save_member
-        from models import Member
-        from crypto import generate_private_key, get_public_key_hex
-        pk = dlg.result["pubkey"]
-        if not pk:
-            pk = get_public_key_hex(generate_private_key())
-            mb.showinfo("Key generated",
-                        f"Temporary public key for '{dlg.result['name']}':\n\n{pk}",
-                        parent=self)
-        m = Member(pubkey=pk, display_name=dlg.result["name"])
-        save_member(self._db, m)
-        if self._network:
-            self._network.publish_member(pk, dlg.result["name"], m.joined_at)
-        self._refresh()
 
     # ── Ausgaben ────────────────────────────────────────────────────
 
     def _load_expenses(self):
-        from storage import load_all_expense_blobs
-        from crypto import decrypt_expense
-        return [exp for _, blob in load_all_expense_blobs(self._db)
-                if (exp := decrypt_expense(blob, self._group_key)) is not None]
+        from storage import get_expenses, get_splits
+        from models import Expense, Split
+        result = []
+        for row in get_expenses(self._db, self._group_id):
+            exp = Expense.from_wire_dict(dict(row))
+            exp.splits = [Split.from_wire_dict(dict(s))
+                          for s in get_splits(self._db, exp.id)]
+            result.append(exp)
+        return result
 
     def _load_settlements(self):
-        from storage import load_all_settlement_blobs
-        from crypto import decrypt_settlement
-        return [s for _, blob in load_all_settlement_blobs(self._db)
-                if (s := decrypt_settlement(blob, self._group_key)) is not None]
+        from storage import get_settlements
+        from models import Settlement
+        return [Settlement.from_wire_dict(dict(r))
+                for r in get_settlements(self._db, self._group_id)]
 
     def _save_expense(self, expense):
-        from crypto import sign_expense, encrypt_expense
-        from storage import save_expense_blob
+        from crypto import sign_record
+        from storage import save_expense, save_splits
         expense.lamport_clock = self._next_lamport()
-        expense.signature = sign_expense(expense, self._own_key)
-        blob = encrypt_expense(expense, self._group_key)
-        save_expense_blob(self._db, expense.id, blob, expense.timestamp,
-                          lamport_clock=expense.lamport_clock,
-                          author_pubkey=expense.payer_pubkey)
+        expense.signature = sign_record(expense, self._own_key)
+        for s in expense.splits:
+            s.lamport_clock = expense.lamport_clock
+            s.signature = sign_record(s, self._own_key)
+        save_expense(
+            self._db, id=expense.id, group_id=self._group_id,
+            timestamp=expense.timestamp, expense_date=expense.expense_date,
+            lamport_clock=expense.lamport_clock,
+            author_pubkey=expense.author_pubkey,
+            is_deleted=expense.is_deleted, amount=expense.amount,
+            description=expense.description, category=expense.category,
+            original_amount=expense.original_amount,
+            original_currency=expense.original_currency,
+            signature=expense.signature)
+        save_splits(self._db, expense.id,
+                    [s.to_wire_dict() for s in expense.splits])
         if self._network:
-            self._network.publish_expense(expense.id, blob, expense.timestamp)
+            self._network.publish_expense(expense)
+            self._network.publish_splits(expense.splits)
 
     def _save_settlement(self, settlement):
-        from crypto import sign_settlement, encrypt_settlement
-        from storage import save_settlement_blob
+        from crypto import sign_record
+        from storage import save_settlement
         settlement.lamport_clock = self._next_lamport()
-        settlement.signature = sign_settlement(settlement, self._own_key)
-        blob = encrypt_settlement(settlement, self._group_key)
-        save_settlement_blob(self._db, settlement.id, blob, settlement.timestamp,
-                             lamport_clock=settlement.lamport_clock,
-                             author_pubkey=settlement.from_pubkey)
+        settlement.signature = sign_record(settlement, self._own_key)
+        save_settlement(
+            self._db, id=settlement.id, group_id=self._group_id,
+            timestamp=settlement.timestamp,
+            lamport_clock=settlement.lamport_clock,
+            author_pubkey=settlement.author_pubkey,
+            is_deleted=settlement.is_deleted,
+            from_key=settlement.from_key, to_key=settlement.to_key,
+            amount=settlement.amount, signature=settlement.signature)
         if self._network:
-            self._network.publish_settlement(settlement.id, blob, settlement.timestamp)
+            self._network.publish_settlement(settlement)
 
     def _add_expense(self):
-        from storage import load_all_members
-        members = load_all_members(self._db)
-        if not members:
+        from storage import get_all_users
+        from models import format_amount
+        users = get_all_users(self._db, self._group_id)
+        if not users:
             mb.showwarning("No members",
                            "Please add members first.", parent=self); return
-        dlg = ExpenseDialog(self, members, self._own_pubkey,
+        dlg = ExpenseDialog(self, users, self._own_pubkey,
                             self._group_currency, self._rates)
         if not dlg.result: return
-        from models import Expense
-        exp = Expense.create(**dlg.result)
+        from models import Expense, split_equally
+        r   = dlg.result
+        exp = Expense.create(
+            group_id=self._group_id,
+            description=r["description"], amount=r["amount"],
+            author_pubkey=self._own_pubkey,
+            expense_date=r.get("expense_date"),
+            category=r.get("category"),
+            original_amount=r.get("original_amount"),
+            original_currency=r.get("original_currency"),
+            lamport_clock=self._lamport_clock)
+        debtor_keys = r.get("debtor_keys",
+            [u["public_key"] if isinstance(u, dict) else u.public_key
+             for u in users])
+        exp.splits = split_equally(exp.id, exp.amount,
+                                   self._own_pubkey, debtor_keys)
         self._save_expense(exp)
-        self._append_log('info',
+        self._append_log("info",
             f"Expense added: '{exp.description}' "
-            f"{exp.amount:.2f} {exp.currency}")
+            f"{format_amount(exp.amount, self._group_currency)} {self._group_currency}")
         self._refresh()
 
     def _edit_expense(self, expense):
-        # Nur der urspruengliche Eintraeger darf bearbeiten
-        if expense.payer_pubkey != self._own_pubkey:
-            mb.showerror(
-                "Permission denied",
+        if expense.author_pubkey != self._own_pubkey:
+            mb.showerror("Permission denied",
                 "Only the original creator can edit this expense.",
                 parent=self)
             return
-        from storage import load_all_members
-        dlg = ExpenseDialog(self, load_all_members(self._db),
-                            self._own_pubkey, self._group_currency,
-                            self._rates, expense)
+        from storage import get_all_users
+        from models import format_amount, split_equally
+        users = get_all_users(self._db, self._group_id)
+        dlg = ExpenseDialog(self, users, self._own_pubkey,
+                            self._group_currency, self._rates, expense)
         if not dlg.result: return
-        from models import Expense
-        # payer_pubkey bleibt unveraenderlich – er ist Teil der Signatur.
-        # Wer den Public Key nicht hat, kann keinen gueltigen Edit signieren.
-        result = dlg.result
-        result['payer_pubkey'] = expense.payer_pubkey
-        updated = Expense(id=expense.id, timestamp=int(time.time()),
-                          signature="", **result)
-        self._save_expense(updated)
-        self._append_log('info',
-            f"Expense edited: '{updated.description}' "
-            f"{updated.amount:.2f} {updated.currency}")
+        r = dlg.result
+        expense.description       = r["description"]
+        expense.amount            = r["amount"]
+        expense.expense_date      = r.get("expense_date", expense.expense_date)
+        expense.category          = r.get("category")
+        expense.original_amount   = r.get("original_amount")
+        expense.original_currency = r.get("original_currency")
+        expense.timestamp         = int(time.time())
+        expense.signature         = ""
+        debtor_keys = r.get("debtor_keys", [s.debtor_key for s in expense.splits])
+        expense.splits = split_equally(expense.id, expense.amount,
+                                       self._own_pubkey, debtor_keys)
+        self._save_expense(expense)
+        self._append_log("info",
+            f"Expense edited: '{expense.description}' "
+            f"{format_amount(expense.amount, self._group_currency)}")
         self._refresh()
 
     def _delete_expense(self, expense):
-        if expense.payer_pubkey != self._own_pubkey:
-            mb.showerror(
-                "Permission denied",
-                "Only the original creator can delete this expense.",
-                parent=self)
+        if expense.author_pubkey != self._own_pubkey:
+            mb.showerror("Permission denied",
+                "Only the original creator can delete this expense.", parent=self)
             return
-        if not mb.askyesno("Delete", f"Delete '{expense.description}'?", parent=self): return
-        from crypto import sign_expense, encrypt_expense
-        from storage import soft_delete_expense_blob
-        expense.is_deleted = True
-        expense.timestamp  = int(time.time())
-        expense.signature  = sign_expense(expense, self._own_key)
-        blob = encrypt_expense(expense, self._group_key)
-        soft_delete_expense_blob(self._db, expense.id, blob, expense.timestamp)
+        if not mb.askyesno("Delete", f"Delete '{expense.description}'?",
+                            parent=self): return
+        from crypto import sign_record
+        from storage import save_expense
+        expense.is_deleted    = 1
+        expense.timestamp     = int(time.time())
+        expense.lamport_clock = self._next_lamport()
+        expense.signature     = sign_record(expense, self._own_key)
+        save_expense(
+            self._db, id=expense.id, group_id=self._group_id,
+            timestamp=expense.timestamp, expense_date=expense.expense_date,
+            lamport_clock=expense.lamport_clock,
+            author_pubkey=expense.author_pubkey,
+            is_deleted=1, amount=expense.amount,
+            description=expense.description, category=expense.category,
+            original_amount=expense.original_amount,
+            original_currency=expense.original_currency,
+            signature=expense.signature)
         if self._network:
-            self._network.publish_expense(expense.id, blob, expense.timestamp)
-        self._append_log('info', f"Expense deleted: '{expense.description}'")
-        self._post_system_comment(expense.id,
-            f"Expense deleted by {self._own_name}")
+            self._network.publish_expense(expense)
+        self._append_log("info", f"Expense deleted: '{expense.description}'")
+        self._post_system_comment(expense.id, f"Deleted by {self._own_name}")
         self._refresh()
 
     # ── Ausgleichszahlungen ─────────────────────────────────────────
 
     def _record_settlement(self, prefill: dict = None):
-        from storage import load_all_members
-        members = load_all_members(self._db)
-        if len(members) < 2:
+        from storage import get_all_users
+        from models import format_amount
+        users = get_all_users(self._db, self._group_id)
+        if len(users) < 2:
             mb.showwarning("Too few members",
                            "At least 2 members required.", parent=self); return
-        dlg = SettlementDialog(self, members, self._own_pubkey,
+        dlg = SettlementDialog(self, users, self._own_pubkey,
                                self._group_currency, self._rates, prefill)
         if not dlg.result: return
-        from models import RecordedSettlement
-        rs = RecordedSettlement.create(**dlg.result)
+        from models import Settlement
+        r  = dlg.result
+        rs = Settlement.create(
+            group_id=self._group_id,
+            from_key=r["from_key"], to_key=r["to_key"],
+            amount=r["amount"], author_pubkey=self._own_pubkey,
+            lamport_clock=self._lamport_clock)
         self._save_settlement(rs)
-        from storage import load_all_members
-        _m = {m.pubkey: m.display_name for m in load_all_members(self._db)}
-        self._append_log('info',
-            f"Payment recorded: {_m.get(rs.from_pubkey, rs.from_pubkey[:8])} "
-            f"-> {_m.get(rs.to_pubkey, rs.to_pubkey[:8])} "
-            f"{rs.amount:.2f} {rs.currency}")
+        _m = {u["public_key"] if isinstance(u, dict) else u.public_key:
+              u["name"] if isinstance(u, dict) else u.name for u in users}
+        self._append_log("info",
+            f"Payment: {_m.get(rs.from_key, rs.from_key[:8])} "
+            f"→ {_m.get(rs.to_key, rs.to_key[:8])} "
+            f"{format_amount(rs.amount, self._group_currency)} {self._group_currency}")
         self._refresh()
 
     def _delete_settlement(self, settlement):
         if not mb.askyesno("Delete", "Delete payment?", parent=self): return
-        from crypto import sign_settlement, encrypt_settlement
-        from storage import soft_delete_settlement_blob
-        settlement.is_deleted = True
-        settlement.timestamp  = int(time.time())
-        settlement.signature  = sign_settlement(settlement, self._own_key)
-        blob = encrypt_settlement(settlement, self._group_key)
-        soft_delete_settlement_blob(self._db, settlement.id, blob, settlement.timestamp)
+        from crypto import sign_record
+        from storage import save_settlement
+        settlement.is_deleted    = 1
+        settlement.timestamp     = int(time.time())
+        settlement.lamport_clock = self._next_lamport()
+        settlement.signature     = sign_record(settlement, self._own_key)
+        save_settlement(
+            self._db, id=settlement.id, group_id=self._group_id,
+            timestamp=settlement.timestamp,
+            lamport_clock=settlement.lamport_clock,
+            author_pubkey=settlement.author_pubkey,
+            is_deleted=1, from_key=settlement.from_key,
+            to_key=settlement.to_key, amount=settlement.amount,
+            signature=settlement.signature)
         if self._network:
-            self._network.publish_settlement(settlement.id, blob, settlement.timestamp)
+            self._network.publish_settlement(settlement)
         self._refresh()
 
     # ── Refresh / Render ────────────────────────────────────────────
 
     def _refresh(self):
-        from storage import load_all_members
-        members     = load_all_members(self._db)
+        from storage import get_all_users
+        from models import format_amount
+        if not self._db or not self._group_id: return
+        users       = get_all_users(self._db, self._group_id)
         expenses    = self._load_expenses()
         settlements = self._load_settlements()
-        self._render_members(members)
-        self._render_balance(expenses, settlements, members)
-        self._render_debts(expenses, settlements, members)
-        self._render_events(expenses, settlements, members)
+        self._render_members(users)
+        self._render_balance(expenses, settlements, users)
+        self._render_debts(expenses, settlements, users)
+        self._render_events(expenses, settlements, users)
         total = sum(e.amount for e in expenses)
         self._total_label.configure(
-            text=f"Gesamt: {total:.2f} {self._group_currency}  ·  "
-                 f"{len(expenses)} Ausgaben  ·  {len(settlements)} Zahlungen")
+            text=f"Total: {format_amount(total, self._group_currency)}" f" {self._group_currency}  ·  "
+                 f"{len(expenses)} expenses  ·  {len(settlements)} payments")
 
-    def _render_members(self, members):
+    def _render_members(self, users):
         for w in self._members_frame.winfo_children(): w.destroy()
-        if not members:
+        if not users:
             _lbl(self._members_frame, "No members yet",
                  fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(anchor="w"); return
-        for m in members:
+        for u in users:
+            pk  = u["public_key"] if isinstance(u, dict) else u.public_key
+            nm  = u["name"]       if isinstance(u, dict) else u.name
             row = tk.Frame(self._members_frame, bg=PANEL)
             row.pack(fill="x", pady=1)
-            _lbl(row, "●", fg=GREEN if m.pubkey == self._own_pubkey else FG_DIM,
+            _lbl(row, "●", fg=GREEN if pk == self._own_pubkey else FG_DIM,
                  font=("Segoe UI", 8), bg=PANEL).pack(side="left")
-            _lbl(row, m.display_name, fg=FG, font=FONT_SMALL, bg=PANEL).pack(side="left", padx=4)
-            if m.pubkey == self._own_pubkey:
+            _lbl(row, nm, fg=FG, font=FONT_SMALL, bg=PANEL).pack(side="left", padx=4)
+            if pk == self._own_pubkey:
                 _lbl(row, "(you)", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
 
     def _render_balance(self, expenses, settlements, members):
@@ -2762,29 +2831,33 @@ class App(tk.Tk):
         info        = balance_summary(self._own_pubkey, balances)
         net = info["net"]
 
-        if abs(net) < 0.01:
+        if abs(net) < 1:
             _lbl(self._balance_frame, "All settled ✓",
                  fg=GREEN, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
             return
 
+        from models import format_amount as _fa
         color = GREEN if net > 0 else RED
         sign  = "+" if net > 0 else ""
-        _lbl(self._balance_frame, f"{sign}{net:.2f} {self._group_currency}",
+        _lbl(self._balance_frame,
+             f"{sign}{_fa(abs(net), self._group_currency)} {self._group_currency}",
              fg=color, font=FONT_BOLD, bg=PANEL).pack(anchor="w")
         _lbl(self._balance_frame,
              "you are owed" if net > 0 else "you owe",
              fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
 
         # Breakdown per person
-        pk_to_name = {m.pubkey: m.display_name for m in members}
+        pk_to_name = {(u["public_key"] if isinstance(u, dict) else u.public_key):
+                      (u["name"] if isinstance(u, dict) else u.name) for u in members}
         for pk, bal in balances.items():
-            if pk == self._own_pubkey or abs(bal) < 0.01: continue
+            if pk == self._own_pubkey or abs(bal) < 1: continue
             # My net vs this person
             pass  # Detailed per-person breakdown kept in debt section
 
-    def _render_debts(self, expenses, settlements, members):
+    def _render_debts(self, expenses, settlements, users):
         for w in self._debt_frame.winfo_children(): w.destroy()
-        pk_to_name = {m.pubkey: m.display_name for m in members}
+        pk_to_name = {(u["public_key"] if isinstance(u, dict) else u.public_key):
+                      (u["name"] if isinstance(u, dict) else u.name) for u in users}
         def name(pk): return pk_to_name.get(pk, pk[:8] + "…")
 
         _, sugg = self._get_cached_ledger(expenses, settlements)
@@ -2803,33 +2876,37 @@ class App(tk.Tk):
                  wraplength=180, justify="left").pack(anchor="w")
             amt_row = tk.Frame(f, bg=PANEL)
             amt_row.pack(fill="x")
-            _lbl(amt_row, f"{s.amount:.2f} {self._group_currency}",
+            from models import format_amount as _fa2
+            _lbl(amt_row,
+                 f"{_fa2(s.amount, self._group_currency)} {self._group_currency}",
                  fg=color, font=FONT_BOLD, bg=PANEL).pack(side="left")
             if is_me_d:
                 _ghost(amt_row, "✓ paid",
                        lambda s=s: self._record_settlement(
-                           {"from_pubkey": s.debtor, "to_pubkey": s.creditor,
+                           {"from_key": s.debtor, "to_key": s.creditor,
                             "amount": s.amount})).pack(side="left", padx=6)
 
-    def _render_events(self, expenses, settlements, members):
-        """Expenses und Settlements – gefiltert – zeitlich sortiert anzeigen."""
+    def _render_events(self, expenses, settlements, users):
+        """Expenses and settlements — filtered and sorted."""
         for w in self._event_list.winfo_children(): w.destroy()
-        pk_to_name = {m.pubkey: m.display_name for m in members}
+        pk_to_name = {(u["public_key"] if isinstance(u, dict) else u.public_key):
+                      (u["name"] if isinstance(u, dict) else u.name) for u in users}
 
-        # Mitglied-Dropdown aktualisieren
-        names = ["All"] + [m.display_name for m in members]
+        # Update member filter dropdown
+        names = ["All"] + [u["name"] if isinstance(u, dict) else u.name
+                           for u in users]
         self._member_filter_cb.configure(values=names)
 
         # Suchbegriff + Filter auslesen
         query   = self._search_text.get().lower().strip()
         cat_f   = self._filter_cat.get()
         mbr_f   = self._filter_member.get()
-        mbr_pk  = next((m.pubkey for m in members if m.display_name == mbr_f), None)
+        mbr_pk  = next((_u(m)[0] for m in members if _u(m)[1] == mbr_f), None)
 
         def matches_expense(e):
             if cat_f and cat_f != "All" and e.category != cat_f: return False
-            if mbr_pk and mbr_pk != e.payer_pubkey and \
-               not any(s.pubkey == mbr_pk for s in e.splits): return False
+            if mbr_pk and mbr_pk != e.author_pubkey and \
+               not any(s.debtor_key == mbr_pk for s in e.splits): return False
             if query and query not in e.description.lower() and \
                query not in e.category.lower() and \
                query not in (e.note or "").lower(): return False
@@ -2837,10 +2914,10 @@ class App(tk.Tk):
 
         def matches_settlement(s):
             if cat_f and cat_f != "All": return False
-            if mbr_pk and s.from_pubkey != mbr_pk and s.to_pubkey != mbr_pk: return False
+            if mbr_pk and s.from_key != mbr_pk and s.to_key != mbr_pk: return False
             if query:
-                n_from = pk_to_name.get(s.from_pubkey, "")
-                n_to   = pk_to_name.get(s.to_pubkey,   "")
+                n_from = pk_to_name.get(s.from_key, "")
+                n_to   = pk_to_name.get(s.to_key,   "")
                 if query not in (s.note or "").lower() and \
                    query not in n_from.lower() and query not in n_to.lower(): return False
             return True
@@ -2888,9 +2965,9 @@ class App(tk.Tk):
         _lbl(top, "  " + exp.description, fg=FG, font=FONT_BOLD, bg=PANEL).pack(side="left")
 
         ts_str = time.strftime("%d.%m.%Y", time.localtime(exp.display_date()))
-        _lbl(left, f"{name(exp.payer_pubkey)} hat bezahlt  ·  {ts_str}",
+        _lbl(left, f"{name(exp.author_pubkey)} hat bezahlt  ·  {ts_str}",
              fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
-        splits_txt = "  ".join(f"{name(s.pubkey)}: {s.amount:.2f}€" for s in exp.splits)
+        splits_txt = "  ".join(f"{name(s.debtor_key)}: {__import__('models').format_amount(s.amount, self._group_currency)}" for s in exp.splits)
         _lbl(left, splits_txt, fg=FG_MUTED, font=FONT_SMALL, bg=PANEL).pack(anchor="w")
 
         if exp.original_amount and exp.original_currency:
@@ -2930,7 +3007,7 @@ class App(tk.Tk):
              fg=GREEN, font=FONT_LARGE, bg=PANEL).pack(anchor="e")
         btn_r = tk.Frame(right, bg=PANEL)
         btn_r.pack(anchor="e")
-        if exp.payer_pubkey == self._own_pubkey:
+        if exp.author_pubkey == self._own_pubkey:
             _ghost(btn_r, "✎", lambda e=exp: self._edit_expense(e)).pack(side="left", padx=2)
             _ghost(btn_r, "✕", lambda e=exp: self._delete_expense(e)).pack(side="left", padx=2)
         else:
@@ -2950,7 +3027,7 @@ class App(tk.Tk):
 
         ts_str = time.strftime("%d.%m.%Y", time.localtime(s.display_date()))
         _lbl(left,
-             f"↔  {name(s.from_pubkey)} bezahlte {name(s.to_pubkey)}  ·  {ts_str}",
+             f"↔  {name(s.from_key)} bezahlte {name(s.to_key)}  ·  {ts_str}",
              fg=PURPLE, font=FONT_BOLD, bg=BG).pack(anchor="w")
         if s.note:
             _lbl(left, s.note, fg=FG_DIM, font=FONT_SMALL, bg=BG).pack(anchor="w")
@@ -2961,7 +3038,8 @@ class App(tk.Tk):
         right = tk.Frame(row, bg=BG)
         right.pack(side="right")
         from models import format_amount as _fa3
-        _lbl(right, f"{_fa3(s.amount, s.currency)} {s.currency}",
+        _lbl(right,
+             f"{_fa3(s.amount, self._group_currency)} {self._group_currency}",
              fg=PURPLE, font=FONT_LARGE, bg=BG).pack(anchor="e")
         _ghost(right, "✕", lambda s=s: self._delete_settlement(s)).pack(anchor="e")
 
@@ -2974,47 +3052,50 @@ class App(tk.Tk):
 
         class _CB(NetworkCallbacks):
             def __init__(self2, app): self2._app = app
-            def on_expense_received(self2, eid, blob):
-                self2._app.after(0, lambda: self2._app._on_net_expense(eid, blob))
-            def on_settlement_received(self2, sid, blob):
-                self2._app.after(0, lambda: self2._app._on_net_settlement(sid, blob))
-            def on_member_received(self2, pubkey, data):
-                self2._app.after(0, lambda: self2._app._on_net_member(pubkey, data))
-                name = data.get("display_name","?")
-                self2._app.after(0, lambda: self2._app._append_log(
-                    "sync", f"Mitglied empfangen: {name} ({pubkey[:12]}…)"))
+            def _ui(self2, fn, *a):
+                self2._app.after(0, lambda: fn(*a))
+            def on_expense_received(self2, expense):
+                self2._ui(self2._app._on_net_expense, expense)
+            def on_settlement_received(self2, settlement):
+                self2._ui(self2._app._on_net_settlement, settlement)
+            def on_comment_received(self2, comment):
+                self2._ui(self2._app._on_net_comment, comment)
+            def on_split_received(self2, split):
+                self2._ui(self2._app._on_net_split, split)
+            def on_attachment_received(self2, attachment):
+                self2._ui(self2._app._on_net_attachment, attachment)
+            def on_user_received(self2, user):
+                self2._ui(self2._app._on_net_user, user)
             def on_peer_connected(self2, pid):
-                # Move all state access into after() so it runs
-                # in the tkinter main thread, not the trio thread
                 def _on_connect(p=pid):
                     if hasattr(self2._app, "_pending_downloads"):
                         self2._app._pending_downloads.clear()
                     self2._app._on_peer_change()
-                    self2._app._append_log("net",
-                        f"Peer connected: {p[:20]}...")
+                    self2._app._append_log("net", f"Peer connected: {p[:20]}...")
                 self2._app.after(0, _on_connect)
             def on_peer_disconnected(self2, pid):
-                self2._app.after(0, lambda: self2._app._on_peer_change())
-                self2._app.after(0, lambda: self2._app._append_log(
-                    "net", f"Peer getrennt: {pid[:20]}…"))
+                self2._app.after(0, self2._app._on_peer_change)
+                self2._ui(self2._app._append_log, "net",
+                          f"Peer disconnected: {pid[:20]}...")
             def on_status_changed(self2, online, pid):
-                self2._app.after(0, lambda: self2._app._on_net_status(online, pid))
-                self2._app.after(0, lambda: self2._app._append_log(
-                    "net", f"Status: {'online' if online else 'offline'}"
-                           + (f"  id={pid[:16]}…" if online else "")))
+                self2._ui(self2._app._on_net_status, online, pid)
+                self2._ui(self2._app._append_log, "net",
+                    f"Status: {'online' if online else 'offline'}"
+                    + (f"  id={pid[:16]}..." if online else ""))
             def on_file_received(self2, sha256):
                 self2._app.after(0, self2._app._refresh)
-                self2._app.after(0, lambda: self2._app._append_log(
-                    "sync", f"Datei empfangen: {sha256[:16]}…"))
-            def on_history_synced(self2, n_exp, n_set):
-                if n_exp + n_set > 0:
-                    self2._app.after(0, lambda: self2._app._on_history_synced(
-                        n_exp, n_set))
-                self2._app.after(0, lambda: self2._app._append_log(
-                    "sync", f"History-Sync: +{n_exp} Ausgaben, +{n_set} Zahlungen"))
+                self2._ui(self2._app._append_log, "sync",
+                          f"File received: {sha256[:16]}...")
+            def on_history_synced(self2, counts):
+                total = sum(counts.values()) if isinstance(counts, dict) else counts
+                if total > 0:
+                    self2._app.after(0, self2._app._refresh)
+                self2._ui(self2._app._append_log, "sync",
+                          f"History sync: +{counts}")
 
         self._network = P2PNetwork(self._group_key, self._group_topic,
-                                   _CB(self))
+                                   _CB(self),
+                                   db=self._db, group_id=self._group_id)
         self._network.set_own_identity(
             self._own_pubkey, self._own_name, int(time.time()))
         self._network.start_in_thread()
@@ -3024,11 +3105,13 @@ class App(tk.Tk):
             short = peer_id[:20] + "..." if len(peer_id) > 20 else peer_id
             self._net_dot.configure(fg=GREEN)
             self._net_label.configure(text=f"online  {short}", fg=FG_MUTED)
-            # Save own member locally so we appear in the member list
-            if self._db:
-                from storage import save_member
-                from models import Member
-                save_member(self._db, Member(self._own_pubkey, self._own_name))
+            # Save own user locally so we appear in the member list
+            if self._db and self._group_id:
+                from storage import save_user
+                save_user(self._db, group_id=self._group_id,
+                          public_key=self._own_pubkey, name=self._own_name,
+                          timestamp=int(time.time()), lamport_clock=0,
+                          signature="")
                 self._refresh()
             # Announce own identity via GossipSub
             if self._network:
@@ -3054,67 +3137,72 @@ class App(tk.Tk):
         self._net_label.configure(
             text=f"online  {n} peer{'s' if n != 1 else ''}" if n else "online  no peers")
 
-    def _on_net_expense(self, expense_id, blob):
-        from storage import save_expense_blob, delete_attachment_if_unreferenced
-        from crypto import decrypt_expense
-        exp = decrypt_expense(blob, self._group_key)
-        if exp is None: return
-        self._next_lamport(exp.lamport_clock)
-        if not save_expense_blob(
-            self._db, exp.id, blob, exp.timestamp, exp.is_deleted,
-            lamport_clock=exp.lamport_clock,
-            author_pubkey=exp.payer_pubkey,
-        ):
-            return
-        if exp.is_deleted:
-            # Tombstone received: delete attachment if unreferenced.
-            # DB tombstone stays for further sync partners.
-            if exp.attachment:
-                deleted = delete_attachment_if_unreferenced(
-                    self._db, exp.attachment.sha256)
-                if deleted:
-                    self._append_log(
-                        'sync',
-                        f"Attachment deleted via sync: {exp.attachment.filename}")
-        elif exp.attachment:
-            # New/updated expense: request missing attachment from peer.
-            from storage import attachment_exists
-            if not attachment_exists(exp.attachment.sha256) and self._network:
-                self._network.request_file(exp.attachment.sha256)
+    def _on_net_expense(self, expense):
+        from storage import save_expense, save_splits
+        self._next_lamport(expense.lamport_clock)
+        changed = save_expense(
+            self._db, id=expense.id, group_id=expense.group_id,
+            timestamp=expense.timestamp, expense_date=expense.expense_date,
+            lamport_clock=expense.lamport_clock,
+            author_pubkey=expense.author_pubkey,
+            is_deleted=expense.is_deleted, amount=expense.amount,
+            description=expense.description, category=expense.category,
+            original_amount=expense.original_amount,
+            original_currency=expense.original_currency,
+            signature=expense.signature)
+        if not changed: return
+        if expense.splits:
+            save_splits(self._db, expense.id,
+                        [s.to_wire_dict() for s in expense.splits])
         self._refresh()
 
-    def _on_net_settlement(self, settlement_id, blob):
-        from storage import save_settlement_blob
-        from crypto import decrypt_settlement
-        s = decrypt_settlement(blob, self._group_key)
-        if s is None: return
-        self._next_lamport(s.lamport_clock)
-        if save_settlement_blob(
-            self._db, s.id, blob, s.timestamp, s.is_deleted,
-            lamport_clock=s.lamport_clock,
-            author_pubkey=s.from_pubkey,
-        ):
+    def _on_net_split(self, split):
+        from storage import get_splits, save_splits
+        existing = [dict(s) for s in get_splits(self._db, split.belongs_to)
+                    if s["id"] != split.id]
+        existing.append(split.to_wire_dict())
+        save_splits(self._db, split.belongs_to, existing)
+        self._refresh()
+
+    def _on_net_comment(self, comment):
+        from storage import save_comment_user
+        if save_comment_user(
+                self._db, id=comment.id, belongs_to=comment.belongs_to,
+                timestamp=comment.timestamp,
+                lamport_clock=comment.lamport_clock,
+                author_pubkey=comment.author_pubkey,
+                is_deleted=comment.is_deleted,
+                comment=comment.comment, signature=comment.signature):
             self._refresh()
 
-    def _on_net_member(self, pubkey, data):
-        from storage import save_member, get_member
-        from models import Member
-        existing = get_member(self._db, pubkey)
-        new_name = data.get("display_name", "?")
-        is_new = not existing
-        name_changed = existing and existing.display_name != new_name
-        if is_new or name_changed:
-            save_member(self._db, Member(
-                pubkey=pubkey,
-                display_name=new_name,
-                joined_at=data.get("joined_at", int(time.time())),
-            ))
-            if is_new:
-                self._append_log("recv",
-                    f"Member joined: {new_name} ({pubkey[:12]}...)")
-            else:
-                self._append_log("recv",
-                    f"Member renamed: {existing.display_name} -> {new_name}")
+    def _on_net_attachment(self, attachment):
+        from storage import save_attachment, attachment_exists
+        save_attachment(
+            self._db, id=attachment.id, belongs_to=attachment.belongs_to,
+            timestamp=attachment.timestamp,
+            lamport_clock=attachment.lamport_clock,
+            author_pubkey=attachment.author_pubkey,
+            sha256=attachment.sha256, filename=attachment.filename,
+            mime=attachment.mime, size=attachment.size,
+            signature=attachment.signature)
+        if not attachment_exists(attachment.sha256) and self._network:
+            if attachment.sha256 not in self._pending_downloads:
+                self._pending_downloads.add(attachment.sha256)
+                self._network.request_file(attachment.sha256)
+
+    def _on_net_user(self, user):
+        from storage import save_user, get_user
+        existing = get_user(self._db, user.public_key)
+        is_new   = not existing
+        changed  = save_user(self._db, group_id=user.group_id,
+                             public_key=user.public_key, name=user.name,
+                             timestamp=user.timestamp,
+                             lamport_clock=user.lamport_clock,
+                             signature=user.signature)
+        if changed:
+            label = f"Member joined: {user.name}" if is_new \
+                    else f"Member updated: {user.name}"
+            self._append_log("recv", label)
             self._refresh()
 
 
@@ -3135,8 +3223,8 @@ class App(tk.Tk):
 
     def _open_log(self) -> None:
         """Opens the log window (or brings it to front)."""
-        from storage import load_all_members
-        members     = load_all_members(self._db)
+        from storage import get_all_users
+        members     = get_all_users(self._db, self._group_id)
         expenses    = self._load_expenses()
         settlements = self._load_settlements()
         if self._log_window and self._log_window.winfo_exists():
@@ -3178,8 +3266,8 @@ class App(tk.Tk):
 
     def _apply_filters(self):
         """Called on every search bar change."""
-        from storage import load_all_members
-        members     = load_all_members(self._db)
+        from storage import get_all_users
+        members     = get_all_users(self._db, self._group_id)
         expenses    = self._load_expenses()
         settlements = self._load_settlements()
         self._render_events(expenses, settlements, members)
@@ -3192,8 +3280,8 @@ class App(tk.Tk):
     # ── Charts ───────────────────────────────────────────────────────
 
     def _open_charts(self):
-        from storage import load_all_members
-        members     = load_all_members(self._db)
+        from storage import get_all_users
+        members     = get_all_users(self._db, self._group_id)
         expenses    = self._load_expenses()
         settlements = self._load_settlements()
         ChartsWindow(self, expenses, settlements, members,
@@ -3202,8 +3290,8 @@ class App(tk.Tk):
     # -- Export --─
 
     def _open_export(self):
-        from storage import load_all_members
-        members     = load_all_members(self._db)
+        from storage import get_all_users
+        members     = get_all_users(self._db, self._group_id)
         expenses    = self._load_expenses()
         settlements = self._load_settlements()
         ExportDialog(self, expenses, settlements, members,

@@ -2,25 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Network Layer - P2P Expense Sync
+Network Layer — P2P Expense Sync
 
-py-libp2p nutzt trio als Async-Backend (ab ~0.2).
-This code runs in a daemon thread via trio.run().
+py-libp2p uses trio as async backend.
+Runs in a daemon thread via trio.run().
 
-Thread-Kommunikation:
-  tkinter  ->  Trio   : queue.SimpleQueue (outgoing packets + commands)
-  Trio     ->  tkinter: callbacks.on_*()  (werden in tkinter via root.after gerufen)
+Thread communication:
+  tkinter → Trio : queue.SimpleQueue (commands + outgoing packets)
+  Trio → tkinter : callbacks.on_*()  (scheduled via root.after(0, ...))
 
-Drei Protokolle:
-  /splitp2p/sync/1.0     – GossipSub (Expenses, Settlements, Members)
-  /splitp2p/files/1.0    - direct stream: SHA-256 request -> binary data
-  /splitp2p/history/1.0  - direct stream: delta sync on peer connect
+Three protocols:
+  /splitp2p/sync/1.0     — GossipSub broadcast (real-time updates)
+  /splitp2p/files/1.0    — direct stream: SHA-256 request → encrypted chunks
+  /splitp2p/history/1.0  — direct stream: delta sync via Lamport maps
 
-NAT-Traversal-Stack (alle optional, graceful fallback):
-  AutoNAT           – Erkennt ob wir hinter NAT/Firewall sind
-  Circuit Relay v2  - connections via public IPFS relay nodes
-  Kademlia DHT      – Topic-ID im weltweiten DHT advertisen und suchen;
-                      findet Gruppenmitglieder ohne direktes Treffen
+Wire format for synced records:
+  Encrypted: {"type": "expense"|"settlement"|"comment"|"attachment"|"split",
+               "id": str, "timestamp": int, "data": hex(encrypt_record(...))}
+  Plaintext: {"type": "user", "pubkey": str, "data": {...}, "signature": str}
+  Users are not encrypted — display names visible to anyone with the topic UUID.
 """
 
 from __future__ import annotations
@@ -37,12 +37,11 @@ logger = logging.getLogger(__name__)
 
 SYNC_PROTOCOL    = "/splitp2p/sync/1.0"
 FILE_PROTOCOL    = "/splitp2p/files/1.0"
-HISTORY_PROTOCOL = "/splitp2p/history/2.0"  # delta sync via lamport maps
+HISTORY_PROTOCOL = "/splitp2p/history/1.0"   # delta sync via Lamport maps
 CHUNK_SIZE       = 16_384
-P2P_PORT         = 8000    # fixed port so mDNS advertises the correct address
-                           # change if 4001 is already in use on your system
-DOWNLOAD_RETRIES = 3       # max Versuche pro Peer
-RETRY_BACKOFF    = (1, 3, 7)  # Wartezeit in Sekunden zwischen Versuchen
+P2P_PORT         = 8000
+DOWNLOAD_RETRIES = 3
+RETRY_BACKOFF    = (1, 3, 7)
 
 IPFS_BOOTSTRAP = [
     "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
@@ -53,35 +52,16 @@ IPFS_BOOTSTRAP = [
 
 
 def _build_listen_addrs(port: int) -> list:
-    """
-    Returns multiaddrs for both IPv4 and IPv6 wildcard interfaces.
-
-    /ip4/0.0.0.0/tcp/<port>   - all IPv4 interfaces
-    /ip6/::/tcp/<port>         - all IPv6 interfaces (link-local + GUA)
-
-    Having both means the node accepts connections from either
-    protocol version, and mDNS discovery works on whichever the
-    local network supports.
-
-    Falls back gracefully if get_available_interfaces() is available
-    (it returns per-interface addrs which is more specific, but
-    IPv4-only on most versions).
-    """
     import multiaddr as _ma
-    addrs = []
-    # Always add explicit IPv4 + IPv6 wildcards first
-    addrs.append(_ma.Multiaddr(f"/ip4/0.0.0.0/tcp/{port}"))
+    addrs = [_ma.Multiaddr(f"/ip4/0.0.0.0/tcp/{port}")]
     try:
         addrs.append(_ma.Multiaddr(f"/ip6/::/tcp/{port}"))
     except Exception:
-        pass  # multiaddr version doesn't support ip6 syntax
-    # Try to also add per-interface addrs from libp2p helper
+        pass
     try:
         from libp2p.utils.address_validation import get_available_interfaces
-        extra = get_available_interfaces(port)
-        # Avoid duplicates: only add if not already covered
         seen = {str(a) for a in addrs}
-        for a in extra:
+        for a in get_available_interfaces(port):
             if str(a) not in seen:
                 addrs.append(a)
     except Exception:
@@ -89,39 +69,23 @@ def _build_listen_addrs(port: int) -> list:
     return addrs
 
 
-def _local_max_timestamp() -> int:
-    try:
-        from storage import get_max_timestamp
-        return get_max_timestamp()
-    except Exception:
-        return 0
-
-
-def load_all_expense_blobs_since(since: int):
-    from storage import load_all_expense_blobs_since as _f
-    return _f(since)
-
-
-def load_all_settlement_blobs_since(since: int):
-    from storage import load_all_settlement_blobs_since as _f
-    return _f(since)
-
-
 # ---------------------------------------------------------------------------
-# Callbacks
+# Callbacks — all receive model objects, not blobs
 # ---------------------------------------------------------------------------
 
 class NetworkCallbacks:
-    def on_expense_received(self, expense_id: str, blob: bytes) -> None: pass
-    def on_settlement_received(self, settlement_id: str, blob: bytes) -> None: pass
-    def on_member_received(self, pubkey: str, data: dict) -> None: pass
-    def on_peer_connected(self, peer_id: str) -> None: pass
+    def on_expense_received(self, expense) -> None:       pass
+    def on_settlement_received(self, settlement) -> None: pass
+    def on_comment_received(self, comment) -> None:       pass
+    def on_attachment_received(self, attachment) -> None: pass
+    def on_split_received(self, split) -> None:           pass
+    def on_user_received(self, user) -> None:             pass
+    def on_peer_connected(self, peer_id: str) -> None:    pass
     def on_peer_disconnected(self, peer_id: str) -> None: pass
-    def on_status_changed(self, online: bool, peer_id: str) -> None: pass
-    def on_file_received(self, sha256: str) -> None: pass
-    def on_comment_received(self, comment_id: str, expense_id: str,
-                            blob: bytes) -> None: pass
-    def on_history_synced(self, n_expenses: int, n_settlements: int) -> None: pass
+    def on_status_changed(self, online: bool,
+                          peer_id: str) -> None:          pass
+    def on_file_received(self, sha256: str) -> None:      pass
+    def on_history_synced(self, counts: dict) -> None:    pass
 
 
 # ---------------------------------------------------------------------------
@@ -130,230 +94,197 @@ class NetworkCallbacks:
 
 class P2PNetwork:
     def __init__(self, group_key: bytes, topic_id: str,
-                 callbacks: NetworkCallbacks):
-        self._group_key    = group_key         # 32-byte SecretBox key
-        self._own_pubkey    = ""               # set via set_own_identity()
-        self._own_name      = ""               # set via set_own_identity()
+                 callbacks: NetworkCallbacks,
+                 db=None, group_id: str = ""):
+        self.callbacks      = callbacks
+        self._group_key     = group_key    # 32-byte SecretBox key
+        self.topic_id       = f"splitp2p-{topic_id}"
+        self._db            = db           # sqlite3 connection for history sync
+        self._group_id      = group_id     # for storage queries
+        self._own_pubkey    = ""
+        self._own_name      = ""
         self._own_joined_at = 0
-        self._host         = None
-        self._pubsub    = None
-        self._sub       = None
-        self._running   = False
-        self.topic_id      = f"splitp2p-{topic_id}"
+        self._host          = None
+        self._pubsub        = None
+        self._sub           = None
+        self._running       = False
         self._peers: set[str] = set()
-        # Thread-safe queue: tkinter -> trio
-        # Items: dicts mit "cmd" key:
-        #   {"cmd": "publish",  "data": bytes}
-        #   {"cmd": "req_file", "sha256": str}
-        #   {"cmd": "req_history"}
-        #   {"cmd": "stop"}
-        self._cmd_queue: _queue.SimpleQueue = _queue.SimpleQueue()
-        self._dht        = None
-        self._autonat    = None
-        self._relay      = None
-        self._behind_nat = True  # assume worst case until AutoNAT checks
-        # Storage dir is configured via storage.configure_paths() before start
-        # Do NOT hardcode "storage" here - use the configured path
-        from storage import STORAGE_DIR
-        os.makedirs(STORAGE_DIR, exist_ok=True)
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def start_in_thread(self) -> None:
-        threading.Thread(
-            target=self._thread_main,
-            daemon=True,
-            name="p2p-network",
-        ).start()
-
-    def _thread_main(self) -> None:
-        try:
-            import trio
-            trio.run(self._run)
-        except ImportError:
-            logger.warning("trio not installed – offline mode")
-            self.callbacks.on_status_changed(False, "offline-mode")
-        except Exception as e:
-            logger.error("P2P thread crashed: %s", e)
-            self.callbacks.on_status_changed(False, "")
-
-    async def _run(self) -> None:
-        try:
-            import trio
-            from libp2p import new_host
-            from libp2p.pubsub import gossipsub
-            from libp2p.pubsub.pubsub import Pubsub
-            from libp2p.utils.address_validation import get_available_interfaces
-        except ImportError as e:
-            logger.warning("libp2p not installed - offline mode (%s)", e)
-            self.callbacks.on_status_changed(False, "offline-mode")
-            return
-
-        import trio
-
-        # Listen on both IPv4 and IPv6 so the node works in
-        # IPv4-only, IPv6-only, and dual-stack LAN environments.
-        # mDNS uses ff02::fb (IPv6) or 224.0.0.251 (IPv4);
-        # libp2p picks whichever interface is available.
-        listen_addrs = _build_listen_addrs(P2P_PORT)
-        logger.info("Listening on: %s",
-                    ", ".join(str(a) for a in listen_addrs))
-
-        # new_host with mDNS if supported by installed version
-        try:
-            self._host = new_host(
-                listen_addrs=listen_addrs,
-                enable_mDNS=True,
-            )
-            logger.info("new_host() with built-in mDNS")
-        except TypeError:
-            self._host = new_host()
-            logger.info("new_host() without mDNS (older API) - "
-                        "will use manual mDNS fallback")
-
-        # GossipSub
-        gossip = gossipsub.GossipSub(
-            protocols=["/meshsub/1.1.0"],
-            degree=6,
-            degree_low=4,
-            degree_high=12,
-        )
-        self._pubsub = Pubsub(self._host, gossip)
-
-        # Nursery statt asyncio.create_task
-        try:
-            async with self._host.run(listen_addrs=listen_addrs):
-                peer_id = self._host.get_id().to_string()
-                self._running = True
-                logger.info("P2P node started: %s  topic: %s",
-                            peer_id, self.topic_id)
-
-                self._sub = await self._pubsub.subscribe(self.topic_id)
-                self._host.set_stream_handler(FILE_PROTOCOL,    self._file_serve_handler)
-                self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
-
-                # Peer discovery via polling (works across all py-libp2p versions)
-                # notify() was removed in newer versions; polling the peerstore
-                # is the reliable cross-version alternative.
-
-                self.callbacks.on_status_changed(True, peer_id)
-
-                async with trio.open_nursery() as nursery:
-                    nursery.start_soon(self._receive_loop)
-                    nursery.start_soon(self._cmd_loop)
-                    nursery.start_soon(self._connect_bootstrap)
-                    nursery.start_soon(self._cleanup_stale_tmp)
-                    nursery.start_soon(self._setup_mdns)
-                    nursery.start_soon(self._peer_poll_loop)
-
-        except Exception as e:
-            logger.error("P2P run error: %s", e)
-            self.callbacks.on_status_changed(False, "")
-
+        self._cmd_queue = _queue.SimpleQueue()
+        logger.info("Topic ID set: %s", self.topic_id)
 
     def set_own_identity(self, pubkey: str, display_name: str,
                          joined_at: int) -> None:
-        """Store own identity so announce_member can publish without GUI callback."""
         self._own_pubkey    = pubkey
         self._own_name      = display_name
         self._own_joined_at = joined_at
 
+    def set_db(self, db, group_id: str) -> None:
+        """Set DB connection and group_id for history sync handlers."""
+        self._db       = db
+        self._group_id = group_id
+
     def stop(self) -> None:
         self._running = False
         self._cmd_queue.put({"cmd": "stop"})
-        logger.info("P2P node stopping")
 
-    # ------------------------------------------------------------------
-    # Peer events
-    # ------------------------------------------------------------------
+    def start_in_thread(self) -> None:
+        t = threading.Thread(target=self._run, daemon=True, name="P2PNetwork")
+        t.start()
 
-    class _PeerNotifee:
-        def __init__(self, net):
-            self._net = net
-
-        def connected(self, _, conn):
+    def _run(self) -> None:
+        try:
             import trio
-            pid = conn.get_remote_peer_id().to_string()
-            self._net._peers.add(pid)
-            self._net.callbacks.on_peer_connected(pid)
-            # History anfordern
-            self._net._cmd_queue.put({"cmd": "req_history_from", "peer_id": pid})
+            trio.run(self._main)
+        except Exception as e:
+            logger.error("P2P thread crashed: %s", e)
 
-        def disconnected(self, _, conn):
-            pid = conn.get_remote_peer_id().to_string()
-            self._net._peers.discard(pid)
-            self._net.callbacks.on_peer_disconnected(pid)
+    async def _main(self) -> None:
+        import trio
+        try:
+            await self._start_node()
+        except Exception as e:
+            logger.error("P2P node start failed: %s", e)
+            self.callbacks.on_status_changed(False, "offline-mode")
+            return
+        try:
+            async with trio.open_nursery() as nursery:
+                nursery.start_soon(self._receive_loop)
+                nursery.start_soon(self._cmd_loop)
+                nursery.start_soon(self._peer_poll_loop)
+                nursery.start_soon(self._bootstrap)
+                nursery.start_soon(self._cleanup_stale_tmp)
+        except Exception as e:
+            logger.error("P2P nursery error: %s", e)
+        finally:
+            self.callbacks.on_status_changed(False, "")
 
-        def listen(self, *_): pass
-        def listen_close(self, *_): pass
-        def open_stream(self, *_): pass
-        def close_stream(self, *_): pass
+    async def _start_node(self) -> None:
+        import trio
+        from libp2p import new_host
+        from libp2p.crypto.secp256k1 import create_new_key_pair
+        from libp2p.pubsub.gossipsub import GossipSub
+        from libp2p.pubsub.pubsub import Pubsub
+
+        listen_addrs = _build_listen_addrs(P2P_PORT)
+        key_pair     = create_new_key_pair()
+
+        try:
+            self._host = new_host(
+                key_pair=key_pair,
+                listen_addrs=listen_addrs,
+                enable_mDNS=True)
+            logger.info("new_host() with built-in mDNS")
+        except TypeError:
+            self._host = new_host(
+                key_pair=key_pair,
+                listen_addrs=listen_addrs)
+            logger.info("new_host() without mDNS arg")
+
+        self._host.set_stream_handler(FILE_PROTOCOL,    self._file_serve_handler)
+        self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
+
+        gossipsub   = GossipSub()
+        self._pubsub = Pubsub(self._host, gossipsub)
+
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(self._host.run)
+            nursery.start_soon(self._pubsub.run)
+            await trio.sleep(2)
+
+        peer_id = self._host.get_id().to_string()
+        self._running = True
+        listen_str    = ", ".join(str(a) for a in self._host.get_addrs())
+        logger.info("Listening on: %s", listen_str)
+        logger.info("P2P node started: %s  topic: %s", peer_id, self.topic_id)
+
+        self._sub = await self._pubsub.subscribe(self.topic_id)
+        self.callbacks.on_status_changed(True, peer_id)
+
+    async def _bootstrap(self) -> None:
+        import trio
+        await trio.sleep(3)
+        reached = 0
+        for addr in IPFS_BOOTSTRAP:
+            try:
+                import multiaddr as _ma
+                from libp2p.peer.peerinfo import info_from_p2p_addr
+                ma   = _ma.Multiaddr(addr)
+                info = info_from_p2p_addr(ma)
+                with trio.move_on_after(5):
+                    await self._host.connect(info)
+                    reached += 1
+            except Exception as e:
+                logger.debug("Bootstrap %s failed: %s", addr[-30:], e)
+        logger.info("Bootstrap: %d/%d nodes reached", reached, len(IPFS_BOOTSTRAP))
+        self._setup_extras()
+
+    def _setup_extras(self) -> None:
+        try:
+            import libp2p.discovery.mdns as _mdns
+            _mdns.setup_mdns(self._host, self.topic_id)
+        except Exception:
+            logger.debug("libp2p.discovery.mdns not available - "
+                         "mDNS disabled (already using built-in or not supported)")
+        try:
+            import libp2p.kademlia as _kad
+            _kad.setup_dht(self._host)
+        except Exception:
+            logger.debug("libp2p.kademlia not available - DHT skipped")
+        try:
+            import libp2p.autonat as _nat
+            _nat.setup_autonat(self._host)
+        except Exception:
+            logger.debug("libp2p.autonat not available - AutoNAT skipped")
+        try:
+            import libp2p.relay as _relay
+            _relay.setup_circuit_relay_v2(self._host)
+        except Exception:
+            logger.debug("Circuit Relay v2 not available")
 
     # ------------------------------------------------------------------
-    # Bootstrap
+    # Peer poll loop
     # ------------------------------------------------------------------
 
     async def _peer_poll_loop(self) -> None:
-        """
-        Polls the GossipSub mesh every 2 seconds for peers sharing
-        our topic. Only peers in our mesh are SplitP2P group members;
-        bootstrap nodes (Qm... IDs) are excluded automatically because
-        they don't subscribe to our group topic.
-        """
         import trio
-        own_id = self._host.get_id().to_string()
         logger.info("Peer poll loop started")
         while self._running:
+            await trio.sleep(2)
             try:
                 current: set[str] = set()
+                for pid in self._host.get_peerstore().peer_ids():
+                    pid_str = str(pid)
+                    if pid_str == str(self._host.get_id()):
+                        continue
+                    try:
+                        protos = await self._host.get_mux(pid)
+                        if not protos:
+                            continue
+                    except Exception:
+                        pass
+                    current.add(pid_str)
 
-                # Primary: GossipSub mesh peers for our topic
-                # These are the only peers that share our group.
+                # Also include peerstore fallback
                 try:
-                    mesh_peers = self._pubsub.router.mesh.get(
-                        self.topic_id, set())
-                    for pid in mesh_peers:
-                        pid_str = pid.to_string() \
-                            if hasattr(pid, 'to_string') else str(pid)
-                        if pid_str != own_id:
+                    for pid in self._host.get_peerstore().peer_ids():
+                        pid_str = str(pid)
+                        if pid_str != str(self._host.get_id()):
                             current.add(pid_str)
                 except Exception:
                     pass
 
-                # Fallback: peers in peerstore that are not bootstrap nodes.
-                # connections_with_peer() is unreliable across py-libp2p
-                # versions so we skip that check and treat any known
-                # non-bootstrap peer as a candidate. GossipSub will naturally
-                # stop delivering messages from peers that disconnect.
-                if not current:
-                    try:
-                        for pid in self._host.get_peerstore().peer_ids():
-                            pid_str = pid.to_string() \
-                                if hasattr(pid, 'to_string') else str(pid)
-                            if pid_str == own_id:
-                                continue
-                            # Skip legacy DHT-only bootstrap nodes (Qm... prefix)
-                            if pid_str.startswith("Qm"):
-                                continue
-                            current.add(pid_str)
-                    except Exception as e:
-                        logger.debug("Peerstore poll error: %s", e)
-
-                # Fire callbacks for changes
                 new_peers  = current - self._peers
                 gone_peers = self._peers - current
 
                 if new_peers:
                     logger.debug("Poll: %d known, %d new, %d gone",
                                  len(current), len(new_peers), len(gone_peers))
+
                 for pid in new_peers:
                     self._peers.add(pid)
                     self.callbacks.on_peer_connected(pid)
                     self._cmd_queue.put({"cmd": "req_history_from",
                                          "peer_id": pid})
-                    # Re-announce our member info to the new peer
                     self._cmd_queue.put({"cmd": "announce_member"})
                     logger.info("Group peer connected: %s", pid[:20])
 
@@ -365,119 +296,8 @@ class P2PNetwork:
             except Exception as e:
                 logger.debug("Peer poll loop error: %s", e)
 
-            await trio.sleep(2.0)
-
-    async def _setup_mdns(self) -> None:
-        """
-        Manual mDNS discovery - fallback for py-libp2p versions
-        that don't support enable_mDNS=True in new_host().
-        Silently skipped if the module is not available.
-        """
-        import trio
-        try:
-            from libp2p.discovery.mdns import MDNSService
-            service_name = f"_splitp2p_{self.topic_id[:8]}._udp.local."
-            mdns = MDNSService(self._host, service_name=service_name)
-            await mdns.start()
-            logger.info("Manual mDNS discovery started (service: %s)",
-                        self.topic_id[:8])
-        except ImportError:
-            logger.debug("libp2p.discovery.mdns not available - "
-                         "mDNS disabled (already using built-in or not supported)")
-        except Exception as e:
-            logger.warning("mDNS setup failed: %s", e)
-
-    async def _connect_bootstrap(self) -> None:
-        import trio
-        try:
-            import multiaddr
-            from libp2p.peer.peerinfo import info_from_p2p_addr
-        except ImportError:
-            return
-
-        connected = 0
-        for addr_str in IPFS_BOOTSTRAP:
-            try:
-                ma        = multiaddr.Multiaddr(addr_str)
-                peer_info = info_from_p2p_addr(ma)
-                with trio.move_on_after(10):
-                    await self._host.connect(peer_info)
-                    connected += 1
-                    logger.info("Bootstrap connected: %s", addr_str.split("/")[-1][:16])
-            except Exception as e:
-                logger.debug("Bootstrap %s failed: %s", addr_str[-30:], e)
-
-        logger.info("Bootstrap: %d/%d nodes reached", connected, len(IPFS_BOOTSTRAP))
-
-        # Nach Bootstrap: DHT + NAT-Traversal starten
-        await self._setup_nat_traversal()
-
-    async def _setup_nat_traversal(self) -> None:
-        """
-        Aktiviert AutoNAT, Circuit Relay v2 und Kademlia DHT.
-        Alle drei sind optional – fehlendes Modul -> graceful skip.
-
-        AutoNAT:      erkennt ob wir direkt erreichbar sind.
-        Circuit Relay: falls NAT erkannt -> Reservierung bei IPFS-Relay-Nodes.
-        Kademlia DHT: advertise + find topic_id im globalen Netz;
-                      Peers selber Gruppe finden sich ohne Bootstrap.
-        """
-        import trio
-
-        # ── Kademlia DHT ────────────────────────────────────────────
-        try:
-            from libp2p.kademlia.network import KademliaServer
-            self._dht = KademliaServer(self._host)
-            await self._dht.bootstrap(
-                [(peer_id, addr)
-                 for peer_id, addr in self._host.get_peerstore()
-                 .peer_ids()[:8]]
-            ) if hasattr(self._dht, 'bootstrap') else None
-            # Topic-ID im DHT advertisen (Peers selber Gruppe finden uns)
-            await self._dht.set(self.topic_id,
-                                self._host.get_id().to_string())
-            logger.info("Kademlia DHT active, topic advertised")
-            # Andere Peers suchen die dieselbe Gruppe advertisen
-            result = await self._dht.get(self.topic_id)
-            if result:
-                logger.info("DHT: group peer found: %s", str(result)[:40])
-        except ImportError:
-            logger.debug("libp2p.kademlia not available - DHT skipped")
-        except Exception as e:
-            logger.warning("Kademlia DHT error: %s", e)
-
-        # ── AutoNAT ─────────────────────────────────────────────────
-        try:
-            from libp2p.autonat import AutoNATService
-            self._autonat = AutoNATService(self._host)
-            with trio.move_on_after(15):
-                reachability = await self._autonat.probe_reachability()
-            logger.info("AutoNAT reachability: %s", reachability)
-            self._behind_nat = reachability != "public"
-        except ImportError:
-            logger.debug("libp2p.autonat not available - AutoNAT skipped")
-            self._behind_nat = True  # assume worst case
-        except Exception as e:
-            logger.warning("AutoNAT error: %s", e)
-            self._behind_nat = True
-
-        # ── Circuit Relay v2 (nur wenn hinter NAT) ──────────────────
-        if getattr(self, '_behind_nat', True):
-            try:
-                from libp2p.relay.circuit_v2 import CircuitRelayV2Client
-                self._relay = CircuitRelayV2Client(self._host)
-                # Reservierung bei einem der verbundenen Bootstrap-Peers
-                with trio.move_on_after(20):
-                    await self._relay.reserve()
-                logger.info("Circuit Relay v2: reservation active")
-            except ImportError:
-                logger.debug("Circuit Relay v2 not available")
-            except Exception as e:
-                logger.warning("Circuit Relay v2 error: %s", e)
-
-
     # ------------------------------------------------------------------
-    # GossipSub – Empfangen
+    # GossipSub receive loop
     # ------------------------------------------------------------------
 
     async def _receive_loop(self) -> None:
@@ -491,140 +311,100 @@ class P2PNetwork:
             except Exception as e:
                 logger.error("Receive loop error: %s", e)
 
-    def _verify_and_decode_blob(self, blob: bytes,
-                                 ptype: str) -> bool:
+    def _decrypt_and_verify(self, data_hex: str, record_type,
+                             pubkey_field: str = "author_pubkey") -> Optional[object]:
         """
-        Decrypts the blob and verifies the Ed25519 signature.
-        Returns True if valid, False if rejected.
-
-        Ablauf:
-          1. AES-GCM decrypt -> Expense/Settlement object
-          2. Verify Ed25519 signature of payer/sender
-          3. Nur bei Erfolg: True -> Callback wird aufgerufen
-
-        Warum hier und nicht im GUI-Callback:
-          Early verification prevents tampered blobs from ever
-          reaching the DB or UI. Any peer in the network could
-          otherwise send junk packets with a valid topic ID.
+        Decrypts an encrypted wire record and verifies its Ed25519 signature.
+        Returns the model object on success, None on any failure.
+        This happens before any callback is invoked — tampered or wrong-key
+        packets never reach the DB.
         """
+        from crypto import decrypt_record, verify_record
         try:
-            from crypto import (decrypt_expense, verify_expense,
-                                decrypt_settlement, verify_settlement)
-        except ImportError:
-            return True
-
-        try:
-            if ptype == "expense":
-                obj = decrypt_expense(blob, self._group_key)
-                if obj is None:
-                    logger.warning("Expense blob not decryptable "
-                                   "(falscher Key oder korrupt)")
-                    return False
-                if not verify_expense(obj):
-                    logger.warning("Invalid signature on expense %s "
-                                   "– verworfen", obj.id[:8])
-                    return False
-                # Creator integrity: payer_pubkey must never change.
-                # The Ed25519 signature already guarantees this cryptographically -
-                # an attacker cannot change obj.payer_pubkey without breaking
-                # the signature. This check is defense-in-depth:
-                # it catches the case where someone signs a new blob with
-                # a changed payer_pubkey but their own valid key.
-                try:
-                    from storage import DB_PATH as _dbp
-                    import sqlite3 as _sq
-                    _c = _sq.connect(_dbp, check_same_thread=False)
-                    _r = _c.execute(
-                        "SELECT blob FROM expenses WHERE id = ? AND is_deleted = 0",
-                        (obj.id,)
-                    ).fetchone()
-                    _c.close()
-                    if _r:
-                        existing = decrypt_expense(
-                            bytes(_r[0]), self._group_key)
-                        if existing and existing.payer_pubkey != obj.payer_pubkey:
-                            logger.warning(
-                                "Expense %s: payer_pubkey changed - rejected",
-                                obj.id[:8])
-                            return False
-                except Exception as _e:
-                    logger.debug("Creator check DB error: %s", _e)
-
-                logger.debug("Expense %s verified OK", obj.id[:8])
-                return True
-
-            elif ptype == "settlement":
-                obj = decrypt_settlement(blob, self._group_key)
-                if obj is None:
-                    logger.warning("Settlement blob not decryptable")
-                    return False
-                if not verify_settlement(obj):
-                    logger.warning("Invalid signature on settlement %s "
-                                   "– verworfen", obj.id[:8])
-                    return False
-                logger.debug("Settlement %s verified OK", obj.id[:8])
-                return True
-
-            elif ptype == "comment":
-                from crypto import decrypt_comment, verify_comment
-                obj = decrypt_comment(blob, self._group_key)
-                if obj is None:
-                    logger.warning("Comment blob not decryptable")
-                    return False
-                if not verify_comment(obj):
-                    logger.warning("Invalid signature on comment %s",
-                                   obj.id[:8])
-                    return False
-                return True
-
+            blob   = bytes.fromhex(data_hex)
+            record = decrypt_record(blob, self._group_key, record_type)
+            if record is None:
+                logger.warning("Decryption failed for %s", record_type.__name__)
+                return None
+            pubkey = getattr(record, pubkey_field, None)
+            if not pubkey:
+                logger.warning("Missing pubkey field '%s' on %s",
+                               pubkey_field, record_type.__name__)
+                return None
+            if not verify_record(record, pubkey):
+                return None
+            return record
         except Exception as e:
-            logger.warning("Verifikation Fehler (%s): %s", ptype, e)
-            return False
-
-        return True  # member packets: no blob signature, no filter
+            logger.warning("decrypt_and_verify(%s): %s",
+                           record_type.__name__, repr(e))
+            return None
 
     async def _dispatch(self, msg) -> None:
+        from models import Expense, Settlement, UserComment, Attachment, Split, User
         try:
             packet = json.loads(msg.data.decode())
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning("Malformed packet: %s", e)
             return
 
-        ptype = packet.get("type", "expense")
-        logger.debug("GossipSub packet received: type=%s id=%s",
-                     ptype, packet.get("id", "-")[:8])
-        try:
-            blob = bytes.fromhex(packet["blob"]) if "blob" in packet else b""
-        except ValueError:
-            logger.warning("Invalid hex blob in packet")
-            return
+        ptype = packet.get("type", "")
+        logger.debug("GossipSub recv: type=%s id=%s",
+                     ptype, packet.get("id", packet.get("pubkey", "-"))[:8])
 
-        if ptype in ("expense", "settlement"):
-            if not self._verify_and_decode_blob(blob, ptype):
-                return  # invalid signature or wrong key - reject
+        try:
             if ptype == "expense":
-                self.callbacks.on_expense_received(packet["id"], blob)
+                rec = self._decrypt_and_verify(
+                    packet["data"], Expense)
+                if rec:
+                    self.callbacks.on_expense_received(rec)
+
+            elif ptype == "split":
+                rec = self._decrypt_and_verify(
+                    packet["data"], Split)
+                if rec:
+                    self.callbacks.on_split_received(rec)
+
+            elif ptype == "settlement":
+                rec = self._decrypt_and_verify(
+                    packet["data"], Settlement)
+                if rec:
+                    self.callbacks.on_settlement_received(rec)
+
+            elif ptype == "comment":
+                rec = self._decrypt_and_verify(
+                    packet["data"], UserComment)
+                if rec:
+                    self.callbacks.on_comment_received(rec)
+
+            elif ptype == "attachment":
+                rec = self._decrypt_and_verify(
+                    packet["data"], Attachment)
+                if rec:
+                    self.callbacks.on_attachment_received(rec)
+
+            elif ptype == "user":
+                # User packets are plaintext — signed but not encrypted
+                from crypto import _verify
+                user = User.from_wire_dict(packet["user_data"])
+                if _verify(user.canonical_bytes(),
+                           packet.get("signature", ""),
+                           user.public_key):
+                    self.callbacks.on_user_received(user)
+                else:
+                    logger.warning("Invalid signature on user packet %s",
+                                   user.public_key[:12])
             else:
-                self.callbacks.on_settlement_received(packet["id"], blob)
-        elif ptype == "comment":
-            blob = bytes.fromhex(packet["blob"])
-            if not self._verify_and_decode_blob(blob, "comment"):
-                return
-            self.callbacks.on_comment_received(
-                packet["id"], packet["expense_id"], blob)
-        elif ptype == "member":
-            self.callbacks.on_member_received(packet["pubkey"], packet["data"])
-        else:
-            logger.debug("Unknown packet type: %s", ptype)
+                logger.debug("Unknown packet type: %s", ptype)
+
+        except Exception as e:
+            logger.warning("Dispatch error (%s): %s", ptype, repr(e))
 
     # ------------------------------------------------------------------
-    # Command loop (drains _cmd_queue in trio thread)
+    # Command loop
     # ------------------------------------------------------------------
 
     async def _cmd_loop(self) -> None:
         import trio
-
-        # Wir öffnen eine Nursery für alle Hintergrundaufgaben dieser Schleife
         async with trio.open_nursery() as nursery:
             while self._running:
                 try:
@@ -632,46 +412,35 @@ class P2PNetwork:
 
                     if cmd["cmd"] == "stop":
                         self._running = False
-                        nursery.cancel_scope.cancel()  # Bricht alle laufenden Downloads etc. ab
+                        nursery.cancel_scope.cancel()
                         return
 
                     elif cmd["cmd"] == "publish":
                         if self._pubsub:
-                            # Senden geht schnell, wir lagern es trotzdem sauber aus
-                            nursery.start_soon(self._pubsub.publish, self.topic_id, cmd["data"])
+                            nursery.start_soon(
+                                self._pubsub.publish,
+                                self.topic_id, cmd["data"])
 
                     elif cmd["cmd"] == "req_file":
-                        # Hilfsfunktion, um den Datei-Download in den Hintergrund zu schicken
-                        async def bg_download(sha, peers):
-                            for pid in peers:
-                                if await self._download_file(pid, sha):
-                                    break
-
-                        nursery.start_soon(bg_download, cmd["sha256"], list(self._peers))
+                        nursery.start_soon(
+                            self._download_file_all_peers, cmd["sha256"])
 
                     elif cmd["cmd"] == "req_history_from":
-                        # Ab in den Hintergrund damit!
-                        nursery.start_soon(self._request_history, cmd["peer_id"])
+                        nursery.start_soon(
+                            self._request_history, cmd["peer_id"])
 
                     elif cmd["cmd"] == "announce_member":
-                        # Publish own member data to newly connected peer
                         if self._own_pubkey and self._pubsub:
-                            nursery.start_soon(
-                                self.publish_member,
-                                self._own_pubkey,
-                                self._own_name,
-                                self._own_joined_at,
-                            )
+                            nursery.start_soon(self._publish_user_announce)
 
                     elif cmd["cmd"] == "req_history_all":
                         for pid in list(self._peers):
                             nursery.start_soon(self._request_history, pid)
+
                     elif cmd["cmd"] == "push_delta":
                         nursery.start_soon(
                             self._push_delta,
-                            cmd["peer_id"],
-                            cmd["server_map"],
-                        )
+                            cmd["peer_id"], cmd["server_map"])
 
                     elif cmd["cmd"] == "connect":
                         nursery.start_soon(self._connect_addr, cmd["addr"])
@@ -681,55 +450,79 @@ class P2PNetwork:
                 except Exception as e:
                     logger.error("Command loop error: %s", e)
                     await trio.sleep(0.1)
-                    
+
     # ------------------------------------------------------------------
-    # GossipSub – Senden (thread-safe, von tkinter aufrufbar)
+    # GossipSub — publish
     # ------------------------------------------------------------------
 
     def _publish_raw(self, data: bytes) -> None:
         if self._running:
             self._cmd_queue.put({"cmd": "publish", "data": data})
 
-    def publish_expense(self, expense_id: str, blob: bytes, timestamp: int) -> None:
-        self._publish_raw(json.dumps({
-            "type": "expense", "id": expense_id,
-            "timestamp": timestamp, "blob": blob.hex(),
-        }).encode())
+    def _make_packet(self, ptype: str, record, **extra) -> bytes:
+        """Encrypt record and wrap in a GossipSub packet."""
+        from crypto import encrypt_record
+        blob = encrypt_record(record, self._group_key)
+        pkt  = {"type": ptype, "id": record.id,
+                "timestamp": record.timestamp, "data": blob.hex()}
+        pkt.update(extra)
+        return json.dumps(pkt).encode()
 
-    def publish_settlement(self, settlement_id: str, blob: bytes, timestamp: int) -> None:
-        self._publish_raw(json.dumps({
-            "type": "settlement", "id": settlement_id,
-            "timestamp": timestamp, "blob": blob.hex(),
-        }).encode())
+    def publish_expense(self, expense) -> None:
+        self._publish_raw(self._make_packet("expense", expense))
 
-    def publish_comment(self, comment_id: str, expense_id: str,
-                        blob: bytes, timestamp: int) -> None:
-        self._publish_raw(json.dumps({
-            "type":       "comment",
-            "id":         comment_id,
-            "expense_id": expense_id,
-            "timestamp":  timestamp,
-            "blob":       blob.hex(),
-        }).encode())
+    def publish_splits(self, splits: list) -> None:
+        for s in splits:
+            self._publish_raw(self._make_packet("split", s))
 
-    def publish_member(self, pubkey: str, display_name: str, joined_at: int) -> None:
-        self._publish_raw(json.dumps({
-            "type": "member", "pubkey": pubkey,
-            "data": {"display_name": display_name, "joined_at": joined_at},
-        }).encode())
+    def publish_settlement(self, settlement) -> None:
+        self._publish_raw(self._make_packet("settlement", settlement))
+
+    def publish_comment(self, comment) -> None:
+        self._publish_raw(self._make_packet(
+            "comment", comment, belongs_to=comment.belongs_to))
+
+    def publish_attachment(self, attachment) -> None:
+        self._publish_raw(self._make_packet(
+            "attachment", attachment, belongs_to=attachment.belongs_to))
+
+    async def _publish_user_announce(self) -> None:
+        """User announce is plaintext + Ed25519 signed (not SecretBox encrypted)."""
+        from models import User
+        from crypto import sign_user
+        from config_manager import ConfigManager
+        try:
+            user = User.create(self._own_pubkey, self._own_name,
+                               self._group_id)
+            cfg_path = ConfigManager()._config_path
+            import json as _j
+            raw_key = _j.load(open(cfg_path)).get("private_key_hex", "")
+            if raw_key:
+                from crypto import private_key_from_bytes, sign_record
+                sk = private_key_from_bytes(bytes.fromhex(raw_key))
+                user.signature = sign_record(user, sk)
+            pkt = json.dumps({
+                "type":      "user",
+                "user_data": user.to_wire_dict(),
+                "signature": user.signature,
+            }).encode()
+            await self._pubsub.publish(self.topic_id, pkt)
+        except Exception as e:
+            logger.warning("User announce failed: %s", e)
+
+    def publish_member(self, pubkey: str, display_name: str,
+                       joined_at: int) -> None:
+        """Compatibility shim — triggers async user announce via cmd queue."""
+        self._own_pubkey    = pubkey
+        self._own_name      = display_name
+        self._own_joined_at = joined_at
+        self._cmd_queue.put({"cmd": "announce_member"})
 
     # ------------------------------------------------------------------
-    # File Transfer – Serving
+    # File Transfer — Serving
     # ------------------------------------------------------------------
 
     async def _file_serve_handler(self, stream) -> None:
-        """
-        Serves a file encrypted with AES-256-GCM.
-        Each chunk is individually encrypted so the receiver can
-        verify chunks as they arrive without buffering the whole file.
-        Wire format per chunk: 4-byte big-endian length + nonce(12) + ciphertext
-        Sentinel: 4 zero bytes (length=0) signals end of file.
-        """
         import trio
         try:
             sha256 = (await stream.read(64)).decode().strip()
@@ -739,27 +532,13 @@ class P2PNetwork:
             path = os.path.join(STORAGE_DIR, sha256)
             if not os.path.exists(path):
                 return
-            if not self._group_key:
-                logger.warning("File serve: no group key, sending unencrypted")
-                # Fallback: send raw (no group context)
-                with open(path, "rb") as f:
-                    while chunk := f.read(CHUNK_SIZE):
-                        await stream.write(chunk)
-            else:
-                from crypto import _group_aes_key
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-                key = _group_aes_key(self._group_key)
-                aes = AESGCM(key)
-                with open(path, "rb") as f:
-                    while chunk := f.read(CHUNK_SIZE):
-                        nonce = os.urandom(12)
-                        ct    = aes.encrypt(nonce, chunk, None)
-                        frame = nonce + ct
-                        # 4-byte length prefix so receiver knows frame size
-                        await stream.write(len(frame).to_bytes(4, 'big') + frame)
-                # Sentinel: 4 zero bytes = end of file
-                await stream.write(b'\x00\x00\x00\x00')
-            logger.info("Served file %s (encrypted)", sha256[:12])
+            from crypto import encrypt_chunk
+            with open(path, "rb") as f:
+                while chunk := f.read(CHUNK_SIZE):
+                    frame = encrypt_chunk(chunk, self._group_key)
+                    await stream.write(len(frame).to_bytes(4, "big") + frame)
+            await stream.write(b"\x00\x00\x00\x00")  # EOF sentinel
+            logger.info("Served file %s", sha256[:12])
         except Exception as e:
             logger.error("File serve error: %s", repr(e))
         finally:
@@ -769,62 +548,18 @@ class P2PNetwork:
                 pass
 
     # ------------------------------------------------------------------
-    # File Transfer – Requesting
+    # File Transfer — Downloading
     # ------------------------------------------------------------------
 
-    async def _connect_addr(self, addr_str: str) -> None:
-        """Connect to a peer by multiaddr string."""
-        import trio
-        try:
-            import multiaddr as _ma
-            from libp2p.peer.peerinfo import info_from_p2p_addr
-            ma = _ma.Multiaddr(addr_str)
-            try:
-                peer_info = info_from_p2p_addr(ma)
-            except Exception:
-                # addr without /p2p/... suffix - try direct
-                from libp2p.peer.peerinfo import PeerInfo
-                from libp2p.peer.id import ID
-                peer_info = PeerInfo(ID(b''), [ma])
-            with trio.move_on_after(15):
-                await self._host.connect(peer_info)
-                logger.info("Manual connect OK: %s", addr_str[-40:])
-        except Exception as e:
-            logger.warning("Manual connect failed %s: %s",
-                           addr_str[-40:], e)
-
-    async def _cleanup_stale_tmp(self) -> None:
-        """
-        Deletes all *.tmp files in the storage folder at startup.
-        These are always from aborted downloads and always incomplete
-        (the hash never matches).
-        Runs once at startup as a Trio task.
-        """
-        from storage import STORAGE_DIR
-        try:
-            removed = 0
-            for fname in os.listdir(STORAGE_DIR):
-                if fname.endswith(".tmp"):
-                    path = os.path.join(STORAGE_DIR, fname)
-                    try:
-                        os.remove(path)
-                        removed += 1
-                        logger.info("Stale .tmp removed: %s", fname)
-                    except OSError as e:
-                        logger.warning("Cannot remove .tmp %s: %s", fname, e)
-            if removed:
-                logger.info("Startup cleanup: removed %d stale .tmp file(s)",
-                            removed)
-        except Exception as e:
-            logger.warning("Startup .tmp cleanup failed: %s", e)
+    async def _download_file_all_peers(self, sha256: str) -> None:
+        for pid in list(self._peers):
+            ok = await self._download_file(pid, sha256)
+            if ok:
+                return
+        logger.warning("File %s unavailable from any of %d peers",
+                       sha256[:12], len(self._peers))
 
     async def _download_file(self, peer_id_str: str, sha256: str) -> bool:
-        """
-        Downloads a file from a peer.
-        Retry logic: up to DOWNLOAD_RETRIES attempts with exponential
-        backoff. On hash mismatch or timeout the .tmp file is deleted
-        and the next attempt starts fresh.
-        """
         import trio
         from storage import STORAGE_DIR
         temp = os.path.join(STORAGE_DIR, sha256 + ".tmp")
@@ -836,37 +571,23 @@ class P2PNetwork:
                             sha256[:12], attempt + 1, DOWNLOAD_RETRIES, wait)
                 await trio.sleep(wait)
 
-            stream = None
             try:
                 from libp2p.peer.id import ID as PeerID
-
-                # --- NEU: 15-Sekunden-Timeout für den Stream-Aufbau ---
-                with trio.move_on_after(15) as cancel_scope:
+                with trio.move_on_after(15) as cs:
                     stream = await self._host.new_stream(
                         PeerID.from_base58(peer_id_str), [FILE_PROTOCOL])
-
-                if cancel_scope.cancelled_caught:
-                    logger.warning("Timeout beim Verbindungsaufbau für Datei %s (Versuch %d)",
-                                   sha256[:12], attempt + 1)
-                    continue  # Timeout -> direkt nächster Versuch
-                # ------------------------------------------------------
-
+                if cs.cancelled_caught:
+                    logger.warning("File stream open timeout for %s", sha256[:12])
+                    continue
             except Exception as e:
                 logger.warning("Cannot open file stream to %s: %s",
                                peer_id_str[:12], repr(e))
-                continue  # try next attempt
+                continue
 
             try:
+                from crypto import decrypt_chunk
                 h = hashlib.sha256()
                 await stream.write(sha256.encode())
-
-                # Set up decryption if we have a group key
-                aes = None
-                if self._group_key:
-                    from crypto import _group_aes_key
-                    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-                    aes = AESGCM(_group_aes_key(
-                        self._group_key))
 
                 with open(temp, "wb") as f:
                     buf = b""
@@ -882,24 +603,23 @@ class P2PNetwork:
                         if not data:
                             break
                         buf += data
-                        # Process complete framed chunks
                         while len(buf) >= 4:
-                            frame_len = int.from_bytes(buf[:4], 'big')
-                            if frame_len == 0:  # EOF sentinel
+                            frame_len = int.from_bytes(buf[:4], "big")
+                            if frame_len == 0:   # EOF sentinel
                                 buf = b""
                                 break
                             if len(buf) < 4 + frame_len:
-                                break  # wait for more data
+                                break
                             frame = buf[4:4 + frame_len]
                             buf   = buf[4 + frame_len:]
-                            plain = _dc(frame, self._group_key)
+                            plain = decrypt_chunk(frame, self._group_key)
                             f.write(plain)
                             h.update(plain)
 
                 if h.hexdigest() == sha256:
                     os.rename(temp, os.path.join(STORAGE_DIR, sha256))
                     self.callbacks.on_file_received(sha256)
-                    logger.info("File %s downloaded and decrypted (attempt %d)",
+                    logger.info("File %s downloaded (attempt %d)",
                                 sha256[:12], attempt + 1)
                     return True
 
@@ -914,140 +634,159 @@ class P2PNetwork:
                 if os.path.exists(temp):
                     os.remove(temp)
             finally:
-                if stream:
-                    try:
-                        await stream.close()
-                    except Exception:
-                        pass
+                try:
+                    await stream.close()
+                except Exception:
+                    pass
 
         logger.error("File %s failed after %d attempts",
                      sha256[:12], DOWNLOAD_RETRIES)
         return False
 
-    def connect_to_peer(self, multiaddr_str: str) -> None:
-        """
-        Manually connect to a known peer.
-        multiaddr_str examples:
-          /ip4/192.168.1.42/tcp/8000/p2p/12D3KooW...
-          /ip6/fe80::1/tcp/8000/p2p/12D3KooW...  (IPv6 link-local)
-          /ip4/192.168.1.42/tcp/8000             (without peer ID)
-        Thread-safe: schedules the connect in the trio event loop.
-        """
-        if self._running:
-            self._cmd_queue.put({"cmd": "connect",
-                                 "addr": multiaddr_str})
-
-    def request_file(self, sha256: str) -> None:
-        if self._peers and self._running:
-            self._cmd_queue.put({"cmd": "req_file", "sha256": sha256})
-
     # ------------------------------------------------------------------
-    # History Sync – Serving
+    # Misc async helpers
     # ------------------------------------------------------------------
 
-    async def _push_delta(self, peer_id_str: str, server_map: dict) -> None:
-        """
-        After receiving a history response, the server sends its lamport map.
-        We compare and push back any records the server is missing.
-        Uses the same history protocol but in the opposite direction.
-        """
+    async def _connect_addr(self, addr_str: str) -> None:
         import trio
-        from storage import (load_expense_blobs_unknown_to,
-                             load_settlement_blobs_unknown_to,
-                             load_comment_blobs_unknown_to)
-        known_exp = server_map.get("expenses", {})
-        known_set = server_map.get("settlements", {})
-        known_cmt = server_map.get("comments", {})
-
-        to_push = []
-        for eid, blob in load_expense_blobs_unknown_to(known_exp):
-            to_push.append(json.dumps({
-                "type": "expense", "id": eid, "blob": blob.hex()}).encode())
-        for sid, blob in load_settlement_blobs_unknown_to(known_set):
-            to_push.append(json.dumps({
-                "type": "settlement", "id": sid, "blob": blob.hex()}).encode())
-        for cid, xid, cblob in load_comment_blobs_unknown_to(known_cmt):
-            to_push.append(json.dumps({
-                "type": "comment", "id": cid,
-                "expense_id": xid, "blob": cblob.hex()}).encode())
-
-        if not to_push:
-            logger.debug("Delta push: server already up to date")
-            return
-
-        # Push via GossipSub (broadcast) — simpler than opening a new stream
-        for pkt_bytes in to_push:
+        try:
+            import multiaddr as _ma
+            from libp2p.peer.peerinfo import info_from_p2p_addr
+            ma = _ma.Multiaddr(addr_str)
             try:
-                await self._pubsub.publish(self.topic_id, pkt_bytes)
-                await trio.sleep(0.05)  # small delay to not overwhelm
-            except Exception as e:
-                logger.warning("Delta push error: %s", e)
+                peer_info = info_from_p2p_addr(ma)
+            except Exception:
+                from libp2p.peer.peerinfo import PeerInfo
+                from libp2p.peer.id import ID
+                peer_info = PeerInfo(ID(b""), [ma])
+            with trio.move_on_after(15):
+                await self._host.connect(peer_info)
+                logger.info("Manual connect OK: %s", addr_str[-40:])
+        except Exception as e:
+            logger.warning("Manual connect failed %s: %s", addr_str[-40:], e)
 
-        logger.info("Delta push: sent %d records to %s",
-                    len(to_push), peer_id_str[:12])
+    async def _cleanup_stale_tmp(self) -> None:
+        from storage import STORAGE_DIR
+        try:
+            removed = 0
+            for fname in os.listdir(STORAGE_DIR):
+                if fname.endswith(".tmp"):
+                    path = os.path.join(STORAGE_DIR, fname)
+                    try:
+                        os.remove(path)
+                        removed += 1
+                    except OSError:
+                        pass
+            if removed:
+                logger.info("Startup cleanup: %d stale .tmp removed", removed)
+        except Exception as e:
+            logger.warning("Startup .tmp cleanup failed: %s", e)
+
+    # ------------------------------------------------------------------
+    # History Sync — Serving (delta via Lamport maps)
+    # ------------------------------------------------------------------
+
+    def _row_to_wire(self, row, ptype: str) -> Optional[bytes]:
+        """
+        Converts a sqlite3.Row to an encrypted wire packet.
+        Returns None if encryption fails.
+        is_stored is excluded for attachments (local-only field).
+        """
+        from crypto import encrypt_record
+        from models import (Expense, Settlement, UserComment,
+                            Attachment, Split, User)
+        TYPE_MAP = {
+            "expense":    Expense,
+            "settlement": Settlement,
+            "comment":    UserComment,
+            "attachment": Attachment,
+            "split":      Split,
+            "user":       User,
+        }
+        cls = TYPE_MAP.get(ptype)
+        if not cls:
+            return None
+        try:
+            d = dict(row)
+            # Remove local-only fields before serializing
+            d.pop("is_stored", None)
+            record = cls.from_wire_dict(d)
+            return encrypt_record(record, self._group_key)
+        except Exception as e:
+            logger.warning("Row→wire failed (%s): %s", ptype, e)
+            return None
 
     async def _history_serve_handler(self, stream) -> None:
         """
-        Delta history sync (v2).
+        Delta history sync.
 
-        Protocol:
-          Request:  JSON {"topic": str,
-                         "known": {"expenses":   {id: lamport},
-                                   "settlements": {id: lamport},
-                                   "comments":    {id: lamport}}}
-          Response: line-delimited JSON packets, blank line = EOF
-          After response: server sends its own lamport map so the client
-          can push back what the server is missing (bidirectional delta).
+        Request:  JSON {"topic": str, "known": {table: {id: lamport}, ...}}
+        Response: line-delimited JSON, blank line = EOF
+                  Last record before EOF: {"type":"lamport_map","map":{...}}
         """
         import trio
         try:
-            req_raw = await stream.read(65536)  # larger for lamport map
+            req_raw = await stream.read(65536)
             req     = json.loads(req_raw.decode())
             topic   = req.get("topic", "")
 
             if topic != self.topic_id:
-                logger.debug("History request for wrong topic - ignoring")
+                logger.debug("History: wrong topic, ignoring")
                 return
 
+            if not self._db:
+                logger.warning("History: no DB connection, cannot serve")
+                await stream.write(b"\n")
+                return
+
+            from storage import get_lamport_map, get_records_unknown_to
             known = req.get("known", {})
-            known_exp = known.get("expenses", {})
-            known_set = known.get("settlements", {})
-            known_cmt = known.get("comments", {})
+            delta = get_records_unknown_to(self._db, known, self._group_id)
+            sent  = 0
 
-            from storage import (load_expense_blobs_unknown_to,
-                                 load_settlement_blobs_unknown_to,
-                                 load_comment_blobs_unknown_to,
-                                 get_lamport_map)
-            sent = 0
-            for eid, blob in load_expense_blobs_unknown_to(known_exp):
+            type_map = [
+                ("expense",    "expenses"),
+                ("settlement", "settlements"),
+                ("comment",    "comments"),
+                ("split",      "splits"),
+                ("attachment", "attachments"),
+            ]
+
+            for ptype, table_key in type_map:
+                for row in delta.get(table_key, []):
+                    blob = self._row_to_wire(row, ptype)
+                    if blob is None:
+                        continue
+                    extra: dict = {}
+                    if ptype in ("comment", "split", "attachment"):
+                        extra["belongs_to"] = row["belongs_to"]
+                    line = json.dumps({
+                        "type":      ptype,
+                        "id":        row["id"],
+                        "timestamp": row["timestamp"],
+                        "data":      blob.hex(),
+                        **extra,
+                    }) + "\n"
+                    await stream.write(line.encode())
+                    sent += 1
+
+            # Users are sent unencrypted (but signed) — different format
+            for row in delta.get("users", []):
                 line = json.dumps({
-                    "type": "expense", "id": eid, "blob": blob.hex()
-                }) + "\n"
-                await stream.write(line.encode())
-                sent += 1
-            for sid, blob in load_settlement_blobs_unknown_to(known_set):
-                line = json.dumps({
-                    "type": "settlement", "id": sid, "blob": blob.hex()
-                }) + "\n"
-                await stream.write(line.encode())
-                sent += 1
-            for cid, xid, cblob in load_comment_blobs_unknown_to(known_cmt):
-                line = json.dumps({
-                    "type": "comment", "id": cid,
-                    "expense_id": xid, "blob": cblob.hex()
+                    "type":      "user",
+                    "user_data": dict(row),
+                    "signature": row["signature"],
                 }) + "\n"
                 await stream.write(line.encode())
                 sent += 1
 
-            # Send our own lamport map so client can push back
-            # what we are missing (bidirectional delta in one round-trip)
-            my_map = get_lamport_map()
-            map_line = json.dumps({
-                "type": "lamport_map", "map": my_map}) + "\n"
-            await stream.write(map_line.encode())
+            # Send own lamport map for bidirectional delta
+            my_map = get_lamport_map(self._db, self._group_id)
+            await stream.write(
+                (json.dumps({"type": "lamport_map", "map": my_map}) + "\n").encode())
 
             await stream.write(b"\n")  # EOF
-            logger.info("History v2: served %d records", sent)
+            logger.info("History: served %d records", sent)
 
         except Exception as e:
             logger.error("History serve error: %s", repr(e))
@@ -1058,102 +797,196 @@ class P2PNetwork:
                 pass
 
     # ------------------------------------------------------------------
-    # History Sync – Requesting
+    # History Sync — Requesting
     # ------------------------------------------------------------------
 
     async def _request_history(self, peer_id_str: str) -> None:
         import trio
+        from models import Expense, Settlement, UserComment, Attachment, Split, User
         try:
             from libp2p.peer.id import ID as PeerID
-
-            # --- NEU: Strenger 15-Sekunden-Timeout für den Verbindungsaufbau ---
-            with trio.move_on_after(15) as cancel_scope:
+            with trio.move_on_after(15) as cs:
                 stream = await self._host.new_stream(
                     PeerID.from_base58(peer_id_str), [HISTORY_PROTOCOL])
-
-            if cancel_scope.cancelled_caught:
-                logger.warning(f"Timeout beim History-Sync mit Peer {peer_id_str[:12]}")
+            if cs.cancelled_caught:
+                logger.warning("History stream timeout to %s", peer_id_str[:12])
                 return
-            # -------------------------------------------------------------------
         except Exception as e:
-            logger.debug("Cannot open history stream to %s: %s", peer_id_str[:12], e)
+            logger.debug("Cannot open history stream to %s: %s",
+                         peer_id_str[:12], e)
             return
 
         try:
             from storage import get_lamport_map
-            my_map = get_lamport_map()
-            req = json.dumps({
-                "topic": self.topic_id,
-                "known": my_map,
-            })
+            if not self._db:
+                logger.warning("History request: no DB connection")
+                return
+            my_map = get_lamport_map(self._db, self._group_id)
+            req    = json.dumps({"topic": self.topic_id, "known": my_map})
             await stream.write(req.encode())
 
-            buf = b""
-            n_exp = n_set = 0
-            server_map = None  # lamport map the server sends back
+            buf        = b""
+            counts     = {k: 0 for k in
+                          ("expenses","settlements","comments",
+                           "splits","attachments","users")}
+            server_map = None
+
             while True:
                 with trio.move_on_after(30) as cancel:
                     chunk = await stream.read(CHUNK_SIZE)
-                if cancel.cancelled_caught:
-                    break
-                if not chunk:
+                if cancel.cancelled_caught or not chunk:
                     break
                 buf += chunk
+
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
-                    if not line.strip():  # EOF
-                        self.callbacks.on_history_synced(n_exp, n_set)
-                        # Push back what the server is missing
+                    if not line.strip():   # EOF
+                        self.callbacks.on_history_synced(counts)
                         if server_map:
                             self._cmd_queue.put({
-                                "cmd": "push_delta",
-                                "peer_id": peer_id_str,
+                                "cmd":        "push_delta",
+                                "peer_id":    peer_id_str,
                                 "server_map": server_map,
                             })
                         return
+
                     try:
                         pkt   = json.loads(line.decode())
                         ptype = pkt.get("type", "")
+
                         if ptype == "lamport_map":
                             server_map = pkt.get("map", {})
                             continue
-                        blob  = bytes.fromhex(pkt["blob"])
-                        if ptype in ("expense", "settlement", "comment"):
-                            if not self._verify_and_decode_blob(blob, ptype):
-                                logger.warning("History: packet rejected "
-                                               "(invalid signature)")
-                                continue
-                        if ptype == "expense":
-                            self.callbacks.on_expense_received(pkt["id"], blob)
-                            n_exp += 1
-                        elif ptype == "settlement":
-                            self.callbacks.on_settlement_received(pkt["id"], blob)
-                            n_set += 1
-                        elif ptype == "comment":
-                            self.callbacks.on_comment_received(
-                                pkt["id"], pkt.get("expense_id",""), blob)
+
+                        if ptype == "user":
+                            from crypto import _verify
+                            ud   = pkt.get("user_data", {})
+                            user = User.from_wire_dict(ud)
+                            if _verify(user.canonical_bytes(),
+                                       pkt.get("signature", ""),
+                                       user.public_key):
+                                self.callbacks.on_user_received(user)
+                                counts["users"] += 1
+                            continue
+
+                        TYPE_MAP = {
+                            "expense":    (Expense,    "expenses"),
+                            "settlement": (Settlement, "settlements"),
+                            "comment":    (UserComment,"comments"),
+                            "split":      (Split,      "splits"),
+                            "attachment": (Attachment, "attachments"),
+                        }
+                        if ptype in TYPE_MAP:
+                            cls, key = TYPE_MAP[ptype]
+                            rec = self._decrypt_and_verify(
+                                pkt["data"], cls)
+                            if rec:
+                                dispatch = {
+                                    "expense":    self.callbacks.on_expense_received,
+                                    "settlement": self.callbacks.on_settlement_received,
+                                    "comment":    self.callbacks.on_comment_received,
+                                    "split":      self.callbacks.on_split_received,
+                                    "attachment": self.callbacks.on_attachment_received,
+                                }[ptype]
+                                dispatch(rec)
+                                counts[key] += 1
+
                     except Exception as e:
                         logger.warning("History parse error: %s", e)
 
-            self.callbacks.on_history_synced(n_exp, n_set)
-            logger.info("History v2: +%d expenses +%d settlements from %s",
-                        n_exp, n_set, peer_id_str[:12])
+            self.callbacks.on_history_synced(counts)
+            logger.info("History: +%s from %s", counts, peer_id_str[:12])
 
         except Exception as e:
-            logger.error("History request error from %s: %s", peer_id_str[:12], e)
+            logger.error("History request error from %s: %s",
+                         peer_id_str[:12], e)
         finally:
             try:
                 await stream.close()
             except Exception:
                 pass
 
+    # ------------------------------------------------------------------
+    # Push delta back to server
+    # ------------------------------------------------------------------
+
+    async def _push_delta(self, peer_id_str: str, server_map: dict) -> None:
+        """
+        After history sync the server sends its lamport map.
+        We compute what the server is missing and push it back via GossipSub.
+        """
+        import trio
+        from storage import get_records_unknown_to
+
+        if not self._db:
+            return
+
+        delta = get_records_unknown_to(self._db, server_map, self._group_id)
+        to_push: list[bytes] = []
+
+        type_map = [
+            ("expense",    "expenses"),
+            ("settlement", "settlements"),
+            ("comment",    "comments"),
+            ("split",      "splits"),
+            ("attachment", "attachments"),
+        ]
+
+        for ptype, key in type_map:
+            for row in delta.get(key, []):
+                blob = self._row_to_wire(row, ptype)
+                if blob is None:
+                    continue
+                extra: dict = {}
+                if ptype in ("comment", "split", "attachment"):
+                    extra["belongs_to"] = row["belongs_to"]
+                pkt = json.dumps({
+                    "type":      ptype,
+                    "id":        row["id"],
+                    "timestamp": row["timestamp"],
+                    "data":      blob.hex(),
+                    **extra,
+                }).encode()
+                to_push.append(pkt)
+
+        for row in delta.get("users", []):
+            pkt = json.dumps({
+                "type":      "user",
+                "user_data": dict(row),
+                "signature": row["signature"],
+            }).encode()
+            to_push.append(pkt)
+
+        if not to_push:
+            logger.debug("Delta push: server %s already up to date",
+                         peer_id_str[:12])
+            return
+
+        for pkt in to_push:
+            try:
+                await self._pubsub.publish(self.topic_id, pkt)
+                await trio.sleep(0.05)
+            except Exception as e:
+                logger.warning("Delta push error: %s", e)
+
+        logger.info("Delta push: sent %d records to %s",
+                    len(to_push), peer_id_str[:12])
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def request_file(self, sha256: str) -> None:
+        if self._running:
+            self._cmd_queue.put({"cmd": "req_file", "sha256": sha256})
+
     def request_history_from_all(self) -> None:
         if self._running:
             self._cmd_queue.put({"cmd": "req_history_all"})
 
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
+    def connect_to_peer(self, multiaddr_str: str) -> None:
+        if self._running:
+            self._cmd_queue.put({"cmd": "connect", "addr": multiaddr_str})
 
     @property
     def is_online(self) -> bool:
