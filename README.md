@@ -37,17 +37,25 @@ there's no `requirements.txt`.
 
 ```bash
 pip install -e ".[dev]"
-pre-commit install   # runs ruff + mypy + pytest on every commit
+pre-commit install                       # runs ruff + mypy on every commit
+pre-commit install --hook-type pre-push  # runs pytest before every push
 ```
 
 Ruff and mypy are configured in `pyproject.toml` (`[tool.ruff]`, `[tool.mypy]`).
-To run everything the pre-commit hook runs, manually:
+pytest runs on push rather than on every commit since the suite drives real
+Tkinter widgets and is slow enough to be annoying mid-edit; ruff/mypy stay on
+commit since they're fast. To run everything these hooks run, manually:
 
 ```bash
 ruff check . && ruff format --check .
 mypy .
 pytest
 ```
+
+`tests/test_smoke_app.py` starts the real app end-to-end (real P2P
+networking, hits the internet) and is excluded from the default `pytest` run
+and the pre-push hook; run it explicitly with `pytest -m smoke` before
+relying on a release.
 
 The same four checks run in CI on every push/PR to `main`
 (`.github/workflows/ci.yml`) — not yet verified end-to-end on an actual
@@ -293,7 +301,9 @@ write with whatever Lamport clock it carries.
   thread fail immediately on every previous run. Full two-device GossipSub
   sync (actually exchanging expenses/settlements) has still not been
   exercised in this environment — test with two real instances before
-  trusting sync in practice.
+  trusting sync in practice. See
+  [`docs/manual-p2p-test-checklist.md`](docs/manual-p2p-test-checklist.md)
+  for a checklist to work through when doing that.
 - Camera QR scanning depends on `opencv-python`; if it's not installed the
   "Scan camera" button is simply hidden (falls back to image-file import or
   pasting the base64 text).

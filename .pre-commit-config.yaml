@@ -10,12 +10,14 @@ repos:
         entry: ruff check --fix
         language: system
         types: [python]
+        stages: [pre-commit]
 
       - id: ruff-format
         name: ruff format
         entry: ruff format
         language: system
         types: [python]
+        stages: [pre-commit]
 
       - id: mypy
         name: mypy
@@ -23,6 +25,7 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+        stages: [pre-commit]
 
       - id: pytest
         name: pytest
@@ -30,3 +33,4 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+        stages: [pre-push]
