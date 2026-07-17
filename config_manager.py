@@ -11,6 +11,7 @@ directory creation and error handling.
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -37,13 +38,13 @@ class ConfigManager:
         """
         self.app_name = app_name
         self.config_path = self._get_config_path(app_name)
-        self.config_file = os.path.join(self.config_path, filename)
+        self.config_file = self.config_path / filename
         self.data: dict[str, Any] = {}
         self._ensure_directory_exists()
         self.load()
 
     @staticmethod
-    def _get_config_path(app_name: str) -> str:
+    def _get_config_path(app_name: str) -> Path:
         """
         Returns platform-specific configuration directory path.
 
@@ -57,12 +58,12 @@ class ConfigManager:
             Windows:   %LOCALAPPDATA%/{app_name}
             Linux/Mac: ~/.config/{app_name}
         """
-        home_dir = os.path.expanduser("~")
+        home_dir = Path.home()
 
         if os.name == "nt":  # Windows
-            config_dir = os.path.join(home_dir, "AppData", "Local", app_name)
+            config_dir = home_dir / "AppData" / "Local" / app_name
         else:  # Linux, Mac, Unix
-            config_dir = os.path.join(home_dir, ".config", app_name)
+            config_dir = home_dir / ".config" / app_name
 
         logger.debug(f"Config path: {config_dir}")
         return config_dir
@@ -73,9 +74,9 @@ class ConfigManager:
 
         Creates all intermediate directories as needed.
         """
-        if not os.path.exists(self.config_path):
+        if not self.config_path.exists():
             try:
-                os.makedirs(self.config_path, exist_ok=True)
+                self.config_path.mkdir(parents=True, exist_ok=True)
                 logger.info(f"Created config directory: {self.config_path}")
             except OSError as e:
                 logger.error(f"Failed to create config directory: {e}")
@@ -89,12 +90,12 @@ class ConfigManager:
         Does not raise exceptions - logs warnings instead.
         """
         try:
-            if not os.path.exists(self.config_file):
+            if not self.config_file.exists():
                 logger.info("Config file not found, starting with empty config")
                 self.data = {}
                 return
 
-            with open(self.config_file, encoding="utf-8") as f:
+            with self.config_file.open(encoding="utf-8") as f:
                 self.data = json.load(f)
                 logger.info(f"Loaded config with {len(self.data)} entries")
 
@@ -118,7 +119,7 @@ class ConfigManager:
             # Ensure directory still exists
             self._ensure_directory_exists()
 
-            with open(self.config_file, "w", encoding="utf-8") as f:
+            with self.config_file.open("w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=4, ensure_ascii=False)
 
             logger.debug(f"Saved config with {len(self.data)} entries")

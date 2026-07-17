@@ -25,11 +25,11 @@ Sync status:
 """
 
 import logging
-import os
 import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ def set_paths(db_path: str, storage_dir: str) -> None:
     global DB_PATH, STORAGE_DIR
     DB_PATH = db_path
     STORAGE_DIR = storage_dir
-    os.makedirs(storage_dir, exist_ok=True)
+    Path(storage_dir).mkdir(parents=True, exist_ok=True)
     logger.info("Paths set: db=%s  storage=%s", db_path, storage_dir)
 
 
@@ -614,12 +614,12 @@ def get_attachments(db: sqlite3.Connection, expense_id: str) -> list[sqlite3.Row
 def attachment_exists(sha256: str) -> bool:
     if not STORAGE_DIR:
         return False
-    return os.path.exists(os.path.join(STORAGE_DIR, sha256))
+    return (Path(STORAGE_DIR) / sha256).exists()
 
 
 def attachment_path(sha256: str) -> str | None:
-    path = os.path.join(STORAGE_DIR, sha256)
-    return path if os.path.exists(path) else None
+    path = Path(STORAGE_DIR) / sha256
+    return str(path) if path.exists() else None
 
 
 # ---------------------------------------------------------------------------

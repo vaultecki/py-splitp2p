@@ -336,3 +336,20 @@ def test_wins_tiebreaks_on_timestamp_then_author():
     assert storage._wins(5, 200, 5, 100) is True
     assert storage._wins(5, 100, 5, 100, "zzz", "aaa") is True
     assert storage._wins(5, 100, 5, 100, "aaa", "zzz") is False
+
+
+def test_attachment_exists_and_path(tmp_path):
+    storage.STORAGE_DIR = str(tmp_path)
+    assert storage.attachment_exists("deadbeef") is False
+    assert storage.attachment_path("deadbeef") is None
+
+    (tmp_path / "deadbeef").write_bytes(b"file contents")
+    assert storage.attachment_exists("deadbeef") is True
+    assert storage.attachment_path("deadbeef") == str(tmp_path / "deadbeef")
+
+    storage.STORAGE_DIR = ""
+
+
+def test_attachment_exists_false_when_storage_dir_unset():
+    storage.STORAGE_DIR = ""
+    assert storage.attachment_exists("deadbeef") is False

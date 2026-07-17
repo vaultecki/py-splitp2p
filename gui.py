@@ -13,6 +13,7 @@ import time
 import tkinter as tk
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
+from pathlib import Path
 from tkinter import ttk
 from typing import ClassVar
 
@@ -846,8 +847,8 @@ class StorageSetupDialog(tk.Toplevel):
                         parent=self,
                         defaultextension=".db",
                         filetypes=[("SQLite", "*.db"), ("All", "*.*")],
-                        initialfile=os.path.basename(v.get()),
-                        initialdir=os.path.dirname(os.path.abspath(v.get())),
+                        initialfile=Path(v.get()).name,
+                        initialdir=Path(v.get()).resolve().parent,
                     )
                 )
                 if p:
@@ -871,8 +872,8 @@ class StorageSetupDialog(tk.Toplevel):
             mb.showerror("Error", "Both paths must be specified.", parent=self)
             return
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-            os.makedirs(att_dir, exist_ok=True)
+            Path(db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
+            Path(att_dir).mkdir(parents=True, exist_ok=True)
         except OSError as e:
             mb.showerror("Error", f"Could not create folder:\n{e}", parent=self)
             return
@@ -1157,11 +1158,11 @@ class ExpenseDialog(tk.Toplevel):
         )
         if not path:
             return
-        with open(path, "rb") as f:
+        with Path(path).open("rb") as f:
             self._att_data = f.read()
         self._att_path = path
         self._existing_att = None
-        fname = os.path.basename(path)
+        fname = Path(path).name
         sz = len(self._att_data)
         self._att_label.configure(
             text=f"📎 {fname} ({sz / 1024:.1f} KB)" if sz >= 1024 else f"📎 {fname} ({sz} B)",
@@ -1264,7 +1265,7 @@ class ExpenseDialog(tk.Toplevel):
             save_attachment(self._att_data, sha)
             attachment = Attachment(
                 sha256=sha,
-                filename=os.path.basename(self._att_path),
+                filename=Path(self._att_path).name,
                 size=len(self._att_data),
                 mime_type=mime_type_from_path(self._att_path),
             )
@@ -1864,7 +1865,7 @@ class ExportDialog(tk.Toplevel):
         )
         if not path:
             return
-        with open(path, "w", newline="", encoding="utf-8") as f:
+        with Path(path).open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if self._incl_exp.get():
                 w.writerow(
@@ -2441,7 +2442,7 @@ class ActivityLogWindow(tk.Toplevel):
         )
         if not path:
             return
-        with open(path, "w", encoding="utf-8") as f:
+        with Path(path).open("w", encoding="utf-8") as f:
             f.write("SplitP2P - Activity Log\n")
             f.write(f"Exportiert: {time.strftime('%d.%m.%Y %H:%M:%S')}\n")
             f.write("=" * 60 + "\n\n")
@@ -2718,15 +2719,15 @@ class App(tk.Tk):
 
     @staticmethod
     def _default_paths() -> dict:
-        home = os.path.expanduser("~")
+        home = Path.home()
         base = (
-            os.path.join(home, "AppData", "Local", "SplitP2P")
+            home / "AppData" / "Local" / "SplitP2P"
             if os.name == "nt"
-            else os.path.join(home, ".local", "share", "SplitP2P")
+            else home / ".local" / "share" / "SplitP2P"
         )
         return {
-            "db_path": os.path.join(base, "splitp2p.db"),
-            "storage_dir": os.path.join(base, "attachments"),
+            "db_path": str(base / "splitp2p.db"),
+            "storage_dir": str(base / "attachments"),
         }
 
     def _init_identity(self):
@@ -3058,8 +3059,8 @@ class App(tk.Tk):
                             parent=dlg,
                             defaultextension=".db",
                             filetypes=[("SQLite", "*.db"), ("All", "*.*")],
-                            initialfile=os.path.basename(v.get()),
-                            initialdir=os.path.dirname(os.path.abspath(v.get())),
+                            initialfile=Path(v.get()).name,
+                            initialdir=Path(v.get()).resolve().parent,
                         )
                     )
                     if p:

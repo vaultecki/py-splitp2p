@@ -62,6 +62,7 @@ select = [
     "SIM",  # flake8-simplify
     "PIE",  # flake8-pie (misc lint rules)
     "RUF",  # ruff-specific rules
+    "PTH",  # flake8-use-pathlib (prefer pathlib.Path over os.path)
 ]
 
 [tool.mypy]

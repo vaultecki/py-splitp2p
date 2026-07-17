@@ -29,9 +29,9 @@ import contextlib
 import hashlib
 import json
 import logging
-import os
 import queue as _queue
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -528,7 +528,7 @@ class P2PNetwork:
             cfg_path = ConfigManager("SplitP2P", "config.json").config_file
             import json as _j
 
-            with open(cfg_path) as f:
+            with cfg_path.open() as f:
                 raw_key = _j.load(f).get("private_key_hex", "")
             if raw_key:
                 from crypto import private_key_from_bytes, sign_record
@@ -564,12 +564,12 @@ class P2PNetwork:
                 return
             from storage import STORAGE_DIR
 
-            path = os.path.join(STORAGE_DIR, sha256)
-            if not os.path.exists(path):
+            path = Path(STORAGE_DIR) / sha256
+            if not path.exists():
                 return
             from crypto import encrypt_chunk
 
-            with open(path, "rb") as f:
+            with path.open("rb") as f:
                 while chunk := f.read(CHUNK_SIZE):
                     frame = encrypt_chunk(chunk, self._group_key)
                     await stream.write(len(frame).to_bytes(4, "big") + frame)
@@ -598,7 +598,7 @@ class P2PNetwork:
         from storage import STORAGE_DIR
 
         assert self._host is not None
-        temp = os.path.join(STORAGE_DIR, sha256 + ".tmp")
+        temp = Path(STORAGE_DIR) / (sha256 + ".tmp")
 
         for attempt in range(DOWNLOAD_RETRIES):
             if attempt > 0:
@@ -633,7 +633,7 @@ class P2PNetwork:
                 h = hashlib.sha256()
                 await stream.write(sha256.encode())
 
-                with open(temp, "wb") as f:
+                with temp.open("wb") as f:
                     buf = b""
                     while True:
                         with trio.move_on_after(30) as cancel:
@@ -661,7 +661,7 @@ class P2PNetwork:
                             h.update(plain)
 
                 if h.hexdigest() == sha256:
-                    os.rename(temp, os.path.join(STORAGE_DIR, sha256))
+                    temp.rename(Path(STORAGE_DIR) / sha256)
                     self.callbacks.on_file_received(sha256)
                     logger.info("File %s downloaded (attempt %d)", sha256[:12], attempt + 1)
                     return True
@@ -672,15 +672,15 @@ class P2PNetwork:
                     attempt + 1,
                     DOWNLOAD_RETRIES,
                 )
-                if os.path.exists(temp):
-                    os.remove(temp)
+                if temp.exists():
+                    temp.unlink()
 
             except Exception as e:
                 logger.warning(
                     "Download error %s attempt %d: %s", sha256[:12], attempt + 1, repr(e)
                 )
-                if os.path.exists(temp):
-                    os.remove(temp)
+                if temp.exists():
+                    temp.unlink()
             finally:
                 with contextlib.suppress(Exception):
                     await stream.close()
@@ -719,11 +719,10 @@ class P2PNetwork:
 
         try:
             removed = 0
-            for fname in os.listdir(STORAGE_DIR):
-                if fname.endswith(".tmp"):
-                    path = os.path.join(STORAGE_DIR, fname)
+            for path in Path(STORAGE_DIR).iterdir():
+                if path.suffix == ".tmp":
                     try:
-                        os.remove(path)
+                        path.unlink()
                         removed += 1
                     except OSError:
                         pass

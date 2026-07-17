@@ -99,6 +99,13 @@ def test_hash_bytes_is_sha256_hex():
     assert crypto.hash_bytes(data) == hashlib.sha256(data).hexdigest()
 
 
+def test_hash_file_matches_hash_bytes(tmp_path):
+    data = b"some file contents" * 1000  # bigger than the 8192-byte chunk size
+    f = tmp_path / "sample.bin"
+    f.write_bytes(data)
+    assert crypto.hash_file(str(f)) == crypto.hash_bytes(data)
+
+
 def test_mime_type_from_path():
     assert crypto.mime_type_from_path("photo.PNG") == "image/png"
     assert crypto.mime_type_from_path("doc.pdf") == "application/pdf"

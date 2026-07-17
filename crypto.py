@@ -26,7 +26,7 @@ File chunks:
 import hashlib
 import json
 import logging
-import os
+from pathlib import Path
 
 import nacl.encoding
 import nacl.exceptions
@@ -222,7 +222,7 @@ def decrypt_chunk(blob: bytes, group_key: bytes) -> bytes:
 def hash_file(file_path: str) -> str:
     """SHA-256 hex digest of a file (chunked for large files)."""
     h = hashlib.sha256()
-    with open(file_path, "rb") as f:
+    with Path(file_path).open("rb") as f:
         while chunk := f.read(8192):
             h.update(chunk)
     return h.hexdigest()
@@ -240,4 +240,4 @@ def mime_type_from_path(path: str) -> str:
         ".png": "image/png",
         ".gif": "image/gif",
         ".webp": "image/webp",
-    }.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
+    }.get(Path(path).suffix.lower(), "application/octet-stream")
