@@ -1021,8 +1021,24 @@ class ExpenseDialog(tk.Toplevel):
         _combobox(frm, self._payer_var, payer_names).pack(fill="x", pady=(2, 8))
 
         # Aufteilung
+        # When editing, infer the split from the existing amounts rather than
+        # always resetting to "equal" — split mode itself isn't stored, only
+        # the resulting per-debtor amounts, so "equal" (all shares within a
+        # cent of each other, matching split_equally()'s remainder handling)
+        # vs "custom" (prefilled with the exact existing amounts) is the best
+        # we can recover.
+        existing_debtor_keys: set | None = None
+        existing_amounts: dict[str, int] = {}
+        default_split_mode = "equal"
+        if exp and exp.splits:
+            existing_debtor_keys = {s.debtor_key for s in exp.splits}
+            existing_amounts = {s.debtor_key: s.amount for s in exp.splits}
+            values = list(existing_amounts.values())
+            if max(values) - min(values) > 1:
+                default_split_mode = "custom"
+
         _lbl(frm, "SPLIT", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
-        self._split_mode = tk.StringVar(value="equal")
+        self._split_mode = tk.StringVar(value=default_split_mode)
         mode_row = tk.Frame(frm, bg=BG)
         mode_row.pack(anchor="w")
         for val, txt in [("equal", "Equal"), ("custom", "Custom"), ("percent", "Percent %")]:
@@ -1048,8 +1064,14 @@ class ExpenseDialog(tk.Toplevel):
         self._split_widgets: list = []
         for m in self.members:
             _pk, _nm = _u(m)
-            self._member_vars[_pk] = tk.BooleanVar(value=True)
-            self._amount_vars[_pk] = tk.StringVar(value="")
+            selected = _pk in existing_debtor_keys if existing_debtor_keys is not None else True
+            self._member_vars[_pk] = tk.BooleanVar(value=selected)
+            prefill_amount = (
+                str(from_minor(existing_amounts[_pk], self.group_currency))
+                if _pk in existing_amounts
+                else ""
+            )
+            self._amount_vars[_pk] = tk.StringVar(value=prefill_amount)
             self._percent_vars[_pk] = tk.StringVar(value="")
         self._update_splits()
 
@@ -1885,8 +1907,13 @@ class ExportDialog(tk.Toplevel):
                 for e in sorted(self.expenses, key=lambda x: x.display_date()):
                     splits = "; ".join(
                         f"{self._member_name(s.debtor_key)}:"
-                        f"{format_amount(s.amount, self._group_currency)}"
+                        f"{format_amount(s.amount, self.currency)}"
                         for s in e.splits
+                    )
+                    original = (
+                        format_amount(e.original_amount, e.original_currency)
+                        if e.original_amount and e.original_currency
+                        else ""
                     )
                     w.writerow(
                         [
@@ -1894,11 +1921,11 @@ class ExportDialog(tk.Toplevel):
                             time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
                             e.description,
                             e.category,
-                            f"{e.amount:.2f}",
-                            e.currency,
+                            format_amount(e.amount, self.currency),
+                            self.currency,
                             self._member_name(e.author_pubkey),
                             splits,
-                            e.original_amount or "",
+                            original,
                             e.original_currency or "",
                         ]
                     )
@@ -1912,25 +1939,26 @@ class ExportDialog(tk.Toplevel):
                             time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
                             self._member_name(s.from_key),
                             self._member_name(s.to_key),
-                            f"{s.amount:.2f}",
-                            s.currency,
+                            format_amount(s.amount, self.currency),
+                            self.currency,
                             s.note or "",
                         ]
                     )
             if self._incl_debt.get():
-                from ledger import get_settlements
+                from ledger import compute_balances, compute_settlements
 
                 w.writerow([])
                 w.writerow(["Debt summary", "", "", "", "", "", ""])
                 w.writerow(["From", "To", "Amount", "Currency", "% of total"])
                 _total = sum(e.amount for e in self.expenses) or 1
-                for debt in get_settlements(self.expenses, self.settlements):
+                balances = compute_balances(self.expenses, self.settlements)
+                for debt in compute_settlements(balances):
                     pct = debt.amount / _total * 100
                     w.writerow(
                         [
                             self._member_name(debt.debtor),
                             self._member_name(debt.creditor),
-                            f"{debt.amount:.2f}",
+                            format_amount(debt.amount, self.currency),
                             self.currency,
                             f"{pct:.1f}%",
                         ]
@@ -1939,6 +1967,8 @@ class ExportDialog(tk.Toplevel):
 
     def _export_pdf(self):
         import tkinter.filedialog as fd2
+
+        from models import format_amount
 
         try:
             from fpdf import FPDF
@@ -2013,13 +2043,13 @@ class ExportDialog(tk.Toplevel):
                     time.strftime("%d.%m.%Y", time.localtime(e.display_date())),
                     e.description,
                     e.category,
-                    f"{e.amount:.2f} {e.currency}",
+                    f"{format_amount(e.amount, self.currency)} {self.currency}",
                     self._member_name(e.author_pubkey),
                     f"{pct:.1f}%",
                 )
             total = sum(e.amount for e in self.expenses)
             pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(0, 6, f"Total: {total:.2f} {self.currency}", ln=True)
+            pdf.cell(0, 6, f"Total: {format_amount(total, self.currency)} {self.currency}", ln=True)
             pdf.ln(4)
 
         if self._incl_set.get() and self.settlements:
@@ -2030,17 +2060,17 @@ class ExportDialog(tk.Toplevel):
                     time.strftime("%d.%m.%Y", time.localtime(s.display_date())),
                     self._member_name(s.from_key),
                     self._member_name(s.to_key),
-                    f"{s.amount:.2f} {s.currency}",
+                    f"{format_amount(s.amount, self.currency)} {self.currency}",
                     s.note or "",
                     "",
                 )
             pdf.ln(4)
 
         if self._incl_debt.get():
-            from ledger import compute_balances, get_settlements
+            from ledger import compute_balances, compute_settlements
 
-            debts = get_settlements(self.expenses, self.settlements)
             balances = compute_balances(self.expenses, self.settlements)
+            debts = compute_settlements(balances)
             _exp_total = sum(e.amount for e in self.expenses) or 1
 
             # Balance per person with % share of total
@@ -2073,9 +2103,9 @@ class ExportDialog(tk.Toplevel):
                 sign = "+" if net >= 0 else ""
                 row(
                     _u(m)[1],
-                    f"{sign}{net:.2f} {self.currency}",
-                    f"{paid:.2f}",
-                    f"{owes:.2f}",
+                    f"{sign}{format_amount(net, self.currency)} {self.currency}",
+                    format_amount(paid, self.currency),
+                    format_amount(owes, self.currency),
                     f"{pct:.1f}%",
                     "",
                 )
@@ -2090,7 +2120,7 @@ class ExportDialog(tk.Toplevel):
                         self._member_name(d.debtor),
                         "->",
                         self._member_name(d.creditor),
-                        f"{d.amount:.2f} {self.currency}",
+                        f"{format_amount(d.amount, self.currency)} {self.currency}",
                         f"{pct:.1f}%",
                         "",
                     )
@@ -3253,6 +3283,7 @@ class App(tk.Tk):
             from_key=settlement.from_key,
             to_key=settlement.to_key,
             amount=settlement.amount,
+            settlement_date=settlement.settlement_date,
             note=settlement.note,
             signature=settlement.signature,
         )
@@ -3407,6 +3438,7 @@ class App(tk.Tk):
             to_key=r["to_key"],
             amount=r["amount"],
             author_pubkey=self._own_pubkey,
+            settlement_date=r.get("settlement_date", 0),
             note=r.get("note") or None,
             lamport_clock=self._lamport_clock,
         )
@@ -3446,6 +3478,7 @@ class App(tk.Tk):
             from_key=settlement.from_key,
             to_key=settlement.to_key,
             amount=settlement.amount,
+            settlement_date=settlement.settlement_date,
             note=settlement.note,
             signature=settlement.signature,
         )

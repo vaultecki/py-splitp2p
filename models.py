@@ -307,6 +307,11 @@ class Expense:
     signature: str = ""
     splits: list[Split] = field(default_factory=list)
 
+    def display_date(self) -> int:
+        """Epoch seconds to sort/show by: the expense's actual date, falling
+        back to the record's creation timestamp if unset."""
+        return self.expense_date or self.timestamp
+
     def canonical_bytes(self) -> bytes:
         """Deterministic bytes for Ed25519 signing. No local-only fields."""
         return (
@@ -403,13 +408,19 @@ class Settlement:
     from_key: str  # who pays
     to_key: str  # who receives
     amount: int  # smallest currency unit
+    settlement_date: int = 0  # epoch seconds of the actual payment date
     note: str | None = None
     signature: str = ""
+
+    def display_date(self) -> int:
+        """Epoch seconds to sort/show by: the payment's actual date, falling
+        back to the record's creation timestamp if unset."""
+        return self.settlement_date or self.timestamp
 
     def canonical_bytes(self) -> bytes:
         return (
             f"{self.id}|{self.group_id}|{self.from_key}"
-            f"|{self.to_key}|{self.amount}|{self.note or ''}"
+            f"|{self.to_key}|{self.amount}|{self.settlement_date}|{self.note or ''}"
             f"|{self.author_pubkey}"
             f"|{self.timestamp}|{self.lamport_clock}"
             f"|{self.is_deleted}"
@@ -426,6 +437,7 @@ class Settlement:
             "from_key": self.from_key,
             "to_key": self.to_key,
             "amount": self.amount,
+            "settlement_date": self.settlement_date,
             "note": self.note,
             "signature": self.signature,
         }
@@ -433,6 +445,7 @@ class Settlement:
     @classmethod
     def from_wire_dict(cls, d: dict) -> "Settlement":
         return cls(
+            settlement_date=d.get("settlement_date", 0),
             note=d.get("note"),
             **{
                 k: d[k]
@@ -459,6 +472,7 @@ class Settlement:
         to_key: str,
         amount: int,
         author_pubkey: str,
+        settlement_date: int = 0,
         note: str | None = None,
         lamport_clock: int = 0,
     ) -> "Settlement":
@@ -472,6 +486,7 @@ class Settlement:
             from_key=from_key,
             to_key=to_key,
             amount=amount,
+            settlement_date=settlement_date,
             note=note,
         )
 

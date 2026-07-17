@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS settlements (
     from_key      TEXT    NOT NULL,
     to_key        TEXT    NOT NULL,
     amount        INTEGER NOT NULL DEFAULT 0,
+    settlement_date INTEGER NOT NULL DEFAULT 0,
     note          TEXT,
     signature     TEXT    NOT NULL
 );
@@ -402,6 +403,7 @@ def save_settlement(
     from_key: str,
     to_key: str,
     amount: int,
+    settlement_date: int = 0,
     note: str | None = None,
     signature: str,
 ) -> bool:
@@ -421,7 +423,7 @@ def save_settlement(
         db.execute(
             "UPDATE settlements SET timestamp=?,lamport_clock=?,"
             "author_pubkey=?,is_deleted=?,from_key=?,to_key=?,"
-            "amount=?,note=?,signature=? WHERE id=?",
+            "amount=?,settlement_date=?,note=?,signature=? WHERE id=?",
             (
                 timestamp,
                 lamport_clock,
@@ -430,6 +432,7 @@ def save_settlement(
                 from_key,
                 to_key,
                 amount,
+                settlement_date,
                 note,
                 signature,
                 id,
@@ -438,8 +441,8 @@ def save_settlement(
     else:
         db.execute(
             "INSERT INTO settlements(id,group_id,timestamp,lamport_clock,"
-            "author_pubkey,is_deleted,from_key,to_key,amount,note,signature)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "author_pubkey,is_deleted,from_key,to_key,amount,settlement_date,note,signature)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 id,
                 group_id,
@@ -450,6 +453,7 @@ def save_settlement(
                 from_key,
                 to_key,
                 amount,
+                settlement_date,
                 note,
                 signature,
             ),

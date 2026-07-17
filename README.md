@@ -49,6 +49,11 @@ mypy .
 pytest
 ```
 
+The same four checks run in CI on every push/PR to `main`
+(`.github/workflows/ci.yml`) — not yet verified end-to-end on an actual
+GitHub Actions runner, since tkinter availability there is a known rough
+edge (see the workflow's comments).
+
 ---
 
 ## Architecture
@@ -248,6 +253,15 @@ The libp2p Noise transport provides an additional encryption layer
 for all P2P connections — the SecretBox layer encrypts at rest and
 ensures only group members can read the data regardless of transport.
 
+⚠️ **The user's own Ed25519 private key is stored unencrypted.**
+`config_manager.py` writes it as plain hex (`private_key_hex`) into
+`config.json` in the OS config directory (e.g. `~/.config/SplitP2P/config.json`
+on Linux) with no OS keychain integration and no passphrase. Anyone with
+filesystem read access to that file can impersonate the user's identity
+in any group they're a member of. This is separate from the group key
+(which is meant to be shared) — it's the per-device signing key, and it
+currently has no protection at rest.
+
 ---
 
 ## CRDT Merge
@@ -275,18 +289,10 @@ write with whatever Lamport clock it carries.
   unit-tested with a mocked libp2p, but real mDNS discovery and GossipSub
   mesh formation between two actual devices has not been exercised in this
   environment. Test with two real instances before trusting sync in practice.
-- **CSV/PDF export (`ExportDialog`) is currently broken.** It references
-  `self._group_currency` (never set on that class — only `self.currency`
-  is) and `expense.currency`/`settlement.currency` (neither `Expense` nor
-  `Settlement` has a `currency` field — only `original_currency` for
-  foreign-currency expenses). Any export attempt raises `AttributeError`.
-  Not fixed yet.
-- **Editing an expense forgets its split mode.** The edit dialog always
-  reopens on "equal" split and blank percent/custom fields, regardless of
-  how the expense was originally split. Saving without touching the split
-  section re-splits equally among the currently selected members rather
-  than preserving the original percent/custom amounts.
 - Camera QR scanning depends on `opencv-python`; if it's not installed the
   "Scan camera" button is simply hidden (falls back to image-file import or
   pasting the base64 text).
+- `AddMemberDialog` (gui.py) is defined but has no call site anywhere in the
+  app — there's no menu item or button that opens it. Its own logic is
+  tested in isolation, but it's not reachable from the running UI.
 

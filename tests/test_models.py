@@ -96,6 +96,21 @@ def test_expense_wire_dict_roundtrip():
     assert restored.splits[0].amount == exp.splits[0].amount
 
 
+def test_expense_display_date_prefers_expense_date():
+    exp = Expense.create(
+        group_id="g1", description="Dinner", amount=100, author_pubkey="alice", expense_date=12345
+    )
+    exp.timestamp = 99999
+    assert exp.display_date() == 12345
+
+
+def test_expense_display_date_falls_back_to_timestamp():
+    exp = Expense.create(group_id="g1", description="Dinner", amount=100, author_pubkey="alice")
+    exp.expense_date = 0
+    exp.timestamp = 99999
+    assert exp.display_date() == 99999
+
+
 def test_settlement_wire_dict_roundtrip():
     s = Settlement.create(
         group_id="g1", from_key="bob", to_key="alice", amount=500, author_pubkey="bob"
@@ -126,6 +141,40 @@ def test_settlement_note_defaults_to_none():
     assert s.note is None
     restored = Settlement.from_wire_dict(s.to_wire_dict())
     assert restored.note is None
+
+
+def test_settlement_date_roundtrips_through_wire_dict():
+    s = Settlement.create(
+        group_id="g1",
+        from_key="bob",
+        to_key="alice",
+        amount=500,
+        author_pubkey="bob",
+        settlement_date=12345,
+    )
+    restored = Settlement.from_wire_dict(s.to_wire_dict())
+    assert restored.settlement_date == 12345
+
+
+def test_settlement_display_date_prefers_settlement_date():
+    s = Settlement.create(
+        group_id="g1",
+        from_key="bob",
+        to_key="alice",
+        amount=500,
+        author_pubkey="bob",
+        settlement_date=12345,
+    )
+    s.timestamp = 99999
+    assert s.display_date() == 12345
+
+
+def test_settlement_display_date_falls_back_to_timestamp():
+    s = Settlement.create(
+        group_id="g1", from_key="bob", to_key="alice", amount=500, author_pubkey="bob"
+    )
+    s.timestamp = 99999
+    assert s.display_date() == 99999
 
 
 def test_user_wire_dict_roundtrip():

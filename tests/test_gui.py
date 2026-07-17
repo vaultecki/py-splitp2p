@@ -1,8 +1,19 @@
 import tkinter as tk
+from unittest.mock import patch
 
 import pytest
 
-from gui import ExpenseDialog, SettlementDialog, _decode_group_qr, _encode_group_qr, _u
+from gui import (
+    AddMemberDialog,
+    ChartsWindow,
+    ExpenseDialog,
+    ExportDialog,
+    SettlementDialog,
+    StorageSetupDialog,
+    _decode_group_qr,
+    _encode_group_qr,
+    _u,
+)
 
 
 @pytest.fixture
@@ -227,3 +238,230 @@ def test_settlement_dialog_prefill_shows_major_units(root):
     root.after(50, run_act)
     SettlementDialog(root, USERS, "alice", "EUR", {}, {"amount": 1250})
     assert holder["result"]["amount"] == 1250
+
+
+def test_export_dialog_csv_and_pdf(root, tmp_path):
+    """Regression: ExportDialog referenced self._group_currency (never set,
+    only self.currency) and expense.currency/settlement.currency (neither
+    model has a currency field) — every export attempt raised AttributeError."""
+    from models import Expense, Settlement, Split
+
+    exp = Expense.create(
+        group_id="g1",
+        description="Dinner",
+        amount=1250,
+        author_pubkey="alice",
+        category="Food & Drink",
+    )
+    exp.splits = [
+        Split.create(
+            belongs_to=exp.id,
+            payer_key="alice",
+            debtor_key="alice",
+            amount=625,
+            author_pubkey="alice",
+        ),
+        Split.create(
+            belongs_to=exp.id,
+            payer_key="alice",
+            debtor_key="bob",
+            amount=625,
+            author_pubkey="alice",
+        ),
+    ]
+    settlement = Settlement.create(
+        group_id="g1",
+        from_key="bob",
+        to_key="alice",
+        amount=625,
+        author_pubkey="bob",
+        note="thanks",
+    )
+
+    csv_path = tmp_path / "export.csv"
+    pdf_path = tmp_path / "export.pdf"
+
+    def run_export():
+        dlg = _current_dialog(root)
+        with (
+            patch("tkinter.filedialog.asksaveasfilename", return_value=str(csv_path)),
+            patch("gui.mb.showinfo"),
+        ):
+            dlg._export_csv()
+        with (
+            patch("tkinter.filedialog.asksaveasfilename", return_value=str(pdf_path)),
+            patch("gui.mb.showinfo"),
+        ):
+            dlg._export_pdf()
+        dlg.destroy()
+
+    root.after(50, run_export)
+    ExportDialog(root, [exp], [settlement], USERS, "EUR", "Islandtrip")
+
+    csv_content = csv_path.read_text()
+    assert "12.50" in csv_content  # exp.amount=1250 formatted as major units
+    assert "6.25" in csv_content  # each split/settlement is 625 minor units
+    assert pdf_path.exists() and pdf_path.stat().st_size > 0
+
+
+def test_expense_dialog_edit_prefills_custom_split_and_participants(root):
+    """Regression: the edit dialog used to always reset to split_mode='equal'
+    with all members selected and blank custom-amount fields, discarding the
+    expense's actual (unequal) split and its participant list."""
+    from models import Expense, Split
+
+    users_3 = [*USERS, {"public_key": "carol", "name": "Carol"}]
+    exp = Expense.create(group_id="g1", description="Rent", amount=1000, author_pubkey="alice")
+    exp.splits = [
+        Split.create(
+            belongs_to=exp.id,
+            payer_key="alice",
+            debtor_key="alice",
+            amount=700,
+            author_pubkey="alice",
+        ),
+        Split.create(
+            belongs_to=exp.id,
+            payer_key="alice",
+            debtor_key="bob",
+            amount=300,
+            author_pubkey="alice",
+        ),
+    ]
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        assert dlg._split_mode.get() == "custom"
+        assert dlg._member_vars["alice"].get() is True
+        assert dlg._member_vars["bob"].get() is True
+        assert dlg._member_vars["carol"].get() is False  # not part of the original split
+        assert dlg._amount_vars["alice"].get() == "7.0"
+        assert dlg._amount_vars["bob"].get() == "3.0"
+        dlg._save()
+        holder["result"] = dlg.result
+
+    root.after(50, run_act)
+    ExpenseDialog(root, users_3, "alice", "EUR", {}, exp)
+    result = holder["result"]
+    assert result["split_mode"] == "custom"
+    assert result["split_custom_amounts"] == {"alice": 700, "bob": 300}
+
+
+def test_expense_dialog_edit_prefills_equal_split(root):
+    from models import Expense, split_equally
+
+    exp = Expense.create(group_id="g1", description="Dinner", amount=1000, author_pubkey="alice")
+    exp.splits = split_equally(exp.id, exp.amount, "alice", ["alice", "bob"])
+
+    def act(dlg):
+        assert dlg._split_mode.get() == "equal"
+        dlg._save()
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        act(dlg)
+        holder["result"] = dlg.result
+
+    root.after(50, run_act)
+    ExpenseDialog(root, USERS, "alice", "EUR", {}, exp)
+    assert holder["result"]["split_mode"] == "equal"
+
+
+def test_add_member_dialog_requires_name(root):
+    """AddMemberDialog appears to be unreachable from the app UI (no call
+    site instantiates it), but its own validation logic is worth locking in."""
+
+    def act(dlg):
+        with patch("gui.mb.showerror"):
+            dlg._save()
+        assert dlg.result is None  # empty name rejected, dialog stays open
+        dlg._name_entry.insert(0, "Dave")
+        dlg._pk.insert(0, "  ")  # blank pubkey -> None
+        dlg._save()
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        act(dlg)
+        holder["result"] = dlg.result
+
+    root.after(50, run_act)
+    AddMemberDialog(root)
+    assert holder["result"] == {"name": "Dave", "pubkey": None}
+
+
+def test_storage_setup_dialog_creates_directories(root, tmp_path):
+    db_path = tmp_path / "nested" / "splitp2p.db"
+    att_dir = tmp_path / "attachments"
+
+    def act(dlg):
+        dlg._db_path.set(str(db_path))
+        dlg._att_dir.set(str(att_dir))
+        dlg._confirm()
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        act(dlg)
+        holder["result"] = dlg.result
+
+    root.after(50, run_act)
+    StorageSetupDialog(root, {"db_path": "", "storage_dir": ""})
+    assert holder["result"] == {"db_path": str(db_path), "storage_dir": str(att_dir)}
+    assert db_path.parent.exists()
+    assert att_dir.exists()
+
+
+def test_storage_setup_dialog_rejects_empty_paths(root):
+    def act(dlg):
+        dlg._db_path.set("")
+        dlg._att_dir.set("")
+        with patch("gui.mb.showerror"):
+            dlg._confirm()
+        assert dlg.result is None
+        dlg.destroy()
+
+    root.after(50, lambda: act(_current_dialog(root)))
+    StorageSetupDialog(root, {"db_path": "", "storage_dir": ""})
+
+
+def test_charts_window_renders_without_error(root):
+    """ChartsWindow is not modal (no wait_window()), so it can be
+    instantiated and inspected directly."""
+    from models import Expense, Settlement, Split
+
+    exp = Expense.create(
+        group_id="g1",
+        description="Dinner",
+        amount=1000,
+        author_pubkey="alice",
+        category="Food & Drink",
+    )
+    exp.splits = [
+        Split.create(
+            belongs_to=exp.id,
+            payer_key="alice",
+            debtor_key="alice",
+            amount=500,
+            author_pubkey="alice",
+        ),
+        Split.create(
+            belongs_to=exp.id,
+            payer_key="alice",
+            debtor_key="bob",
+            amount=500,
+            author_pubkey="alice",
+        ),
+    ]
+    settlement = Settlement.create(
+        group_id="g1", from_key="bob", to_key="alice", amount=500, author_pubkey="bob"
+    )
+
+    win = ChartsWindow(root, [exp], [settlement], USERS, "EUR", "alice")
+    win.destroy()

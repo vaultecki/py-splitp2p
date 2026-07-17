@@ -246,6 +246,24 @@ def test_save_settlement_persists_note(db):
     assert row["note"] == "for the taxi"
 
 
+def test_save_settlement_persists_settlement_date(db):
+    storage.save_settlement(
+        db,
+        id="s1",
+        group_id="g1",
+        timestamp=1,
+        lamport_clock=1,
+        author_pubkey="bob",
+        from_key="bob",
+        to_key="alice",
+        amount=500,
+        settlement_date=12345,
+        signature="",
+    )
+    row = storage.get_settlements(db, "g1")[0]
+    assert row["settlement_date"] == 12345
+
+
 def test_save_comment_user_and_system_merged_sorted(db):
     storage.save_comment_user(
         db,
