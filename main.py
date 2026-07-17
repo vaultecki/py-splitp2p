@@ -35,4 +35,5 @@ if __name__ == "__main__":
     logging.getLogger(__name__).info("SplitP2P starting")
 
     from gui import run
+
     run()

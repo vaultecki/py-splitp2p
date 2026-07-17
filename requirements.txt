@@ -6,7 +6,10 @@ pynacl>=1.5             # Ed25519 signing, SecretBox (XSalsa20-Poly1305)
                         # Wraps libsodium — same API as lazysodium (Android)
 
 # ── P2P networking ───────────────────────────────────────────────────────
-libp2p>=0.1.5           # GossipSub, mDNS discovery, noise transport
+libp2p>=0.6.0           # GossipSub, mDNS discovery, noise transport
+                        # network.py targets the >=0.6 API (host.run() as an
+                        # async context manager, GossipSub() requiring explicit
+                        # protocols/degree args) — older 0.1.x releases will not work
 multiaddr>=0.0.9        # IPFS bootstrap address parsing
 
 # ── QR code ──────────────────────────────────────────────────────────────

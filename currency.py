@@ -29,14 +29,35 @@ logger = logging.getLogger(__name__)
 
 # All commonly supported currencies
 SUPPORTED_CURRENCIES = [
-    "EUR", "USD", "GBP", "CHF", "JPY", "CNY", "CAD", "AUD",
-    "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "RON", "BGN",
-    "TRY", "BRL", "MXN", "INR", "KRW", "SGD", "HKD", "NZD",
+    "EUR",
+    "USD",
+    "GBP",
+    "CHF",
+    "JPY",
+    "CNY",
+    "CAD",
+    "AUD",
+    "SEK",
+    "NOK",
+    "DKK",
+    "PLN",
+    "CZK",
+    "HUF",
+    "RON",
+    "BGN",
+    "TRY",
+    "BRL",
+    "MXN",
+    "INR",
+    "KRW",
+    "SGD",
+    "HKD",
+    "NZD",
 ]
 
 # Refresh interval
-_BASE_INTERVAL_SEC  = 6 * 3600   # 6 hour base
-_MAX_JITTER_SEC     = 3 * 3600   # +/- 3 hour jitter
+_BASE_INTERVAL_SEC = 6 * 3600  # 6 hour base
+_MAX_JITTER_SEC = 3 * 3600  # +/- 3 hour jitter
 
 _API_URLS = [
     "https://open.er-api.com/v6/latest/{base}",
@@ -45,24 +66,12 @@ _API_URLS = [
 
 
 # ---------------------------------------------------------------------------
-# Schema (included by storage.init_db())
-# ---------------------------------------------------------------------------
-
-RATES_DDL = """
-CREATE TABLE IF NOT EXISTS exchange_rates (
-    base        TEXT NOT NULL,
-    target      TEXT NOT NULL,
-    rate        REAL NOT NULL,
-    fetched_at  INTEGER NOT NULL,
-    next_fetch  INTEGER NOT NULL,
-    PRIMARY KEY (base, target)
-);
-"""
-
-
-# ---------------------------------------------------------------------------
 # Fetch
+#
+# The exchange_rates table (base, target, rate, fetched_at, next_fetch) is
+# created by storage.init_db() — see storage.py's _DDL.
 # ---------------------------------------------------------------------------
+
 
 def _next_fetch_time() -> int:
     """Next fetch time with random jitter."""
@@ -90,8 +99,9 @@ def fetch_rates_online(base: str) -> Optional[dict[str, float]]:
             # exchangerate-api.com gibt {"rates": {...}} auch
             rates = data.get("rates") or data.get("conversion_rates")
             if rates and isinstance(rates, dict):
-                logger.info("Rates for %s fetched from %s (%d target currencies)",
-                            base, url, len(rates))
+                logger.info(
+                    "Rates for %s fetched from %s (%d target currencies)", base, url, len(rates)
+                )
                 return {k.upper(): float(v) for k, v in rates.items()}
         except urllib.error.URLError as e:
             logger.warning("API %s unreachable: %s", url, e)
@@ -106,9 +116,10 @@ def fetch_rates_online(base: str) -> Optional[dict[str, float]]:
 # Cache (SQLite)
 # ---------------------------------------------------------------------------
 
+
 def save_rates(db: sqlite3.Connection, base: str, rates: dict[str, float]) -> None:
     """Saves exchange rates to the database."""
-    now       = int(time.time())
+    now = int(time.time())
     next_time = _next_fetch_time()
     base = base.upper()
 
@@ -116,12 +127,14 @@ def save_rates(db: sqlite3.Connection, base: str, rates: dict[str, float]) -> No
         """INSERT OR REPLACE INTO exchange_rates
            (base, target, rate, fetched_at, next_fetch)
            VALUES (?, ?, ?, ?, ?)""",
-        [(base, target.upper(), rate, now, next_time)
-         for target, rate in rates.items()],
+        [(base, target.upper(), rate, now, next_time) for target, rate in rates.items()],
     )
     db.commit()
-    logger.debug("Rates for %s saved (next fetch ~%s)",
-                 base, time.strftime("%H:%M", time.localtime(next_time)))
+    logger.debug(
+        "Rates for %s saved (next fetch ~%s)",
+        base,
+        time.strftime("%H:%M", time.localtime(next_time)),
+    )
 
 
 def load_rates(db: sqlite3.Connection, base: str) -> dict[str, float]:
@@ -165,6 +178,7 @@ def rates_age_str(db: sqlite3.Connection, base: str) -> str:
 # High-level: Kurse holen (Cache oder Online)
 # ---------------------------------------------------------------------------
 
+
 def get_rates(db: sqlite3.Connection, base: str) -> dict[str, float]:
     """
     Returns current exchange rates.
@@ -204,6 +218,7 @@ def force_refresh(db: sqlite3.Connection, base: str) -> bool:
 # ---------------------------------------------------------------------------
 # Konvertierung
 # ---------------------------------------------------------------------------
+
 
 def convert(
     amount: float,

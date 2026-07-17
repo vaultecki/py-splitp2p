@@ -20,21 +20,21 @@ from typing import Sequence
 # Cache key
 # ---------------------------------------------------------------------------
 
+
 def ledger_cache_key(expenses: Sequence, settlements: Sequence = ()) -> int:
     """Hash of current state. Recompute ledger only when this changes."""
     return hash(
-        tuple((e.id, e.timestamp, e.is_deleted, e.lamport_clock)
-              for e in expenses)
-        + tuple((s.id, s.timestamp, s.is_deleted, s.lamport_clock)
-                for s in settlements))
+        tuple((e.id, e.timestamp, e.is_deleted, e.lamport_clock) for e in expenses)
+        + tuple((s.id, s.timestamp, s.is_deleted, s.lamport_clock) for s in settlements)
+    )
 
 
 # ---------------------------------------------------------------------------
 # Balance calculation
 # ---------------------------------------------------------------------------
 
-def compute_balances(expenses: Sequence,
-                     settlements: Sequence = ()) -> dict[str, int]:
+
+def compute_balances(expenses: Sequence, settlements: Sequence = ()) -> dict[str, int]:
     """
     Net balance per pubkey in minor currency units.
       Positive = owed money (paid more than share)
@@ -67,9 +67,9 @@ def compute_balances(expenses: Sequence,
 
 def balance_summary(own_pubkey: str, balances: dict[str, int]) -> dict:
     """Summary for sidebar display."""
-    net  = balances.get(own_pubkey, 0)
+    net = balances.get(own_pubkey, 0)
     owes = sum(-b for pk, b in balances.items() if pk != own_pubkey and b < 0)
-    owed = sum( b for pk, b in balances.items() if pk != own_pubkey and b > 0)
+    owed = sum(b for pk, b in balances.items() if pk != own_pubkey and b > 0)
     return {"net": net, "owes_total": owes, "owed_total": owed}
 
 
@@ -77,20 +77,20 @@ def balance_summary(own_pubkey: str, balances: dict[str, int]) -> dict:
 # Suggested settlements (display only, not persisted)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SuggestedSettlement:
     """A suggested debt payment. Not stored — computed on the fly."""
-    debtor:   str   # pubkey — should pay
-    creditor: str   # pubkey — should receive
-    amount:   int   # minor currency units
+
+    debtor: str  # pubkey — should pay
+    creditor: str  # pubkey — should receive
+    amount: int  # minor currency units
 
 
 def compute_settlements(balances: dict[str, int]) -> list[SuggestedSettlement]:
     """Greedy: minimize number of transfers to settle all debts."""
-    debtors   = sorted([(pk, -b) for pk, b in balances.items() if b < 0],
-                       key=lambda x: -x[1])
-    creditors = sorted([(pk,  b) for pk, b in balances.items() if b > 0],
-                       key=lambda x: -x[1])
+    debtors = sorted([(pk, -b) for pk, b in balances.items() if b < 0], key=lambda x: -x[1])
+    creditors = sorted([(pk, b) for pk, b in balances.items() if b > 0], key=lambda x: -x[1])
     result: list[SuggestedSettlement] = []
     d_i = c_i = 0
     while d_i < len(debtors) and c_i < len(creditors):
@@ -101,8 +101,12 @@ def compute_settlements(balances: dict[str, int]) -> list[SuggestedSettlement]:
             result.append(SuggestedSettlement(d_pk, c_pk, pay))
         d_amt -= pay
         c_amt -= pay
-        if d_amt == 0: d_i += 1
-        else: debtors[d_i] = (d_pk, d_amt)
-        if c_amt == 0: c_i += 1
-        else: creditors[c_i] = (c_pk, c_amt)
+        if d_amt == 0:
+            d_i += 1
+        else:
+            debtors[d_i] = (d_pk, d_amt)
+        if c_amt == 0:
+            c_i += 1
+        else:
+            creditors[c_i] = (c_pk, c_amt)
     return result

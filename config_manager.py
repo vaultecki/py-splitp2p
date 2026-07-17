@@ -11,7 +11,7 @@ directory creation and error handling.
 import json
 import os
 import logging
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class ConfigManager:
         self.app_name = app_name
         self.config_path = self._get_config_path(app_name)
         self.config_file = os.path.join(self.config_path, filename)
-        self.data = {}
+        self.data: dict[str, Any] = {}
         self._ensure_directory_exists()
         self.load()
 
@@ -200,11 +200,10 @@ class ConfigManager:
         return f"ConfigManager(app='{self.app_name}', entries={len(self.data)})"
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Test configuration manager
     logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
     logger.info("Testing ConfigManager")

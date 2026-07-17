@@ -31,17 +31,21 @@ import logging
 import os
 import queue as _queue
 import threading
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from libp2p.abc import IHost, ISubscriptionAPI
+    from libp2p.pubsub.pubsub import Pubsub
 
 logger = logging.getLogger(__name__)
 
-SYNC_PROTOCOL    = "/splitp2p/sync/1.0"
-FILE_PROTOCOL    = "/splitp2p/files/1.0"
-HISTORY_PROTOCOL = "/splitp2p/history/1.0"   # delta sync via Lamport maps
-CHUNK_SIZE       = 16_384
-P2P_PORT         = 8000
+SYNC_PROTOCOL = "/splitp2p/sync/1.0"
+FILE_PROTOCOL = "/splitp2p/files/1.0"
+HISTORY_PROTOCOL = "/splitp2p/history/1.0"  # delta sync via Lamport maps
+CHUNK_SIZE = 16_384
+P2P_PORT = 8000
 DOWNLOAD_RETRIES = 3
-RETRY_BACKOFF    = (1, 3, 7)
+RETRY_BACKOFF = (1, 3, 7)
 
 IPFS_BOOTSTRAP = [
     "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
@@ -53,6 +57,7 @@ IPFS_BOOTSTRAP = [
 
 def _build_listen_addrs(port: int) -> list:
     import multiaddr as _ma
+
     addrs = [_ma.Multiaddr(f"/ip4/0.0.0.0/tcp/{port}")]
     try:
         addrs.append(_ma.Multiaddr(f"/ip6/::/tcp/{port}"))
@@ -60,6 +65,7 @@ def _build_listen_addrs(port: int) -> list:
         pass
     try:
         from libp2p.utils.address_validation import get_available_interfaces
+
         seen = {str(a) for a in addrs}
         for a in get_available_interfaces(port):
             if str(a) not in seen:
@@ -73,54 +79,80 @@ def _build_listen_addrs(port: int) -> list:
 # Callbacks — all receive model objects, not blobs
 # ---------------------------------------------------------------------------
 
+
 class NetworkCallbacks:
-    def on_expense_received(self, expense) -> None:       pass
-    def on_settlement_received(self, settlement) -> None: pass
-    def on_comment_received(self, comment) -> None:       pass
-    def on_attachment_received(self, attachment) -> None: pass
-    def on_split_received(self, split) -> None:           pass
-    def on_user_received(self, user) -> None:             pass
-    def on_peer_connected(self, peer_id: str) -> None:    pass
-    def on_peer_disconnected(self, peer_id: str) -> None: pass
-    def on_status_changed(self, online: bool,
-                          peer_id: str) -> None:          pass
-    def on_file_received(self, sha256: str) -> None:      pass
-    def on_history_synced(self, counts: dict) -> None:    pass
+    def on_expense_received(self, expense) -> None:
+        pass
+
+    def on_settlement_received(self, settlement) -> None:
+        pass
+
+    def on_comment_received(self, comment) -> None:
+        pass
+
+    def on_attachment_received(self, attachment) -> None:
+        pass
+
+    def on_split_received(self, split) -> None:
+        pass
+
+    def on_user_received(self, user) -> None:
+        pass
+
+    def on_peer_connected(self, peer_id: str) -> None:
+        pass
+
+    def on_peer_disconnected(self, peer_id: str) -> None:
+        pass
+
+    def on_status_changed(self, online: bool, peer_id: str) -> None:
+        pass
+
+    def on_file_received(self, sha256: str) -> None:
+        pass
+
+    def on_history_synced(self, counts: dict) -> None:
+        pass
 
 
 # ---------------------------------------------------------------------------
 # P2PNetwork
 # ---------------------------------------------------------------------------
 
+
 class P2PNetwork:
-    def __init__(self, group_key: bytes, topic_id: str,
-                 callbacks: NetworkCallbacks,
-                 db=None, group_id: str = ""):
-        self.callbacks      = callbacks
-        self._group_key     = group_key    # 32-byte SecretBox key
-        self.topic_id       = f"splitp2p-{topic_id}"
-        self._db            = db           # sqlite3 connection for history sync
-        self._group_id      = group_id     # for storage queries
-        self._own_pubkey    = ""
-        self._own_name      = ""
+    def __init__(
+        self,
+        group_key: bytes,
+        topic_id: str,
+        callbacks: NetworkCallbacks,
+        db=None,
+        group_id: str = "",
+    ):
+        self.callbacks = callbacks
+        self._group_key = group_key  # 32-byte SecretBox key
+        self.topic_id = f"splitp2p-{topic_id}"
+        self._db = db  # sqlite3 connection for history sync
+        self._group_id = group_id  # for storage queries
+        self._own_pubkey = ""
+        self._own_name = ""
         self._own_joined_at = 0
-        self._host          = None
-        self._pubsub        = None
-        self._sub           = None
-        self._running       = False
+        self._host: Optional[IHost] = None
+        self._pubsub: Optional[Pubsub] = None
+        self._sub: Optional[ISubscriptionAPI] = None
+        self._running = False
         self._peers: set[str] = set()
-        self._cmd_queue = _queue.SimpleQueue()
+        self._cmd_queue: _queue.SimpleQueue[dict] = _queue.SimpleQueue()
         logger.info("Topic ID set: %s", self.topic_id)
 
-    def set_own_identity(self, pubkey: str, display_name: str,
-                         joined_at: int) -> None:
-        self._own_pubkey    = pubkey
-        self._own_name      = display_name
+    def set_own_identity(self, pubkey: str, display_name: str, joined_at: int) -> None:
+        self._own_pubkey = pubkey
+        self._own_name = display_name
         self._own_joined_at = joined_at
 
     def set_db(self, db, group_id: str) -> None:
         """Set DB connection and group_id for history sync handlers."""
-        self._db       = db
+        self._db = db
         self._group_id = group_id
 
     def stop(self) -> None:
@@ -134,66 +166,74 @@ class P2PNetwork:
     def _run(self) -> None:
         try:
             import trio
+
             trio.run(self._main)
         except Exception as e:
             logger.error("P2P thread crashed: %s", e)
 
     async def _main(self) -> None:
         import trio
+
         try:
-            await self._start_node()
+            listen_addrs = self._create_node()
         except Exception as e:
-            logger.error("P2P node start failed: %s", e)
+            logger.error("P2P node creation failed: %s", e)
             self.callbacks.on_status_changed(False, "offline-mode")
             return
+        assert self._host is not None
+        assert self._pubsub is not None
         try:
-            async with trio.open_nursery() as nursery:
-                nursery.start_soon(self._receive_loop)
-                nursery.start_soon(self._cmd_loop)
-                nursery.start_soon(self._peer_poll_loop)
-                nursery.start_soon(self._bootstrap)
-                nursery.start_soon(self._cleanup_stale_tmp)
+            # host.run() is an async context manager owning the host's whole
+            # lifetime (listeners, mDNS, bootstrap) — everything that needs
+            # the host alive must run inside this block.
+            async with self._host.run(listen_addrs):
+                await self._finish_start_node()
+                async with trio.open_nursery() as nursery:
+                    nursery.start_soon(self._pubsub.run)
+                    nursery.start_soon(self._receive_loop)
+                    nursery.start_soon(self._cmd_loop)
+                    nursery.start_soon(self._peer_poll_loop)
+                    nursery.start_soon(self._bootstrap)
+                    nursery.start_soon(self._cleanup_stale_tmp)
         except Exception as e:
             logger.error("P2P nursery error: %s", e)
         finally:
             self.callbacks.on_status_changed(False, "")
 
-    async def _start_node(self) -> None:
-        import trio
+    def _create_node(self) -> list:
+        """Creates the host + pubsub (no I/O yet). Returns listen_addrs for host.run()."""
         from libp2p import new_host
         from libp2p.crypto.secp256k1 import create_new_key_pair
-        from libp2p.pubsub.gossipsub import GossipSub
+        from libp2p.custom_types import TProtocol
+        from libp2p.pubsub.gossipsub import PROTOCOL_ID_V11, GossipSub
         from libp2p.pubsub.pubsub import Pubsub
 
         listen_addrs = _build_listen_addrs(P2P_PORT)
-        key_pair     = create_new_key_pair()
+        key_pair = create_new_key_pair()
 
         try:
-            self._host = new_host(
-                key_pair=key_pair,
-                listen_addrs=listen_addrs,
-                enable_mDNS=True)
+            self._host = new_host(key_pair=key_pair, listen_addrs=listen_addrs, enable_mDNS=True)
             logger.info("new_host() with built-in mDNS")
         except TypeError:
-            self._host = new_host(
-                key_pair=key_pair,
-                listen_addrs=listen_addrs)
+            self._host = new_host(key_pair=key_pair, listen_addrs=listen_addrs)
             logger.info("new_host() without mDNS arg")
 
-        self._host.set_stream_handler(FILE_PROTOCOL,    self._file_serve_handler)
-        self._host.set_stream_handler(HISTORY_PROTOCOL, self._history_serve_handler)
+        self._host.set_stream_handler(TProtocol(FILE_PROTOCOL), self._file_serve_handler)
+        self._host.set_stream_handler(TProtocol(HISTORY_PROTOCOL), self._history_serve_handler)
 
-        gossipsub   = GossipSub()
+        # Standard GossipSub v1.1 mesh parameters (degree=6, low=4, high=12)
+        gossipsub = GossipSub(protocols=[PROTOCOL_ID_V11], degree=6, degree_low=4, degree_high=12)
         self._pubsub = Pubsub(self._host, gossipsub)
+        return listen_addrs
 
-        async with trio.open_nursery() as nursery:
-            nursery.start_soon(self._host.run)
-            nursery.start_soon(self._pubsub.run)
-            await trio.sleep(2)
+    async def _finish_start_node(self) -> None:
+        """Called once host.run(listen_addrs) has finished bringing the host up."""
+        assert self._host is not None
+        assert self._pubsub is not None
 
         peer_id = self._host.get_id().to_string()
         self._running = True
-        listen_str    = ", ".join(str(a) for a in self._host.get_addrs())
+        listen_str = ", ".join(str(a) for a in self._host.get_addrs())
         logger.info("Listening on: %s", listen_str)
         logger.info("P2P node started: %s  topic: %s", peer_id, self.topic_id)
 
@@ -202,13 +242,17 @@ class P2PNetwork:
 
     async def _bootstrap(self) -> None:
         import trio
+
+        assert self._host is not None
+
         await trio.sleep(3)
         reached = 0
         for addr in IPFS_BOOTSTRAP:
             try:
                 import multiaddr as _ma
                 from libp2p.peer.peerinfo import info_from_p2p_addr
-                ma   = _ma.Multiaddr(addr)
+
+                ma = _ma.Multiaddr(addr)
                 info = info_from_p2p_addr(ma)
                 with trio.move_on_after(5):
                     await self._host.connect(info)
@@ -221,23 +265,29 @@ class P2PNetwork:
     def _setup_extras(self) -> None:
         try:
             import libp2p.discovery.mdns as _mdns
-            _mdns.setup_mdns(self._host, self.topic_id)
+
+            _mdns.setup_mdns(self._host, self.topic_id)  # type: ignore[attr-defined]
         except Exception:
-            logger.debug("libp2p.discovery.mdns not available - "
-                         "mDNS disabled (already using built-in or not supported)")
+            logger.debug(
+                "libp2p.discovery.mdns not available - "
+                "mDNS disabled (already using built-in or not supported)"
+            )
         try:
             import libp2p.kademlia as _kad
+
             _kad.setup_dht(self._host)
         except Exception:
             logger.debug("libp2p.kademlia not available - DHT skipped")
         try:
             import libp2p.autonat as _nat
+
             _nat.setup_autonat(self._host)
         except Exception:
             logger.debug("libp2p.autonat not available - AutoNAT skipped")
         try:
             import libp2p.relay as _relay
-            _relay.setup_circuit_relay_v2(self._host)
+
+            _relay.setup_circuit_relay_v2(self._host)  # type: ignore[attr-defined]
         except Exception:
             logger.debug("Circuit Relay v2 not available")
 
@@ -247,6 +297,8 @@ class P2PNetwork:
 
     async def _peer_poll_loop(self) -> None:
         import trio
+
+        assert self._host is not None
         logger.info("Peer poll loop started")
         while self._running:
             await trio.sleep(2)
@@ -254,44 +306,31 @@ class P2PNetwork:
                 current: set[str] = set()
                 for pid in self._host.get_peerstore().peer_ids():
                     pid_str = str(pid)
-                    if pid_str == str(self._host.get_id()):
-                        continue
-                    try:
-                        protos = await self._host.get_mux(pid)
-                        if not protos:
-                            continue
-                    except Exception:
-                        pass
-                    current.add(pid_str)
+                    if pid_str != str(self._host.get_id()):
+                        current.add(pid_str)
 
-                # Also include peerstore fallback
-                try:
-                    for pid in self._host.get_peerstore().peer_ids():
-                        pid_str = str(pid)
-                        if pid_str != str(self._host.get_id()):
-                            current.add(pid_str)
-                except Exception:
-                    pass
-
-                new_peers  = current - self._peers
+                new_peers = current - self._peers
                 gone_peers = self._peers - current
 
                 if new_peers:
-                    logger.debug("Poll: %d known, %d new, %d gone",
-                                 len(current), len(new_peers), len(gone_peers))
+                    logger.debug(
+                        "Poll: %d known, %d new, %d gone",
+                        len(current),
+                        len(new_peers),
+                        len(gone_peers),
+                    )
 
-                for pid in new_peers:
-                    self._peers.add(pid)
-                    self.callbacks.on_peer_connected(pid)
-                    self._cmd_queue.put({"cmd": "req_history_from",
-                                         "peer_id": pid})
+                for pid_str in new_peers:
+                    self._peers.add(pid_str)
+                    self.callbacks.on_peer_connected(pid_str)
+                    self._cmd_queue.put({"cmd": "req_history_from", "peer_id": pid_str})
                     self._cmd_queue.put({"cmd": "announce_member"})
-                    logger.info("Group peer connected: %s", pid[:20])
+                    logger.info("Group peer connected: %s", pid_str[:20])
 
-                for pid in gone_peers:
-                    self._peers.discard(pid)
-                    self.callbacks.on_peer_disconnected(pid)
-                    logger.info("Group peer disconnected: %s", pid[:20])
+                for pid_str in gone_peers:
+                    self._peers.discard(pid_str)
+                    self.callbacks.on_peer_disconnected(pid_str)
+                    logger.info("Group peer disconnected: %s", pid_str[:20])
 
             except Exception as e:
                 logger.debug("Peer poll loop error: %s", e)
@@ -302,6 +341,7 @@ class P2PNetwork:
 
     async def _receive_loop(self) -> None:
         import trio
+
         while self._running and self._sub is not None:
             try:
                 with trio.move_on_after(1.0):
@@ -311,8 +351,9 @@ class P2PNetwork:
             except Exception as e:
                 logger.error("Receive loop error: %s", e)
 
-    def _decrypt_and_verify(self, data_hex: str, record_type,
-                             pubkey_field: str = "author_pubkey") -> Optional[object]:
+    def _decrypt_and_verify(
+        self, data_hex: str, record_type, pubkey_field: str = "author_pubkey"
+    ) -> Optional[object]:
         """
         Decrypts an encrypted wire record and verifies its Ed25519 signature.
         Returns the model object on success, None on any failure.
@@ -320,27 +361,29 @@ class P2PNetwork:
         packets never reach the DB.
         """
         from crypto import decrypt_record, verify_record
+
         try:
-            blob   = bytes.fromhex(data_hex)
+            blob = bytes.fromhex(data_hex)
             record = decrypt_record(blob, self._group_key, record_type)
             if record is None:
                 logger.warning("Decryption failed for %s", record_type.__name__)
                 return None
             pubkey = getattr(record, pubkey_field, None)
             if not pubkey:
-                logger.warning("Missing pubkey field '%s' on %s",
-                               pubkey_field, record_type.__name__)
+                logger.warning(
+                    "Missing pubkey field '%s' on %s", pubkey_field, record_type.__name__
+                )
                 return None
             if not verify_record(record, pubkey):
                 return None
             return record
         except Exception as e:
-            logger.warning("decrypt_and_verify(%s): %s",
-                           record_type.__name__, repr(e))
+            logger.warning("decrypt_and_verify(%s): %s", record_type.__name__, repr(e))
             return None
 
     async def _dispatch(self, msg) -> None:
         from models import Expense, Settlement, UserComment, Attachment, Split, User
+
         try:
             packet = json.loads(msg.data.decode())
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
@@ -348,51 +391,45 @@ class P2PNetwork:
             return
 
         ptype = packet.get("type", "")
-        logger.debug("GossipSub recv: type=%s id=%s",
-                     ptype, packet.get("id", packet.get("pubkey", "-"))[:8])
+        logger.debug(
+            "GossipSub recv: type=%s id=%s", ptype, packet.get("id", packet.get("pubkey", "-"))[:8]
+        )
 
         try:
             if ptype == "expense":
-                rec = self._decrypt_and_verify(
-                    packet["data"], Expense)
+                rec = self._decrypt_and_verify(packet["data"], Expense)
                 if rec:
                     self.callbacks.on_expense_received(rec)
 
             elif ptype == "split":
-                rec = self._decrypt_and_verify(
-                    packet["data"], Split)
+                rec = self._decrypt_and_verify(packet["data"], Split)
                 if rec:
                     self.callbacks.on_split_received(rec)
 
             elif ptype == "settlement":
-                rec = self._decrypt_and_verify(
-                    packet["data"], Settlement)
+                rec = self._decrypt_and_verify(packet["data"], Settlement)
                 if rec:
                     self.callbacks.on_settlement_received(rec)
 
             elif ptype == "comment":
-                rec = self._decrypt_and_verify(
-                    packet["data"], UserComment)
+                rec = self._decrypt_and_verify(packet["data"], UserComment)
                 if rec:
                     self.callbacks.on_comment_received(rec)
 
             elif ptype == "attachment":
-                rec = self._decrypt_and_verify(
-                    packet["data"], Attachment)
+                rec = self._decrypt_and_verify(packet["data"], Attachment)
                 if rec:
                     self.callbacks.on_attachment_received(rec)
 
             elif ptype == "user":
                 # User packets are plaintext — signed but not encrypted
                 from crypto import _verify
+
                 user = User.from_wire_dict(packet["user_data"])
-                if _verify(user.canonical_bytes(),
-                           packet.get("signature", ""),
-                           user.public_key):
+                if _verify(user.canonical_bytes(), packet.get("signature", ""), user.public_key):
                     self.callbacks.on_user_received(user)
                 else:
-                    logger.warning("Invalid signature on user packet %s",
-                                   user.public_key[:12])
+                    logger.warning("Invalid signature on user packet %s", user.public_key[:12])
             else:
                 logger.debug("Unknown packet type: %s", ptype)
 
@@ -405,6 +442,7 @@ class P2PNetwork:
 
     async def _cmd_loop(self) -> None:
         import trio
+
         async with trio.open_nursery() as nursery:
             while self._running:
                 try:
@@ -417,17 +455,13 @@ class P2PNetwork:
 
                     elif cmd["cmd"] == "publish":
                         if self._pubsub:
-                            nursery.start_soon(
-                                self._pubsub.publish,
-                                self.topic_id, cmd["data"])
+                            nursery.start_soon(self._pubsub.publish, self.topic_id, cmd["data"])
 
                     elif cmd["cmd"] == "req_file":
-                        nursery.start_soon(
-                            self._download_file_all_peers, cmd["sha256"])
+                        nursery.start_soon(self._download_file_all_peers, cmd["sha256"])
 
                     elif cmd["cmd"] == "req_history_from":
-                        nursery.start_soon(
-                            self._request_history, cmd["peer_id"])
+                        nursery.start_soon(self._request_history, cmd["peer_id"])
 
                     elif cmd["cmd"] == "announce_member":
                         if self._own_pubkey and self._pubsub:
@@ -438,9 +472,7 @@ class P2PNetwork:
                             nursery.start_soon(self._request_history, pid)
 
                     elif cmd["cmd"] == "push_delta":
-                        nursery.start_soon(
-                            self._push_delta,
-                            cmd["peer_id"], cmd["server_map"])
+                        nursery.start_soon(self._push_delta, cmd["peer_id"], cmd["server_map"])
 
                     elif cmd["cmd"] == "connect":
                         nursery.start_soon(self._connect_addr, cmd["addr"])
@@ -462,9 +494,9 @@ class P2PNetwork:
     def _make_packet(self, ptype: str, record, **extra) -> bytes:
         """Encrypt record and wrap in a GossipSub packet."""
         from crypto import encrypt_record
+
         blob = encrypt_record(record, self._group_key)
-        pkt  = {"type": ptype, "id": record.id,
-                "timestamp": record.timestamp, "data": blob.hex()}
+        pkt = {"type": ptype, "id": record.id, "timestamp": record.timestamp, "data": blob.hex()}
         pkt.update(extra)
         return json.dumps(pkt).encode()
 
@@ -479,42 +511,46 @@ class P2PNetwork:
         self._publish_raw(self._make_packet("settlement", settlement))
 
     def publish_comment(self, comment) -> None:
-        self._publish_raw(self._make_packet(
-            "comment", comment, belongs_to=comment.belongs_to))
+        self._publish_raw(self._make_packet("comment", comment, belongs_to=comment.belongs_to))
 
     def publish_attachment(self, attachment) -> None:
-        self._publish_raw(self._make_packet(
-            "attachment", attachment, belongs_to=attachment.belongs_to))
+        self._publish_raw(
+            self._make_packet("attachment", attachment, belongs_to=attachment.belongs_to)
+        )
 
     async def _publish_user_announce(self) -> None:
         """User announce is plaintext + Ed25519 signed (not SecretBox encrypted)."""
         from models import User
-        from crypto import sign_user
         from config_manager import ConfigManager
+
+        assert self._pubsub is not None
         try:
-            user = User.create(self._own_pubkey, self._own_name,
-                               self._group_id)
-            cfg_path = ConfigManager()._config_path
+            user = User.create(self._own_pubkey, self._own_name, self._group_id)
+            cfg_path = ConfigManager("SplitP2P", "config.json").config_file
             import json as _j
-            raw_key = _j.load(open(cfg_path)).get("private_key_hex", "")
+
+            with open(cfg_path) as f:
+                raw_key = _j.load(f).get("private_key_hex", "")
             if raw_key:
                 from crypto import private_key_from_bytes, sign_record
+
                 sk = private_key_from_bytes(bytes.fromhex(raw_key))
                 user.signature = sign_record(user, sk)
-            pkt = json.dumps({
-                "type":      "user",
-                "user_data": user.to_wire_dict(),
-                "signature": user.signature,
-            }).encode()
+            pkt = json.dumps(
+                {
+                    "type": "user",
+                    "user_data": user.to_wire_dict(),
+                    "signature": user.signature,
+                }
+            ).encode()
             await self._pubsub.publish(self.topic_id, pkt)
         except Exception as e:
             logger.warning("User announce failed: %s", e)
 
-    def publish_member(self, pubkey: str, display_name: str,
-                       joined_at: int) -> None:
+    def publish_member(self, pubkey: str, display_name: str, joined_at: int) -> None:
         """Compatibility shim — triggers async user announce via cmd queue."""
-        self._own_pubkey    = pubkey
-        self._own_name      = display_name
+        self._own_pubkey = pubkey
+        self._own_name = display_name
         self._own_joined_at = joined_at
         self._cmd_queue.put({"cmd": "announce_member"})
 
@@ -523,16 +559,17 @@ class P2PNetwork:
     # ------------------------------------------------------------------
 
     async def _file_serve_handler(self, stream) -> None:
-        import trio
         try:
             sha256 = (await stream.read(64)).decode().strip()
             if len(sha256) != 64:
                 return
             from storage import STORAGE_DIR
+
             path = os.path.join(STORAGE_DIR, sha256)
             if not os.path.exists(path):
                 return
             from crypto import encrypt_chunk
+
             with open(path, "rb") as f:
                 while chunk := f.read(CHUNK_SIZE):
                     frame = encrypt_chunk(chunk, self._group_key)
@@ -556,36 +593,45 @@ class P2PNetwork:
             ok = await self._download_file(pid, sha256)
             if ok:
                 return
-        logger.warning("File %s unavailable from any of %d peers",
-                       sha256[:12], len(self._peers))
+        logger.warning("File %s unavailable from any of %d peers", sha256[:12], len(self._peers))
 
     async def _download_file(self, peer_id_str: str, sha256: str) -> bool:
         import trio
         from storage import STORAGE_DIR
+
+        assert self._host is not None
         temp = os.path.join(STORAGE_DIR, sha256 + ".tmp")
 
         for attempt in range(DOWNLOAD_RETRIES):
             if attempt > 0:
                 wait = RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
-                logger.info("File %s: attempt %d/%d in %ds...",
-                            sha256[:12], attempt + 1, DOWNLOAD_RETRIES, wait)
+                logger.info(
+                    "File %s: attempt %d/%d in %ds...",
+                    sha256[:12],
+                    attempt + 1,
+                    DOWNLOAD_RETRIES,
+                    wait,
+                )
                 await trio.sleep(wait)
 
             try:
+                from libp2p.custom_types import TProtocol
                 from libp2p.peer.id import ID as PeerID
+
                 with trio.move_on_after(15) as cs:
                     stream = await self._host.new_stream(
-                        PeerID.from_base58(peer_id_str), [FILE_PROTOCOL])
+                        PeerID.from_base58(peer_id_str), [TProtocol(FILE_PROTOCOL)]
+                    )
                 if cs.cancelled_caught:
                     logger.warning("File stream open timeout for %s", sha256[:12])
                     continue
             except Exception as e:
-                logger.warning("Cannot open file stream to %s: %s",
-                               peer_id_str[:12], repr(e))
+                logger.warning("Cannot open file stream to %s: %s", peer_id_str[:12], repr(e))
                 continue
 
             try:
                 from crypto import decrypt_chunk
+
                 h = hashlib.sha256()
                 await stream.write(sha256.encode())
 
@@ -596,8 +642,8 @@ class P2PNetwork:
                             try:
                                 data = await stream.read(CHUNK_SIZE + 200)
                             except TypeError:
-                                data = await stream.read(
-                                    max_size=CHUNK_SIZE + 200)
+                                # Older libp2p versions used a max_size kwarg instead.
+                                data = await stream.read(max_size=CHUNK_SIZE + 200)  # type: ignore[call-arg]
                         if cancel.cancelled_caught:
                             raise TimeoutError("chunk timeout after 30s")
                         if not data:
@@ -605,13 +651,13 @@ class P2PNetwork:
                         buf += data
                         while len(buf) >= 4:
                             frame_len = int.from_bytes(buf[:4], "big")
-                            if frame_len == 0:   # EOF sentinel
+                            if frame_len == 0:  # EOF sentinel
                                 buf = b""
                                 break
                             if len(buf) < 4 + frame_len:
                                 break
-                            frame = buf[4:4 + frame_len]
-                            buf   = buf[4 + frame_len:]
+                            frame = buf[4 : 4 + frame_len]
+                            buf = buf[4 + frame_len :]
                             plain = decrypt_chunk(frame, self._group_key)
                             f.write(plain)
                             h.update(plain)
@@ -619,18 +665,22 @@ class P2PNetwork:
                 if h.hexdigest() == sha256:
                     os.rename(temp, os.path.join(STORAGE_DIR, sha256))
                     self.callbacks.on_file_received(sha256)
-                    logger.info("File %s downloaded (attempt %d)",
-                                sha256[:12], attempt + 1)
+                    logger.info("File %s downloaded (attempt %d)", sha256[:12], attempt + 1)
                     return True
 
-                logger.warning("Hash mismatch for %s (attempt %d/%d)",
-                               sha256[:12], attempt + 1, DOWNLOAD_RETRIES)
+                logger.warning(
+                    "Hash mismatch for %s (attempt %d/%d)",
+                    sha256[:12],
+                    attempt + 1,
+                    DOWNLOAD_RETRIES,
+                )
                 if os.path.exists(temp):
                     os.remove(temp)
 
             except Exception as e:
-                logger.warning("Download error %s attempt %d: %s",
-                               sha256[:12], attempt + 1, repr(e))
+                logger.warning(
+                    "Download error %s attempt %d: %s", sha256[:12], attempt + 1, repr(e)
+                )
                 if os.path.exists(temp):
                     os.remove(temp)
             finally:
@@ -639,8 +689,7 @@ class P2PNetwork:
                 except Exception:
                     pass
 
-        logger.error("File %s failed after %d attempts",
-                     sha256[:12], DOWNLOAD_RETRIES)
+        logger.error("File %s failed after %d attempts", sha256[:12], DOWNLOAD_RETRIES)
         return False
 
     # ------------------------------------------------------------------
@@ -649,15 +698,19 @@ class P2PNetwork:
 
     async def _connect_addr(self, addr_str: str) -> None:
         import trio
+
+        assert self._host is not None
         try:
             import multiaddr as _ma
             from libp2p.peer.peerinfo import info_from_p2p_addr
+
             ma = _ma.Multiaddr(addr_str)
             try:
                 peer_info = info_from_p2p_addr(ma)
             except Exception:
                 from libp2p.peer.peerinfo import PeerInfo
                 from libp2p.peer.id import ID
+
                 peer_info = PeerInfo(ID(b""), [ma])
             with trio.move_on_after(15):
                 await self._host.connect(peer_info)
@@ -667,6 +720,7 @@ class P2PNetwork:
 
     async def _cleanup_stale_tmp(self) -> None:
         from storage import STORAGE_DIR
+
         try:
             removed = 0
             for fname in os.listdir(STORAGE_DIR):
@@ -693,24 +747,24 @@ class P2PNetwork:
         is_stored is excluded for attachments (local-only field).
         """
         from crypto import encrypt_record
-        from models import (Expense, Settlement, UserComment,
-                            Attachment, Split, User)
+        from models import Expense, Settlement, UserComment, Attachment, Split, User
+
         TYPE_MAP = {
-            "expense":    Expense,
-            "settlement": Settlement,
-            "comment":    UserComment,
-            "attachment": Attachment,
-            "split":      Split,
-            "user":       User,
+            "expense": Expense.from_wire_dict,
+            "settlement": Settlement.from_wire_dict,
+            "comment": UserComment.from_wire_dict,
+            "attachment": Attachment.from_wire_dict,
+            "split": Split.from_wire_dict,
+            "user": User.from_wire_dict,
         }
-        cls = TYPE_MAP.get(ptype)
-        if not cls:
+        from_wire_dict = TYPE_MAP.get(ptype)
+        if not from_wire_dict:
             return None
         try:
             d = dict(row)
             # Remove local-only fields before serializing
             d.pop("is_stored", None)
-            record = cls.from_wire_dict(d)
+            record = from_wire_dict(d)
             return encrypt_record(record, self._group_key)
         except Exception as e:
             logger.warning("Row→wire failed (%s): %s", ptype, e)
@@ -724,11 +778,10 @@ class P2PNetwork:
         Response: line-delimited JSON, blank line = EOF
                   Last record before EOF: {"type":"lamport_map","map":{...}}
         """
-        import trio
         try:
             req_raw = await stream.read(65536)
-            req     = json.loads(req_raw.decode())
-            topic   = req.get("topic", "")
+            req = json.loads(req_raw.decode())
+            topic = req.get("topic", "")
 
             if topic != self.topic_id:
                 logger.debug("History: wrong topic, ignoring")
@@ -740,15 +793,16 @@ class P2PNetwork:
                 return
 
             from storage import get_lamport_map, get_records_unknown_to
+
             known = req.get("known", {})
             delta = get_records_unknown_to(self._db, known, self._group_id)
-            sent  = 0
+            sent = 0
 
             type_map = [
-                ("expense",    "expenses"),
+                ("expense", "expenses"),
                 ("settlement", "settlements"),
-                ("comment",    "comments"),
-                ("split",      "splits"),
+                ("comment", "comments"),
+                ("split", "splits"),
                 ("attachment", "attachments"),
             ]
 
@@ -760,33 +814,42 @@ class P2PNetwork:
                     extra: dict = {}
                     if ptype in ("comment", "split", "attachment"):
                         extra["belongs_to"] = row["belongs_to"]
-                    line = json.dumps({
-                        "type":      ptype,
-                        "id":        row["id"],
-                        "timestamp": row["timestamp"],
-                        "data":      blob.hex(),
-                        **extra,
-                    }) + "\n"
+                    line = (
+                        json.dumps(
+                            {
+                                "type": ptype,
+                                "id": row["id"],
+                                "timestamp": row["timestamp"],
+                                "data": blob.hex(),
+                                **extra,
+                            }
+                        )
+                        + "\n"
+                    )
                     await stream.write(line.encode())
                     sent += 1
 
             # Users: plaintext + signed, composite key in id field
             for row in delta.get("users", []):
                 d = dict(row)
-                line = json.dumps({
-                    "type":      "user",
-                    "id":        f"{d['public_key']}:{d['group_id']}",
-                    "timestamp": d["timestamp"],
-                    "user_data": d,
-                    "signature": d["signature"],
-                }) + "\n"
+                line = (
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "id": f"{d['public_key']}:{d['group_id']}",
+                            "timestamp": d["timestamp"],
+                            "user_data": d,
+                            "signature": d["signature"],
+                        }
+                    )
+                    + "\n"
+                )
                 await stream.write(line.encode())
                 sent += 1
 
             # Send own lamport map for bidirectional delta
             my_map = get_lamport_map(self._db, self._group_id)
-            await stream.write(
-                (json.dumps({"type": "lamport_map", "map": my_map}) + "\n").encode())
+            await stream.write((json.dumps({"type": "lamport_map", "map": my_map}) + "\n").encode())
 
             await stream.write(b"\n")  # EOF
             logger.info("History: served %d records", sent)
@@ -806,32 +869,38 @@ class P2PNetwork:
     async def _request_history(self, peer_id_str: str) -> None:
         import trio
         from models import Expense, Settlement, UserComment, Attachment, Split, User
+
+        assert self._host is not None
         try:
+            from libp2p.custom_types import TProtocol
             from libp2p.peer.id import ID as PeerID
+
             with trio.move_on_after(15) as cs:
                 stream = await self._host.new_stream(
-                    PeerID.from_base58(peer_id_str), [HISTORY_PROTOCOL])
+                    PeerID.from_base58(peer_id_str), [TProtocol(HISTORY_PROTOCOL)]
+                )
             if cs.cancelled_caught:
                 logger.warning("History stream timeout to %s", peer_id_str[:12])
                 return
         except Exception as e:
-            logger.debug("Cannot open history stream to %s: %s",
-                         peer_id_str[:12], e)
+            logger.debug("Cannot open history stream to %s: %s", peer_id_str[:12], e)
             return
 
         try:
             from storage import get_lamport_map
+
             if not self._db:
                 logger.warning("History request: no DB connection")
                 return
             my_map = get_lamport_map(self._db, self._group_id)
-            req    = json.dumps({"topic": self.topic_id, "known": my_map})
+            req = json.dumps({"topic": self.topic_id, "known": my_map})
             await stream.write(req.encode())
 
-            buf        = b""
-            counts     = {k: 0 for k in
-                          ("expenses","settlements","comments",
-                           "splits","attachments","users")}
+            buf = b""
+            counts = {
+                k: 0
+                for k in ("expenses", "settlements", "comments", "splits", "attachments", "users")
+            }
             server_map = None
 
             while True:
@@ -843,18 +912,20 @@ class P2PNetwork:
 
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
-                    if not line.strip():   # EOF
+                    if not line.strip():  # EOF
                         self.callbacks.on_history_synced(counts)
                         if server_map:
-                            self._cmd_queue.put({
-                                "cmd":        "push_delta",
-                                "peer_id":    peer_id_str,
-                                "server_map": server_map,
-                            })
+                            self._cmd_queue.put(
+                                {
+                                    "cmd": "push_delta",
+                                    "peer_id": peer_id_str,
+                                    "server_map": server_map,
+                                }
+                            )
                         return
 
                     try:
-                        pkt   = json.loads(line.decode())
+                        pkt = json.loads(line.decode())
                         ptype = pkt.get("type", "")
 
                         if ptype == "lamport_map":
@@ -863,32 +934,32 @@ class P2PNetwork:
 
                         if ptype == "user":
                             from crypto import _verify
-                            ud   = pkt.get("user_data", {})
+
+                            ud = pkt.get("user_data", {})
                             user = User.from_wire_dict(ud)
-                            if _verify(user.canonical_bytes(),
-                                       pkt.get("signature", ""),
-                                       user.public_key):
+                            if _verify(
+                                user.canonical_bytes(), pkt.get("signature", ""), user.public_key
+                            ):
                                 self.callbacks.on_user_received(user)
                                 counts["users"] += 1
                             continue
 
                         TYPE_MAP = {
-                            "expense":    (Expense,    "expenses"),
+                            "expense": (Expense, "expenses"),
                             "settlement": (Settlement, "settlements"),
-                            "comment":    (UserComment,"comments"),
-                            "split":      (Split,      "splits"),
+                            "comment": (UserComment, "comments"),
+                            "split": (Split, "splits"),
                             "attachment": (Attachment, "attachments"),
                         }
                         if ptype in TYPE_MAP:
                             cls, key = TYPE_MAP[ptype]
-                            rec = self._decrypt_and_verify(
-                                pkt["data"], cls)
+                            rec = self._decrypt_and_verify(pkt["data"], cls)
                             if rec:
                                 dispatch = {
-                                    "expense":    self.callbacks.on_expense_received,
+                                    "expense": self.callbacks.on_expense_received,
                                     "settlement": self.callbacks.on_settlement_received,
-                                    "comment":    self.callbacks.on_comment_received,
-                                    "split":      self.callbacks.on_split_received,
+                                    "comment": self.callbacks.on_comment_received,
+                                    "split": self.callbacks.on_split_received,
                                     "attachment": self.callbacks.on_attachment_received,
                                 }[ptype]
                                 dispatch(rec)
@@ -901,8 +972,7 @@ class P2PNetwork:
             logger.info("History: +%s from %s", counts, peer_id_str[:12])
 
         except Exception as e:
-            logger.error("History request error from %s: %s",
-                         peer_id_str[:12], e)
+            logger.error("History request error from %s: %s", peer_id_str[:12], e)
         finally:
             try:
                 await stream.close()
@@ -919,6 +989,8 @@ class P2PNetwork:
         We compute what the server is missing and push it back via GossipSub.
         """
         import trio
+
+        assert self._pubsub is not None
         from storage import get_records_unknown_to
 
         if not self._db:
@@ -928,10 +1000,10 @@ class P2PNetwork:
         to_push: list[bytes] = []
 
         type_map = [
-            ("expense",    "expenses"),
+            ("expense", "expenses"),
             ("settlement", "settlements"),
-            ("comment",    "comments"),
-            ("split",      "splits"),
+            ("comment", "comments"),
+            ("split", "splits"),
             ("attachment", "attachments"),
         ]
 
@@ -943,29 +1015,32 @@ class P2PNetwork:
                 extra: dict = {}
                 if ptype in ("comment", "split", "attachment"):
                     extra["belongs_to"] = row["belongs_to"]
-                pkt = json.dumps({
-                    "type":      ptype,
-                    "id":        row["id"],
-                    "timestamp": row["timestamp"],
-                    "data":      blob.hex(),
-                    **extra,
-                }).encode()
+                pkt = json.dumps(
+                    {
+                        "type": ptype,
+                        "id": row["id"],
+                        "timestamp": row["timestamp"],
+                        "data": blob.hex(),
+                        **extra,
+                    }
+                ).encode()
                 to_push.append(pkt)
 
         for row in delta.get("users", []):
             d = dict(row)
-            pkt = json.dumps({
-                "type":      "user",
-                "id":        f"{d['public_key']}:{d['group_id']}",
-                "timestamp": d["timestamp"],
-                "user_data": d,
-                "signature": d["signature"],
-            }).encode()
+            pkt = json.dumps(
+                {
+                    "type": "user",
+                    "id": f"{d['public_key']}:{d['group_id']}",
+                    "timestamp": d["timestamp"],
+                    "user_data": d,
+                    "signature": d["signature"],
+                }
+            ).encode()
             to_push.append(pkt)
 
         if not to_push:
-            logger.debug("Delta push: server %s already up to date",
-                         peer_id_str[:12])
+            logger.debug("Delta push: server %s already up to date", peer_id_str[:12])
             return
 
         for pkt in to_push:
@@ -975,8 +1050,7 @@ class P2PNetwork:
             except Exception as e:
                 logger.warning("Delta push error: %s", e)
 
-        logger.info("Delta push: sent %d records to %s",
-                    len(to_push), peer_id_str[:12])
+        logger.info("Delta push: sent %d records to %s", len(to_push), peer_id_str[:12])
 
     # ------------------------------------------------------------------
     # Public API

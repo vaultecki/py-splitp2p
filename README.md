@@ -1,9 +1,18 @@
 # SplitP2P
 
-Decentralized, serverless expense splitting for group trips.  
-No account. No cloud. Members join via QR code.
+A prototype for splitting shared expenses on a group trip without a
+central server: each device runs a local libp2p node, expenses/settlements
+sync over GossipSub, and a 32-byte group key (shared via QR code) both
+encrypts the data and identifies the group.
 
-Built as a Python/Tkinter prototype — the target platform is Kotlin/Android.
+Built as a Python/Tkinter desktop app. A Kotlin/Android port is a stated
+goal, not something that exists yet — see [Kotlin/Android Roadmap](#kotlinandroid-roadmap).
+
+**Status:** working prototype, exercised through a pytest suite covering the
+core logic (ledger, models, crypto, storage, currency) and the GUI dialogs
+that were easiest to get wrong. Real two-peer P2P connectivity (mDNS
+discovery, GossipSub mesh) has not been verified end-to-end — see
+[Known issues](#known-issues) before relying on it.
 
 ---
 
@@ -19,6 +28,15 @@ python main.py
 ```bash
 sudo apt install python3-tk   # Debian/Ubuntu
 sudo pacman -S tk             # Arch/CachyOS
+```
+
+### Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+ruff check . && ruff format --check .
+mypy .
+pytest
 ```
 
 ---
@@ -49,7 +67,9 @@ sudo pacman -S tk             # Arch/CachyOS
 ### Amounts
 
 All amounts are stored as integers in the **smallest currency unit**
-(cents for EUR/USD, yen for JPY). No float rounding errors.
+(cents for EUR/USD, yen for JPY). The GUI converts user-entered decimal
+amounts via `to_minor()` before they're saved, and back via `from_minor()`
+when displaying or editing them.
 
 Conversion helpers in `models.py`:
 ```python
@@ -92,58 +112,36 @@ and can be logged/shared safely.
 ### GossipSub Packets
 
 All packets are published to topic `splitp2p-{topic-uuid}` as UTF-8 JSON.
-Expense/settlement/comment blobs are SecretBox-encrypted before publishing.
+Expense/settlement/comment/split/attachment records are SecretBox-encrypted
+before publishing; the encrypted blob is hex-encoded into the `data` field.
 
-**Expense:**
+**Expense / Settlement / Comment / Split / Attachment:**
 ```json
 {
   "type":      "expense",
   "id":        "uuid",
   "timestamp": 1712345678,
-  "blob":      "hex-encoded encrypted expense"
+  "data":      "hex-encoded encrypted record"
 }
 ```
+`type` is one of `expense`, `settlement`, `comment`, `split`, `attachment`.
 
-**Settlement:**
+**User announce (identity):**
 ```json
 {
-  "type":      "settlement",
-  "id":        "uuid",
-  "timestamp": 1712345678,
-  "blob":      "hex-encoded encrypted settlement"
+  "type":      "user",
+  "user_data": { "public_key": "...", "name": "Alice", "group_id": "...",
+                 "timestamp": 1712345678, "lamport_clock": 3, "signature": "" },
+  "signature": "Ed25519 signature over user_data's canonical bytes"
 }
 ```
 
-**Comment:**
-```json
-{
-  "type":       "comment",
-  "id":         "uuid",
-  "expense_id": "uuid",
-  "timestamp":  1712345678,
-  "blob":       "hex-encoded encrypted comment"
-}
-```
-
-**Member announce:**
-```json
-{
-  "type":   "member",
-  "pubkey": "64 hex chars (Ed25519 verify key)",
-  "data":   {
-    "display_name": "Alice",
-    "joined_at":    1712345678
-  }
-}
-```
-
-Member packets are **not encrypted** — display names are visible to anyone
-who knows the topic UUID. The expense/settlement/comment content requires the
-group key to decrypt.
+User packets are **not encrypted** — display names are visible to anyone
+who knows the topic UUID. Everything else requires the group key to decrypt.
 
 ### History Sync Protocol (v1.0)
 
-Stream protocol on `/splitp2p/history/1.0`.  
+Stream protocol on `/splitp2p/history/1.0`.
 Triggered on peer connect — bidirectional delta sync.
 
 **Step 1 — Client → Server (request):**
@@ -153,7 +151,10 @@ Triggered on peer connect — bidirectional delta sync.
   "known": {
     "expenses":    {"<id>": <lamport_clock>, ...},
     "settlements": {"<id>": <lamport_clock>, ...},
-    "comments":    {"<id>": <lamport_clock>, ...}
+    "comments":    {"<id>": <lamport_clock>, ...},
+    "splits":      {"<id>": <lamport_clock>, ...},
+    "attachments": {"<id>": <lamport_clock>, ...},
+    "users":       {"<pubkey>:<group_id>": <lamport_clock>, ...}
   }
 }
 ```
@@ -163,12 +164,13 @@ only records the client does not have, or has an older version of.
 
 **Step 2 — Server → Client (response):**
 
-Line-delimited JSON packets, one per record:
+Line-delimited JSON packets, one per record (same shapes as the GossipSub
+packets above):
 ```
-{"type":"expense","id":"...","blob":"hex"}\n
-{"type":"settlement","id":"...","blob":"hex"}\n
-{"type":"lamport_map","map":{"expenses":{...},"settlements":{...},"comments":{...}}}\n
-\n
+{"type":"expense","id":"...","data":"hex"}
+{"type":"settlement","id":"...","data":"hex"}
+{"type":"lamport_map","map":{"expenses":{...},"settlements":{...},...}}
+
 ```
 
 The `lamport_map` packet contains the server's own state. The client
@@ -210,17 +212,12 @@ can be determined.
 
 ### Signatures
 
-Every expense, settlement, and comment is signed with the author's
-Ed25519 private key before encryption. The `canonical_bytes()` method
-on each model returns a deterministic byte representation for signing:
-
-```python
-# Example (Expense.canonical_bytes):
-f"{id}|{description}|{amount}|{currency}|{payer_pubkey}|{timestamp}".encode()
-```
-
-The signature is stored inside the encrypted blob, not on the wire.
-The receiving peer decrypts first, then verifies the signature.
+Every expense, settlement, split, comment, attachment, and user record is
+signed with the author's Ed25519 private key. Each model's `canonical_bytes()`
+method returns a deterministic byte representation of its synced fields
+(local-only fields, e.g. `Attachment.is_stored`, are excluded) for signing.
+The signature is stored inside the encrypted blob for most record types;
+user records are signed but sent in the clear (see above).
 
 ---
 
@@ -234,7 +231,7 @@ The receiving peer decrypts first, then verifies the signature.
 | Transport       | Noise (XX pattern)     | libp2p   | P2P connection security |
 | File hash       | SHA-256                | stdlib   | Attachment integrity |
 
-No passwords. No KDF. The 32-byte group key is the secret —
+No passwords, no KDF. The 32-byte group key is the secret —
 generated once at group creation, shared via QR code.
 
 The libp2p Noise transport provides an additional encryption layer
@@ -245,20 +242,52 @@ ensures only group members can read the data regardless of transport.
 
 ## CRDT Merge
 
-Concurrent edits are resolved with three-level priority:
+Concurrent edits are resolved with three-level priority (`storage._wins`):
 
 1. **Lamport clock** — higher wins
 2. **Timestamp** — higher wins (tiebreak)
 3. **Author pubkey** — lexicographically higher wins (deterministic tiebreak)
 
-Deletes are implemented as tombstones (`is_deleted = True`) and always
-win over non-deleted records with the same or lower Lamport clock.
+Deletes are implemented as tombstones (`is_deleted = 1`) and win or lose
+against other writes using the exact same three-level comparison — a
+tombstone is not automatically prioritized, it just competes as a normal
+write with whatever Lamport clock it carries.
+
+---
+
+## Known issues
+
+- **P2P connectivity is not end-to-end tested.** The libp2p version this
+  project actually installs (0.6.0) is a large jump from what
+  `requirements.txt` used to pin (`>=0.1.5`), with breaking API changes
+  (`GossipSub()` argument requirements, `IHost.run()` becoming an async
+  context manager). Code has been updated to match 0.6.0 and is
+  unit-tested with a mocked libp2p, but real mDNS discovery and GossipSub
+  mesh formation between two actual devices has not been exercised in this
+  environment. Test with two real instances before trusting sync in practice.
+- **CSV/PDF export (`ExportDialog`) is currently broken.** It references
+  `self._group_currency` (never set on that class — only `self.currency`
+  is) and `expense.currency`/`settlement.currency` (neither `Expense` nor
+  `Settlement` has a `currency` field — only `original_currency` for
+  foreign-currency expenses). Any export attempt raises `AttributeError`.
+  Not fixed yet.
+- **Editing an expense forgets its split mode.** The edit dialog always
+  reopens on "equal" split and blank percent/custom fields, regardless of
+  how the expense was originally split. Saving without touching the split
+  section re-splits equally among the currently selected members rather
+  than preserving the original percent/custom amounts.
+- Camera QR scanning depends on `opencv-python`; if it's not installed the
+  "Scan camera" button is simply hidden (falls back to image-file import or
+  pasting the base64 text).
 
 ---
 
 ## Kotlin/Android Roadmap
 
-The wire format is stable. Key portability notes:
+Nothing below this line is implemented — it documents intent for a future
+native port, not current functionality. The wire format (packet types,
+history sync protocol, file transfer protocol, CRDT merge logic) is
+designed to be portable:
 
 | Component       | Python           | Kotlin/Android         |
 |-----------------|------------------|------------------------|
@@ -268,6 +297,3 @@ The wire format is stable. Key portability notes:
 | Local DB        | SQLite3          | Room                   |
 | UI              | Tkinter          | Jetpack Compose        |
 | QR scan         | opencv-python    | ML Kit / ZXing         |
-
-The QR v3 payload, GossipSub packet types, history sync protocol,
-file transfer protocol, and CRDT merge logic port directly.
