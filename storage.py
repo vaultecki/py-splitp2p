@@ -28,8 +28,8 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ def set_paths(db_path: str, storage_dir: str) -> None:
     logger.info("Paths set: db=%s  storage=%s", db_path, storage_dir)
 
 
-def init_db(db_path: Optional[str] = None) -> sqlite3.Connection:
+def init_db(db_path: str | None = None) -> sqlite3.Connection:
     path = db_path or DB_PATH
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -201,11 +201,11 @@ def save_group_info(
     db.commit()
 
 
-def get_group_info(db: sqlite3.Connection, group_id: str) -> Optional[sqlite3.Row]:
+def get_group_info(db: sqlite3.Connection, group_id: str) -> sqlite3.Row | None:
     return db.execute("SELECT * FROM group_info WHERE group_id=?", (group_id,)).fetchone()
 
 
-def get_group_key(db: sqlite3.Connection, group_id: str) -> Optional[bytes]:
+def get_group_key(db: sqlite3.Connection, group_id: str) -> bytes | None:
     row = db.execute("SELECT group_key FROM group_info WHERE group_id=?", (group_id,)).fetchone()
     return bytes.fromhex(row["group_key"]) if row else None
 
@@ -247,7 +247,7 @@ def save_user(
     return True
 
 
-def get_user(db: sqlite3.Connection, public_key: str, group_id: str = "") -> Optional[sqlite3.Row]:
+def get_user(db: sqlite3.Connection, public_key: str, group_id: str = "") -> sqlite3.Row | None:
     """group_id required for composite PK lookup."""
     return db.execute(
         "SELECT * FROM users WHERE public_key=? AND group_id=?", (public_key, group_id)
@@ -274,10 +274,10 @@ def save_expense(
     author_pubkey: str,
     is_deleted: int = 0,
     amount: int,
-    description: Optional[str] = None,
-    category: Optional[str] = None,
-    original_amount: Optional[int] = None,
-    original_currency: Optional[str] = None,
+    description: str | None = None,
+    category: str | None = None,
+    original_amount: int | None = None,
+    original_currency: str | None = None,
     signature: str,
 ) -> bool:
     ex = db.execute(
@@ -349,7 +349,7 @@ def get_expenses(
     return db.execute(q, (group_id,)).fetchall()
 
 
-def get_expense(db: sqlite3.Connection, id: str) -> Optional[sqlite3.Row]:
+def get_expense(db: sqlite3.Connection, id: str) -> sqlite3.Row | None:
     return db.execute("SELECT * FROM expenses WHERE id=?", (id,)).fetchone()
 
 
@@ -402,7 +402,7 @@ def save_settlement(
     from_key: str,
     to_key: str,
     amount: int,
-    note: Optional[str] = None,
+    note: str | None = None,
     signature: str,
 ) -> bool:
     ex = db.execute(
@@ -559,8 +559,8 @@ def save_attachment(
     author_pubkey: str,
     sha256: str,
     filename: str,
-    mime: Optional[str] = None,
-    size: Optional[int] = None,
+    mime: str | None = None,
+    size: int | None = None,
     signature: str,
 ) -> bool:
     ex = db.execute("SELECT lamport_clock,timestamp FROM attachments WHERE id=?", (id,)).fetchone()
@@ -617,7 +617,7 @@ def attachment_exists(sha256: str) -> bool:
     return os.path.exists(os.path.join(STORAGE_DIR, sha256))
 
 
-def attachment_path(sha256: str) -> Optional[str]:
+def attachment_path(sha256: str) -> str | None:
     path = os.path.join(STORAGE_DIR, sha256)
     return path if os.path.exists(path) else None
 
@@ -635,7 +635,7 @@ def save_rate(db: sqlite3.Connection, base: str, target: str, rate: float) -> No
     db.commit()
 
 
-def get_rate(db: sqlite3.Connection, base: str, target: str) -> Optional[float]:
+def get_rate(db: sqlite3.Connection, base: str, target: str) -> float | None:
     row = db.execute(
         "SELECT rate FROM exchange_rates WHERE base=? AND target=?", (base, target)
     ).fetchone()
@@ -647,7 +647,7 @@ def get_rate(db: sqlite3.Connection, base: str, target: str) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 
-def get_max_lamport_clock(db: sqlite3.Connection, group_id: Optional[str] = None) -> int:
+def get_max_lamport_clock(db: sqlite3.Connection, group_id: str | None = None) -> int:
     """
     Highest lamport_clock known across all CRDT tables (scoped to group_id if given).
 
@@ -668,7 +668,7 @@ def get_max_lamport_clock(db: sqlite3.Connection, group_id: Optional[str] = None
     return max(values, default=0)
 
 
-def get_lamport_map(db: sqlite3.Connection, group_id: Optional[str] = None) -> dict:
+def get_lamport_map(db: sqlite3.Connection, group_id: str | None = None) -> dict:
     """
     Returns {expenses:{id:lamport}, settlements:{id:lamport},
              comments:{id:lamport}, splits:{id:lamport},

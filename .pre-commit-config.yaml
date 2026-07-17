@@ -1,0 +1,32 @@
+# Uses the dev tools already installed in your environment (see
+# `pip install -e ".[dev]"` in the README) rather than pre-commit's own
+# isolated hook environments, so versions always match what CI/you run
+# locally and mypy can resolve this project's third-party stubs correctly.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check --fix
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types: [python]
+
+      - id: mypy
+        name: mypy
+        entry: mypy .
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pytest
+        name: pytest
+        entry: pytest
+        language: system
+        types: [python]
+        pass_filenames: false

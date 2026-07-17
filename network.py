@@ -25,13 +25,14 @@ Wire format for synced records:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import queue as _queue
 import threading
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from libp2p.abc import IHost, ISubscriptionAPI
@@ -59,10 +60,8 @@ def _build_listen_addrs(port: int) -> list:
     import multiaddr as _ma
 
     addrs = [_ma.Multiaddr(f"/ip4/0.0.0.0/tcp/{port}")]
-    try:
+    with contextlib.suppress(Exception):
         addrs.append(_ma.Multiaddr(f"/ip6/::/tcp/{port}"))
-    except Exception:
-        pass
     try:
         from libp2p.utils.address_validation import get_available_interfaces
 
@@ -137,9 +136,9 @@ class P2PNetwork:
         self._own_pubkey = ""
         self._own_name = ""
         self._own_joined_at = 0
-        self._host: Optional[IHost] = None
-        self._pubsub: Optional[Pubsub] = None
-        self._sub: Optional[ISubscriptionAPI] = None
+        self._host: IHost | None = None
+        self._pubsub: Pubsub | None = None
+        self._sub: ISubscriptionAPI | None = None
         self._running = False
         self._peers: set[str] = set()
         self._cmd_queue: _queue.SimpleQueue[dict] = _queue.SimpleQueue()
@@ -353,7 +352,7 @@ class P2PNetwork:
 
     def _decrypt_and_verify(
         self, data_hex: str, record_type, pubkey_field: str = "author_pubkey"
-    ) -> Optional[object]:
+    ) -> object | None:
         """
         Decrypts an encrypted wire record and verifies its Ed25519 signature.
         Returns the model object on success, None on any failure.
@@ -382,7 +381,7 @@ class P2PNetwork:
             return None
 
     async def _dispatch(self, msg) -> None:
-        from models import Expense, Settlement, UserComment, Attachment, Split, User
+        from models import Attachment, Expense, Settlement, Split, User, UserComment
 
         try:
             packet = json.loads(msg.data.decode())
@@ -520,8 +519,8 @@ class P2PNetwork:
 
     async def _publish_user_announce(self) -> None:
         """User announce is plaintext + Ed25519 signed (not SecretBox encrypted)."""
-        from models import User
         from config_manager import ConfigManager
+        from models import User
 
         assert self._pubsub is not None
         try:
@@ -579,10 +578,8 @@ class P2PNetwork:
         except Exception as e:
             logger.error("File serve error: %s", repr(e))
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 await stream.close()
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------
     # File Transfer — Downloading
@@ -597,6 +594,7 @@ class P2PNetwork:
 
     async def _download_file(self, peer_id_str: str, sha256: str) -> bool:
         import trio
+
         from storage import STORAGE_DIR
 
         assert self._host is not None
@@ -684,10 +682,8 @@ class P2PNetwork:
                 if os.path.exists(temp):
                     os.remove(temp)
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     await stream.close()
-                except Exception:
-                    pass
 
         logger.error("File %s failed after %d attempts", sha256[:12], DOWNLOAD_RETRIES)
         return False
@@ -708,8 +704,8 @@ class P2PNetwork:
             try:
                 peer_info = info_from_p2p_addr(ma)
             except Exception:
-                from libp2p.peer.peerinfo import PeerInfo
                 from libp2p.peer.id import ID
+                from libp2p.peer.peerinfo import PeerInfo
 
                 peer_info = PeerInfo(ID(b""), [ma])
             with trio.move_on_after(15):
@@ -740,14 +736,14 @@ class P2PNetwork:
     # History Sync — Serving (delta via Lamport maps)
     # ------------------------------------------------------------------
 
-    def _row_to_wire(self, row, ptype: str) -> Optional[bytes]:
+    def _row_to_wire(self, row, ptype: str) -> bytes | None:
         """
         Converts a sqlite3.Row to an encrypted wire packet.
         Returns None if encryption fails.
         is_stored is excluded for attachments (local-only field).
         """
         from crypto import encrypt_record
-        from models import Expense, Settlement, UserComment, Attachment, Split, User
+        from models import Attachment, Expense, Settlement, Split, User, UserComment
 
         TYPE_MAP = {
             "expense": Expense.from_wire_dict,
@@ -857,10 +853,8 @@ class P2PNetwork:
         except Exception as e:
             logger.error("History serve error: %s", repr(e))
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 await stream.close()
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------
     # History Sync — Requesting
@@ -868,7 +862,8 @@ class P2PNetwork:
 
     async def _request_history(self, peer_id_str: str) -> None:
         import trio
-        from models import Expense, Settlement, UserComment, Attachment, Split, User
+
+        from models import Attachment, Expense, Settlement, Split, User, UserComment
 
         assert self._host is not None
         try:
@@ -897,10 +892,9 @@ class P2PNetwork:
             await stream.write(req.encode())
 
             buf = b""
-            counts = {
-                k: 0
-                for k in ("expenses", "settlements", "comments", "splits", "attachments", "users")
-            }
+            counts = dict.fromkeys(
+                ("expenses", "settlements", "comments", "splits", "attachments", "users"), 0
+            )
             server_map = None
 
             while True:
@@ -974,10 +968,8 @@ class P2PNetwork:
         except Exception as e:
             logger.error("History request error from %s: %s", peer_id_str[:12], e)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 await stream.close()
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------
     # Push delta back to server
@@ -1073,7 +1065,7 @@ class P2PNetwork:
         return self._running and self._host is not None
 
     @property
-    def peer_id(self) -> Optional[str]:
+    def peer_id(self) -> str | None:
         return self._host.get_id().to_string() if self._host else None
 
     @property

@@ -1,6 +1,0 @@
-# SplitP2P – Development dependencies (lint/type-check/test)
-# Install: pip install -r requirements.txt -r requirements-dev.txt
-
-ruff>=0.6            # Linting + formatting (see pyproject.toml for config)
-mypy>=1.10           # Static type checking (see pyproject.toml for config)
-pytest>=8.0          # Test runner

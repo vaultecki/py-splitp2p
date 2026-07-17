@@ -23,7 +23,6 @@ import sqlite3
 import time
 import urllib.error
 import urllib.request
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +78,7 @@ def _next_fetch_time() -> int:
     return int(time.time()) + _BASE_INTERVAL_SEC + jitter
 
 
-def fetch_rates_online(base: str) -> Optional[dict[str, float]]:
+def fetch_rates_online(base: str) -> dict[str, float] | None:
     """
     Fetches current rates from the API.
     Returns a dict {target: rate} or None on error.
@@ -225,7 +224,7 @@ def convert(
     from_currency: str,
     to_currency: str,
     rates: dict[str, float],
-) -> Optional[float]:
+) -> float | None:
     """
     Converts an amount between two currencies.
 

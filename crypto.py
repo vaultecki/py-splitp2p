@@ -27,13 +27,12 @@ import hashlib
 import json
 import logging
 import os
-from typing import Optional
 
-import nacl.signing
-import nacl.secret
-import nacl.utils
 import nacl.encoding
 import nacl.exceptions
+import nacl.secret
+import nacl.signing
+import nacl.utils
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +185,7 @@ def encrypt_record(record, group_key: bytes) -> bytes:
     return bytes(_box(group_key).encrypt(data))
 
 
-def decrypt_record(blob: bytes, group_key: bytes, record_type) -> Optional[object]:
+def decrypt_record(blob: bytes, group_key: bytes, record_type) -> object | None:
     """
     Decrypts a wire blob and reconstructs the record via from_wire_dict().
     Returns None on any error (wrong key, tampered data, missing fields).

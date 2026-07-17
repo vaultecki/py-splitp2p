@@ -109,17 +109,17 @@ def test_get_all_users_sorted_by_name(db):
 
 
 def _save_expense(db, **overrides):
-    kwargs = dict(
-        id="e1",
-        group_id="g1",
-        timestamp=100,
-        expense_date=100,
-        lamport_clock=1,
-        author_pubkey="alice",
-        amount=1000,
-        description="Dinner",
-        signature="sig",
-    )
+    kwargs = {
+        "id": "e1",
+        "group_id": "g1",
+        "timestamp": 100,
+        "expense_date": 100,
+        "lamport_clock": 1,
+        "author_pubkey": "alice",
+        "amount": 1000,
+        "description": "Dinner",
+        "signature": "sig",
+    }
     kwargs.update(overrides)
     return storage.save_expense(db, **kwargs)
 

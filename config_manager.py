@@ -9,8 +9,8 @@ directory creation and error handling.
 """
 
 import json
-import os
 import logging
+import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -94,14 +94,14 @@ class ConfigManager:
                 self.data = {}
                 return
 
-            with open(self.config_file, "r", encoding="utf-8") as f:
+            with open(self.config_file, encoding="utf-8") as f:
                 self.data = json.load(f)
                 logger.info(f"Loaded config with {len(self.data)} entries")
 
         except json.JSONDecodeError as e:
             logger.warning(f"Config file invalid JSON: {e}. Starting with empty config.")
             self.data = {}
-        except IOError as e:
+        except OSError as e:
             logger.warning(f"Could not read config file: {e}. Starting with empty config.")
             self.data = {}
 
@@ -123,7 +123,7 @@ class ConfigManager:
 
             logger.debug(f"Saved config with {len(self.data)} entries")
 
-        except IOError as e:
+        except OSError as e:
             logger.error(f"Could not save config file: {e}")
             raise
 

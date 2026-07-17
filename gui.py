@@ -14,7 +14,7 @@ import tkinter as tk
 import tkinter.filedialog as fd
 import tkinter.messagebox as mb
 from tkinter import ttk
-from typing import Optional
+from typing import ClassVar
 
 # ---------------------------------------------------------------------------
 # Design-System
@@ -121,15 +121,15 @@ class DatePickerFrame(tk.Frame):
         self._month = tk.StringVar(value=str(dt.month))
         self._year = tk.StringVar(value=str(dt.year))
 
-        spin_kw = dict(
-            bg=PANEL,
-            fg=FG,
-            font=FONT,
-            insertbackground=GREEN,
-            relief="flat",
-            buttonbackground=PANEL,
-            highlightthickness=0,
-        )
+        spin_kw = {
+            "bg": PANEL,
+            "fg": FG,
+            "font": FONT,
+            "insertbackground": GREEN,
+            "relief": "flat",
+            "buttonbackground": PANEL,
+            "highlightthickness": 0,
+        }
 
         tk.Spinbox(
             self,
@@ -197,14 +197,14 @@ class NewGroupDialog(tk.Toplevel):
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
-        self.result: Optional[dict] = None
+        self.result: dict | None = None
         self._build(default_name)
         self.wait_window()
 
     def _build(self, default_name):
         from currency import SUPPORTED_CURRENCIES
 
-        pad = dict(padx=28)
+        pad = {"padx": 28}
         _lbl(self, "NEW GROUP", fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(24, 4), **pad)
         _lbl(
             self,
@@ -245,8 +245,9 @@ class NewGroupDialog(tk.Toplevel):
         if not name:
             mb.showerror("Error", "Group name is required.", parent=self)
             return
-        from crypto import generate_group_key as _gk
         import uuid as _uuid
+
+        from crypto import generate_group_key as _gk
 
         self.result = {
             "group_name": name,
@@ -265,12 +266,12 @@ class GroupSelectDialog(tk.Toplevel):
         self.resizable(False, False)
         self.grab_set()
         self.groups = groups
-        self.result: Optional[dict] = None
+        self.result: dict | None = None
         self._build(last_group)
         self.wait_window()
 
     def _build(self, last_group):
-        pad = dict(padx=28)
+        pad = {"padx": 28}
         _lbl(self, "SELECT GROUP", fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(24, 4), **pad)
         _div(self).pack(fill="x", padx=28, pady=10)
         frm = tk.Frame(self, bg=BG, padx=28)
@@ -508,7 +509,7 @@ class QRShowDialog(tk.Toplevel):
 
     def __init__(self, parent, group_name: str, group_key: bytes, topic: str, currency: str):
         super().__init__(parent)
-        self.title(f"QR-Code – {group_name}")
+        self.title(f"QR-Code - {group_name}")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
@@ -517,7 +518,7 @@ class QRShowDialog(tk.Toplevel):
         self.wait_window()
 
     def _build(self, group_name: str, currency: str):
-        pad = dict(padx=28)
+        pad = {"padx": 28}
         _lbl(self, "JOIN GROUP", fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(20, 2), **pad)
         _lbl(
             self,
@@ -652,7 +653,7 @@ class QRImportDialog(tk.Toplevel):
         self.wait_window()
 
     def _build(self):
-        pad = dict(padx=28)
+        pad = {"padx": 28}
         _lbl(self, "SCAN QR CODE", fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(20, 2), **pad)
         _lbl(
             self, "Paste the group join code, or use camera / file.", fg=FG_DIM, font=FONT_SMALL
@@ -800,12 +801,12 @@ class StorageSetupDialog(tk.Toplevel):
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
-        self.result: Optional[dict] = None
+        self.result: dict | None = None
         self._build(defaults)
         self.wait_window()
 
     def _build(self, defaults):
-        pad = dict(padx=28)
+        pad = {"padx": 28}
         _lbl(self, "STORAGE LOCATION", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(24, 4), **pad
         )
@@ -896,17 +897,17 @@ class ExpenseDialog(tk.Toplevel):
         self.group_currency = group_currency
         self.rates = rates
         self.result = None
-        self._att_path: Optional[str] = None
-        self._att_data: Optional[bytes] = None
+        self._att_path: str | None = None
+        self._att_data: bytes | None = None
         self._existing_att = getattr(expense, "attachment", None)
         self._build(expense)
         self.wait_window()
 
     def _build(self, exp):
-        from models import EXPENSE_CATEGORIES, from_minor
         from currency import SUPPORTED_CURRENCIES
+        from models import EXPENSE_CATEGORIES, from_minor
 
-        pad = dict(padx=24)
+        pad = {"padx": 24}
         _lbl(self, "EDIT EXPENSE" if exp else "NEW EXPENSE", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(20, 2), **pad
         )
@@ -1172,10 +1173,10 @@ class ExpenseDialog(tk.Toplevel):
         self._att_label.configure(text="No attachment", fg=FG_DIM)
 
     def _save(self):
-        from models import Attachment, to_minor
         from crypto import hash_bytes, mime_type_from_path
-        from storage import save_attachment
         from currency import convert
+        from models import Attachment, to_minor
+        from storage import save_attachment
 
         desc = self._desc.get().strip()
         if not desc:
@@ -1234,13 +1235,12 @@ class ExpenseDialog(tk.Toplevel):
                 total_pct = sum(pcts.values())
                 if total_pct <= 0:
                     raise ValueError("0%")
-                if abs(total_pct - 100) > 0.01:
-                    if not mb.askyesno(
-                        "Sum != 100%",
-                        f"Percentages sum to {total_pct:.1f}%,\nnot 100%. Split proportionally?",
-                        parent=self,
-                    ):
-                        return
+                if abs(total_pct - 100) > 0.01 and not mb.askyesno(
+                    "Sum != 100%",
+                    f"Percentages sum to {total_pct:.1f}%,\nnot 100%. Split proportionally?",
+                    parent=self,
+                ):
+                    return
             except ValueError:
                 mb.showerror("Error", "Percentages are invalid.", parent=self)
                 return
@@ -1298,7 +1298,7 @@ class SettlementDialog(tk.Toplevel):
     """Dialog zum Erfassen einer Ausgleichszahlung."""
 
     def __init__(
-        self, parent, members, own_pubkey, group_currency, rates, prefill: Optional[dict] = None
+        self, parent, members, own_pubkey, group_currency, rates, prefill: dict | None = None
     ):
         super().__init__(parent)
         self.title("Zahlung erfassen")
@@ -1317,7 +1317,7 @@ class SettlementDialog(tk.Toplevel):
         from currency import SUPPORTED_CURRENCIES
         from models import from_minor
 
-        pad = dict(padx=24)
+        pad = {"padx": 24}
         _lbl(self, "RECORD PAYMENT", fg=PURPLE, font=FONT_LARGE).pack(
             anchor="w", pady=(20, 2), **pad
         )
@@ -1503,7 +1503,7 @@ class AddMemberDialog(tk.Toplevel):
         self.wait_window()
 
     def _build(self):
-        pad = dict(padx=24)
+        pad = {"padx": 24}
         _lbl(self, "MEMBER", fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(20, 2), **pad)
         _div(self).pack(fill="x", **pad)
         frm = tk.Frame(self, bg=BG, padx=24, pady=12)
@@ -1535,7 +1535,7 @@ class AddMemberDialog(tk.Toplevel):
 
 
 # ---------------------------------------------------------------------------
-# App – Hauptfenster
+# App - Hauptfenster
 # ---------------------------------------------------------------------------
 
 
@@ -1557,7 +1557,7 @@ class ChartsWindow(tk.Toplevel):
 
     def __init__(self, parent, expenses, settlements, members, group_currency, own_pubkey):
         super().__init__(parent)
-        self.title(f"Charts – {group_currency}")
+        self.title(f"Charts - {group_currency}")
         self.configure(bg=BG)
         self.geometry("900x640")
 
@@ -1621,7 +1621,7 @@ class ChartsWindow(tk.Toplevel):
             bars = ax1.barh(cats, vals, color=colors, height=0.6)
             ax1.set_xlabel(group_currency, color=DIM_, fontsize=9)
             ax1.xaxis.label.set_color(DIM_)
-            for bar, val in zip(bars, vals):
+            for bar, val in zip(bars, vals, strict=True):
                 ax1.text(
                     bar.get_width() + max(vals) * 0.01,
                     bar.get_y() + bar.get_height() / 2,
@@ -1649,7 +1649,7 @@ class ChartsWindow(tk.Toplevel):
             ax2.barh(pks, bals, color=bar_colors, height=0.6)
             ax2.axvline(0, color=DIM_, linewidth=0.8, linestyle="--")
             ax2.set_xlabel(group_currency, color=DIM_, fontsize=9)
-            for i, (b, pk) in enumerate(zip(bals, pks)):
+            for i, (b, _pk) in enumerate(zip(bals, pks, strict=True)):
                 ax2.text(
                     b
                     + (
@@ -1688,9 +1688,9 @@ class ChartsWindow(tk.Toplevel):
             ax3.yaxis.label.set_color(DIM_)
             # Kategorie-Markierungen
             cat_colors = {}
-            for i, cat in enumerate(set(e.category for e in sorted_exp)):
+            for i, cat in enumerate({e.category for e in sorted_exp}):
                 cat_colors[cat] = COLS[i % len(COLS)]
-            for e, d, cs in zip(sorted_exp, dates, cumsum):
+            for e, d, cs in zip(sorted_exp, dates, cumsum, strict=True):
                 ax3.scatter([d], [cs], color=cat_colors.get(e.category, DIM_), s=30, zorder=5)
             # Legende
             from matplotlib.patches import Patch
@@ -1715,6 +1715,7 @@ class ChartsWindow(tk.Toplevel):
         style_ax(ax4, "Balance History per Person over Time")
         if expenses:
             import datetime
+
             from ledger import compute_balances
 
             # Alle Events (Expenses + Settlements) zeitlich sortieren
@@ -1807,7 +1808,7 @@ class ExportDialog(tk.Toplevel):
         return self.pk_to_name.get(pk, pk[:8] + "…")
 
     def _build(self):
-        pad = dict(padx=28)
+        pad = {"padx": 28}
         _lbl(self, "EXPORT", fg=GREEN, font=FONT_LARGE).pack(anchor="w", pady=(20, 2), **pad)
         _div(self).pack(fill="x", padx=28, pady=8)
 
@@ -1987,7 +1988,7 @@ class ExportDialog(tk.Toplevel):
             widths = [30, 55, 30, 25, 30, 35]
             pdf.set_font("Helvetica", "B" if bold else "", 8)
             pdf.set_text_color(*color)
-            for txt, w in zip(cells, widths):
+            for txt, w in zip(cells, widths, strict=True):
                 pdf.cell(w, 6, str(txt)[:30], border=0)
             pdf.ln()
             pdf.set_text_color(0, 0, 0)
@@ -2035,7 +2036,7 @@ class ExportDialog(tk.Toplevel):
             pdf.ln(4)
 
         if self._incl_debt.get():
-            from ledger import get_settlements, compute_balances
+            from ledger import compute_balances, get_settlements
 
             debts = get_settlements(self.expenses, self.settlements)
             balances = compute_balances(self.expenses, self.settlements)
@@ -2110,9 +2111,9 @@ class ActivityLogWindow(tk.Toplevel):
     Shows all group changes in chronological order.
 
     Quellen:
-      1. Persistente Ereignisse  – aus Expenses + Settlements rekonstruiert
+      1. Persistente Ereignisse  - aus Expenses + Settlements rekonstruiert
          (who added/edited/deleted what and when)
-      2. Laufzeit-Ereignisse     – P2P-Sync, Peer-Verbindungen, Dateiempfang
+      2. Laufzeit-Ereignisse     - P2P-Sync, Peer-Verbindungen, Dateiempfang
          (current session only, not persisted)
 
     The window can stay open; new runtime entries are
@@ -2120,7 +2121,7 @@ class ActivityLogWindow(tk.Toplevel):
     """
 
     # Color per level
-    LEVEL_COLOR = {
+    LEVEL_COLOR: ClassVar[dict[str, str]] = {
         "info": "#2ecc8f",  # green  - own actions
         "sync": "#4d9de0",  # blue   - P2P sync
         "net": "#a78bfa",  # purple - network events
@@ -2288,8 +2289,8 @@ class ActivityLogWindow(tk.Toplevel):
         # Comments (user + system) from DB
         if self._db is not None:
             try:
-                from storage import load_comments_for_expense
                 from crypto import decrypt_comment
+                from storage import load_comments_for_expense
 
                 # Collect all expense IDs
                 exp_map = {e.id: e.description for e in expenses}
@@ -2614,7 +2615,7 @@ class App(tk.Tk):
         _lbl(search_bar, "Category:", fg=FG_DIM, font=FONT_SMALL, bg=PANEL).pack(side="left")
         from models import EXPENSE_CATEGORIES
 
-        cat_cb = _combobox(search_bar, self._filter_cat, ["All"] + EXPENSE_CATEGORIES, width=16)
+        cat_cb = _combobox(search_bar, self._filter_cat, ["All", *EXPENSE_CATEGORIES], width=16)
         cat_cb.pack(side="left", padx=(2, 10))
         self._filter_cat.trace_add("write", lambda *_: self._apply_filters())
 
@@ -2700,7 +2701,7 @@ class App(tk.Tk):
         Gibt (balances, debts) zurueck.
         Berechnet nur neu wenn sich der Cache-Key geaendert hat.
         """
-        from ledger import ledger_cache_key, compute_balances, compute_settlements
+        from ledger import compute_balances, compute_settlements, ledger_cache_key
 
         key = ledger_cache_key(expenses, settlements)
         if key != self._ledger_cache_key:
@@ -2732,11 +2733,11 @@ class App(tk.Tk):
         from config_manager import ConfigManager
         from crypto import (
             generate_private_key,
-            private_key_from_bytes,
             get_public_key_hex,
+            private_key_from_bytes,
             private_key_to_bytes,
         )
-        from storage import init_db, configure_paths
+        from storage import configure_paths, init_db
 
         self._cfg = ConfigManager("SplitP2P", "config.json")
 
@@ -2819,7 +2820,7 @@ class App(tk.Tk):
             )
 
         if self._group_id:
-            from storage import save_user, get_user
+            from storage import get_user, save_user
 
             me = get_user(self._db, self._own_pubkey, self._group_id)
             if not me or me["name"] != self._own_name:
@@ -2907,7 +2908,7 @@ class App(tk.Tk):
         dlg.resizable(False, False)
         dlg.grab_set()
 
-        pad = dict(padx=24)
+        pad = {"padx": 24}
         _lbl(dlg, "CONNECT TO PEER", fg=GREEN, font=FONT_LARGE).pack(
             anchor="w", pady=(20, 2), **pad
         )
@@ -3136,7 +3137,7 @@ class App(tk.Tk):
         self._rates_status.configure(text="Fetching rates...", fg=AMBER)
 
         def _work():
-            from currency import force_refresh, rates_age_str, load_rates
+            from currency import force_refresh, load_rates, rates_age_str
 
             ok = force_refresh(self._db, self._group_currency)
             self._rates = load_rates(self._db, self._group_currency)
@@ -3186,8 +3187,8 @@ class App(tk.Tk):
     # ── Ausgaben ────────────────────────────────────────────────────
 
     def _load_expenses(self):
-        from storage import get_expenses, get_splits
         from models import Expense, Split
+        from storage import get_expenses, get_splits
 
         result = []
         for row in get_expenses(self._db, self._group_id):
@@ -3197,8 +3198,8 @@ class App(tk.Tk):
         return result
 
     def _load_settlements(self):
-        from storage import get_settlements
         from models import Settlement
+        from storage import get_settlements
 
         return [
             Settlement.from_wire_dict(dict(r)) for r in get_settlements(self._db, self._group_id)
@@ -3259,7 +3260,7 @@ class App(tk.Tk):
 
     def _build_splits(self, expense_id, amount, payer_key, debtor_keys, r):
         """Builds Split records for an expense according to its chosen split mode."""
-        from models import split_equally, split_by_percent, split_custom
+        from models import split_by_percent, split_custom, split_equally
 
         mode = r.get("split_mode", "equal")
         if mode == "percent" and r.get("split_percentages"):
@@ -3269,8 +3270,8 @@ class App(tk.Tk):
         return split_equally(expense_id, amount, payer_key, debtor_keys)
 
     def _add_expense(self):
-        from storage import get_all_users
         from models import format_amount
+        from storage import get_all_users
 
         users = get_all_users(self._db, self._group_id)
         if not users:
@@ -3312,8 +3313,8 @@ class App(tk.Tk):
                 "Permission denied", "Only the original creator can edit this expense.", parent=self
             )
             return
-        from storage import get_all_users
         from models import format_amount
+        from storage import get_all_users
 
         users = get_all_users(self._db, self._group_id)
         dlg = ExpenseDialog(
@@ -3383,9 +3384,9 @@ class App(tk.Tk):
 
     # ── Ausgleichszahlungen ─────────────────────────────────────────
 
-    def _record_settlement(self, prefill: Optional[dict] = None):
-        from storage import get_all_users
+    def _record_settlement(self, prefill: dict | None = None):
         from models import format_amount
+        from storage import get_all_users
 
         users = get_all_users(self._db, self._group_id)
         if len(users) < 2:
@@ -3454,8 +3455,8 @@ class App(tk.Tk):
     # ── Refresh / Render ────────────────────────────────────────────
 
     def _refresh(self):
-        from storage import get_all_users
         from models import format_amount
+        from storage import get_all_users
 
         if not self._db or not self._group_id:
             return
@@ -3618,9 +3619,9 @@ class App(tk.Tk):
                 and not any(s.debtor_key == mbr_pk for s in e.splits)
             ):
                 return False
-            if query and query not in e.description.lower() and query not in e.category.lower():
-                return False
-            return True
+            return not (
+                query and query not in e.description.lower() and query not in e.category.lower()
+            )
 
         def matches_settlement(s):
             if cat_f and cat_f != "All":
@@ -3814,7 +3815,7 @@ class App(tk.Tk):
     # ── Netzwerk ────────────────────────────────────────────────────
 
     def _start_network(self):
-        from network import P2PNetwork, NetworkCallbacks
+        from network import NetworkCallbacks, P2PNetwork
 
         class _CB(NetworkCallbacks):
             def __init__(self2, app):
@@ -3974,7 +3975,7 @@ class App(tk.Tk):
             self._refresh()
 
     def _on_net_attachment(self, attachment):
-        from storage import save_attachment, attachment_exists
+        from storage import attachment_exists, save_attachment
 
         save_attachment(
             self._db,
@@ -3989,13 +3990,16 @@ class App(tk.Tk):
             size=attachment.size,
             signature=attachment.signature,
         )
-        if not attachment_exists(attachment.sha256) and self._network:
-            if attachment.sha256 not in self._pending_downloads:
-                self._pending_downloads.add(attachment.sha256)
-                self._network.request_file(attachment.sha256)
+        if (
+            not attachment_exists(attachment.sha256)
+            and self._network
+            and attachment.sha256 not in self._pending_downloads
+        ):
+            self._pending_downloads.add(attachment.sha256)
+            self._network.request_file(attachment.sha256)
 
     def _on_net_user(self, user):
-        from storage import save_user, get_user
+        from storage import get_user, save_user
 
         existing = get_user(self._db, user.public_key, user.group_id)
         is_new = not existing

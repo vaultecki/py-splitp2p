@@ -20,7 +20,7 @@ discovery, GossipSub mesh) has not been verified end-to-end — see
 
 ```bash
 python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 python main.py
 ```
 
@@ -30,10 +30,20 @@ sudo apt install python3-tk   # Debian/Ubuntu
 sudo pacman -S tk             # Arch/CachyOS
 ```
 
-### Running the tests
+Dependencies are declared in `pyproject.toml` (`[project.dependencies]`) —
+there's no `requirements.txt`.
+
+### Development setup
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
+pre-commit install   # runs ruff + mypy + pytest on every commit
+```
+
+Ruff and mypy are configured in `pyproject.toml` (`[tool.ruff]`, `[tool.mypy]`).
+To run everything the pre-commit hook runs, manually:
+
+```bash
 ruff check . && ruff format --check .
 mypy .
 pytest
@@ -258,8 +268,8 @@ write with whatever Lamport clock it carries.
 ## Known issues
 
 - **P2P connectivity is not end-to-end tested.** The libp2p version this
-  project actually installs (0.6.0) is a large jump from what
-  `requirements.txt` used to pin (`>=0.1.5`), with breaking API changes
+  project actually installs (0.6.0) is a large jump from what used to be
+  pinned (`>=0.1.5`), with breaking API changes
   (`GossipSub()` argument requirements, `IHost.run()` becoming an async
   context manager). Code has been updated to match 0.6.0 and is
   unit-tested with a mocked libp2p, but real mDNS discovery and GossipSub
@@ -280,20 +290,3 @@ write with whatever Lamport clock it carries.
   "Scan camera" button is simply hidden (falls back to image-file import or
   pasting the base64 text).
 
----
-
-## Kotlin/Android Roadmap
-
-Nothing below this line is implemented — it documents intent for a future
-native port, not current functionality. The wire format (packet types,
-history sync protocol, file transfer protocol, CRDT merge logic) is
-designed to be portable:
-
-| Component       | Python           | Kotlin/Android         |
-|-----------------|------------------|------------------------|
-| SecretBox       | pynacl           | lazysodium             |
-| Ed25519         | pynacl           | lazysodium             |
-| P2P transport   | libp2p (py)      | Nearby Connections API |
-| Local DB        | SQLite3          | Room                   |
-| UI              | Tkinter          | Jetpack Compose        |
-| QR scan         | opencv-python    | ML Kit / ZXing         |

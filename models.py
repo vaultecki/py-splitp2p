@@ -22,8 +22,6 @@ Wire format for network sync:
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Currency helpers
@@ -283,7 +281,7 @@ def split_by_percent(
             author_pubkey=payer_key,
             lamport_clock=lamport_clock,
         )
-        for dk, share in zip(keys, shares)
+        for dk, share in zip(keys, shares, strict=True)
     ]
 
 
@@ -303,9 +301,9 @@ class Expense:
     is_deleted: int  # 0=active, 1=deleted (tombstone)
     amount: int  # smallest currency unit
     description: str
-    category: Optional[str] = None
-    original_amount: Optional[int] = None  # only for foreign-currency expenses
-    original_currency: Optional[str] = None
+    category: str | None = None
+    original_amount: int | None = None  # only for foreign-currency expenses
+    original_currency: str | None = None
     signature: str = ""
     splits: list[Split] = field(default_factory=list)
 
@@ -366,10 +364,10 @@ class Expense:
         description: str,
         amount: int,
         author_pubkey: str,
-        expense_date: Optional[int] = None,
-        category: Optional[str] = None,
-        original_amount: Optional[int] = None,
-        original_currency: Optional[str] = None,
+        expense_date: int | None = None,
+        category: str | None = None,
+        original_amount: int | None = None,
+        original_currency: str | None = None,
         lamport_clock: int = 0,
     ) -> "Expense":
         now = int(time.time())
@@ -405,7 +403,7 @@ class Settlement:
     from_key: str  # who pays
     to_key: str  # who receives
     amount: int  # smallest currency unit
-    note: Optional[str] = None
+    note: str | None = None
     signature: str = ""
 
     def canonical_bytes(self) -> bytes:
@@ -461,7 +459,7 @@ class Settlement:
         to_key: str,
         amount: int,
         author_pubkey: str,
-        note: Optional[str] = None,
+        note: str | None = None,
         lamport_clock: int = 0,
     ) -> "Settlement":
         return cls(
@@ -565,8 +563,8 @@ class Attachment:
     author_pubkey: str
     sha256: str
     filename: str
-    mime: Optional[str]
-    size: Optional[int]
+    mime: str | None
+    size: int | None
     signature: str = ""
     # LOCAL ONLY — excluded from canonical_bytes and to_wire_dict
     is_stored: int = ATTACHMENT_NOT_STORED
@@ -618,8 +616,8 @@ class Attachment:
         sha256: str,
         filename: str,
         author_pubkey: str,
-        mime: Optional[str] = None,
-        size: Optional[int] = None,
+        mime: str | None = None,
+        size: int | None = None,
         lamport_clock: int = 0,
     ) -> "Attachment":
         return cls(
