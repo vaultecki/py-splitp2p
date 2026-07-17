@@ -182,13 +182,17 @@ class P2PNetwork:
         assert self._host is not None
         assert self._pubsub is not None
         try:
+            from libp2p.tools.async_service import background_trio_service
+
             # host.run() is an async context manager owning the host's whole
             # lifetime (listeners, mDNS, bootstrap) — everything that needs
-            # the host alive must run inside this block.
+            # the host alive must run inside this block. Pubsub.run() likewise
+            # needs to be driven through the async_service manager (plain
+            # nursery.start_soon(self._pubsub.run) leaves self._pubsub._manager
+            # unset -> AttributeError as soon as it tries to schedule a task).
             async with self._host.run(listen_addrs):
                 await self._finish_start_node()
-                async with trio.open_nursery() as nursery:
-                    nursery.start_soon(self._pubsub.run)
+                async with background_trio_service(self._pubsub), trio.open_nursery() as nursery:
                     nursery.start_soon(self._receive_loop)
                     nursery.start_soon(self._cmd_loop)
                     nursery.start_soon(self._peer_poll_loop)

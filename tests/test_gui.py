@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import ttk
 from unittest.mock import patch
 
 import pytest
@@ -8,6 +9,10 @@ from gui import (
     ChartsWindow,
     ExpenseDialog,
     ExportDialog,
+    GroupSelectDialog,
+    NewGroupDialog,
+    QRImportDialog,
+    QRShowDialog,
     SettlementDialog,
     StorageSetupDialog,
     _decode_group_qr,
@@ -62,6 +67,28 @@ def test_u_helper_normalizes_dict_and_object():
         name = "Bob"
 
     assert _u(FakeUser()) == ("pk2", "Bob")
+
+
+def test_u_helper_normalizes_sqlite_row():
+    """Regression: sqlite3.Row is neither a dict (isinstance check fails) nor
+    does it support attribute access (getattr falls through to the ""/"?"
+    defaults) — every real caller of _u() passes storage.get_all_users() rows,
+    so this silently normalized every member to pubkey "" instead of raising,
+    corrupting member lookups (wrong debtor keys, collapsed chart series)."""
+    import storage
+
+    db = storage.init_db(":memory:")
+    storage.save_user(
+        db,
+        group_id="g1",
+        public_key="pk1",
+        name="Alice",
+        timestamp=1,
+        lamport_clock=1,
+        signature="",
+    )
+    row = storage.get_all_users(db, "g1")[0]
+    assert _u(row) == ("pk1", "Alice")
 
 
 def test_group_qr_encode_decode_roundtrip():
@@ -238,6 +265,30 @@ def test_settlement_dialog_prefill_shows_major_units(root):
     root.after(50, run_act)
     SettlementDialog(root, USERS, "alice", "EUR", {}, {"amount": 1250})
     assert holder["result"]["amount"] == 1250
+
+
+def test_settlement_dialog_default_from_to_are_never_the_same(root):
+    """Regression: default_to fell back to member_names[-1] unconditionally.
+    When own_pubkey's name sorts alphabetically last (as it does here: "Zoe"
+    > "Amy"), default_from and default_to both landed on "Zoe", so a user
+    opening the dialog and hitting Save immediately got "From and To must be
+    different" and the settlement was silently never saved."""
+    users = [
+        {"public_key": "amy", "name": "Amy"},
+        {"public_key": "zoe", "name": "Zoe"},
+    ]
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        holder["from"] = dlg._from_var.get()
+        holder["to"] = dlg._to_var.get()
+        dlg.destroy()
+
+    root.after(50, run_act)
+    SettlementDialog(root, users, "zoe", "EUR", {})
+    assert holder["from"] != holder["to"]
 
 
 def test_export_dialog_csv_and_pdf(root, tmp_path):
@@ -465,3 +516,539 @@ def test_charts_window_renders_without_error(root):
 
     win = ChartsWindow(root, [exp], [settlement], USERS, "EUR", "alice")
     win.destroy()
+
+
+def test_new_group_dialog_requires_name(root):
+    def act(dlg):
+        with patch("gui.mb.showerror"):
+            dlg._confirm()
+        assert dlg.result is None
+        dlg._name_var.set("Islandtrip")
+        dlg._confirm()
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        act(dlg)
+        holder["result"] = dlg.result
+
+    root.after(50, run_act)
+    NewGroupDialog(root)
+    result = holder["result"]
+    assert result["group_name"] == "Islandtrip"
+    assert len(result["group_key"]) == 32
+    assert result["group_currency"] == "EUR"
+    import uuid
+
+    uuid.UUID(result["group_topic"])  # raises ValueError if not a valid UUID
+
+
+def test_group_select_dialog_no_groups_shows_create_and_import(root):
+    def act(dlg):
+        assert dlg.result is None
+        dlg.destroy()
+
+    root.after(50, lambda: act(_current_dialog(root)))
+    GroupSelectDialog(root, {}, "")
+
+
+def test_group_select_dialog_confirm_returns_selected_group(root):
+    groups = {
+        "Islandtrip": {"key": "00" * 32, "topic": "topic-1", "currency": "EUR"},
+        "Roadtrip": {"key": "11" * 32, "topic": "topic-2", "currency": "USD"},
+    }
+
+    def act(dlg):
+        dlg._selected.set("Roadtrip")
+        dlg._confirm()
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        act(dlg)
+        holder["result"] = dlg.result
+
+    root.after(50, run_act)
+    GroupSelectDialog(root, groups, "Islandtrip")
+    result = holder["result"]
+    assert result["group_name"] == "Roadtrip"
+    assert result["group_key"] == bytes.fromhex("11" * 32)
+    assert result["group_currency"] == "USD"
+
+
+def test_group_select_dialog_remove_group(root):
+    groups = {"Islandtrip": {"key": "00" * 32, "topic": "t1", "currency": "EUR"}}
+
+    def act(dlg):
+        dlg._selected.set("Islandtrip")
+        with patch("gui.mb.askyesno", return_value=True):
+            dlg._remove_group()
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        act(dlg)
+        holder["result"] = dlg.result
+
+    root.after(50, run_act)
+    dlg_groups = dict(groups)
+    GroupSelectDialog(root, dlg_groups, "Islandtrip")
+    assert holder["result"] == {"_removed": "Islandtrip"}
+    assert "Islandtrip" not in dlg_groups
+
+
+def test_group_select_dialog_new_group_flow_sets_show_qr_after(root):
+    """_new_group() must merge the freshly created group into self.groups
+    and flag _show_qr_after so the App knows to display the QR code."""
+    fake_new_group_result = {
+        "group_name": "Islandtrip",
+        "group_key": b"0" * 32,
+        "group_topic": "topic-1",
+        "group_currency": "EUR",
+    }
+
+    class FakeNewGroupDialog:
+        def __init__(self, parent):
+            self.result = fake_new_group_result
+
+    def act(dlg):
+        with patch("gui.NewGroupDialog", FakeNewGroupDialog):
+            dlg._new_group()
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        act(dlg)
+        holder["result"] = dlg.result
+        holder["show_qr_after"] = getattr(dlg, "_show_qr_after", False)
+        holder["groups"] = groups
+
+    root.after(50, run_act)
+    groups: dict = {}
+    GroupSelectDialog(root, groups, "")
+    assert holder["result"] == fake_new_group_result
+    assert holder["show_qr_after"] is True
+    assert holder["groups"]["Islandtrip"]["key"] == (b"0" * 32).hex()
+
+
+def test_group_select_dialog_import_qr_flow(root):
+    fake_import_result = {
+        "name": "Islandtrip",
+        "key": "00" * 32,
+        "topic": "topic-1",
+        "currency": "EUR",
+    }
+
+    class FakeQRImportDialog:
+        def __init__(self, parent):
+            self.result = fake_import_result
+
+    def act(dlg):
+        with patch("gui.QRImportDialog", FakeQRImportDialog):
+            dlg._import_qr()
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        act(dlg)
+        holder["result"] = dlg.result
+
+    root.after(50, run_act)
+    GroupSelectDialog(root, {}, "")
+    result = holder["result"]
+    assert result["group_name"] == "Islandtrip"
+    assert result["group_key"] == bytes.fromhex("00" * 32)
+    assert result["group_topic"] == "topic-1"
+
+
+def test_qr_show_dialog_displays_payload_and_supports_copy(root):
+    from gui import _encode_group_qr
+
+    group_key = b"0" * 32
+    expected_payload = _encode_group_qr("Islandtrip", group_key, "topic-1", "EUR")
+
+    def act(dlg):
+        assert dlg._payload == expected_payload
+        dlg.clipboard_clear()
+        dlg.clipboard_append(dlg._payload)
+        assert dlg.clipboard_get() == expected_payload
+        dlg.destroy()
+
+    root.after(50, lambda: act(_current_dialog(root)))
+    QRShowDialog(root, "Islandtrip", group_key, "topic-1", "EUR")
+
+
+def test_qr_import_dialog_accepts_valid_code(root):
+    group_key = b"0" * 32
+    payload = _encode_group_qr("Islandtrip", group_key, "topic-1", "EUR")
+
+    def act(dlg):
+        dlg._text.insert("1.0", payload)
+        dlg._import_text()
+        assert dlg.result["name"] == "Islandtrip"
+        assert dlg.result["key"] == group_key.hex()
+
+    holder: dict = {}
+
+    def run_act():
+        dlg = _current_dialog(root)
+        act(dlg)
+        holder["result"] = dlg.result
+
+    root.after(50, run_act)
+    QRImportDialog(root)
+    assert holder["result"]["name"] == "Islandtrip"
+
+
+def test_qr_import_dialog_rejects_invalid_code(root):
+    def act(dlg):
+        dlg._text.insert("1.0", "not a valid qr code")
+        dlg._import_text()
+        assert dlg.result is None
+        assert "Invalid" in dlg._status.cget("text")
+        dlg.destroy()
+
+    root.after(50, lambda: act(_current_dialog(root)))
+    QRImportDialog(root)
+
+
+def test_qr_import_dialog_empty_input_shows_status(root):
+    def act(dlg):
+        dlg._import_text()
+        assert dlg.result is None
+        assert "No code entered" in dlg._status.cget("text")
+        dlg.destroy()
+
+    root.after(50, lambda: act(_current_dialog(root)))
+    QRImportDialog(root)
+
+
+def _make_bare_app(root, db, group_id="g1", own_pubkey="alice"):
+    """Builds an App instance bypassing __init__ (no real window, no
+    identity/group-selection flow), with just enough real Tkinter widgets
+    and state for _refresh()/_render_*() to run against a real DB."""
+    from gui import App
+
+    app = App.__new__(App)
+    app._db = db
+    app._group_id = group_id
+    app._own_pubkey = own_pubkey
+    app._group_currency = "EUR"
+    app._network = None
+    app._rates = {}
+    app._pending_downloads = set()
+    app._ledger_cache_key = None
+    app._cached_balances = {}
+    app._cached_debts = []
+    app._log = []
+    app._log_window = None
+    app._search_text = tk.StringVar()
+    app._filter_cat = tk.StringVar(value="All")
+    app._filter_member = tk.StringVar(value="All")
+    app._event_list = tk.Frame(root)
+    app._member_filter_cb = ttk.Combobox(root)
+    app._result_count = tk.Label(root)
+    app._balance_frame = tk.Frame(root)
+    app._debt_frame = tk.Frame(root)
+    app._members_frame = tk.Frame(root)
+    app._total_label = tk.Label(root)
+    return app
+
+
+def test_app_refresh_renders_expenses_and_settlements(root):
+    """Integration test for the main events view. Regression: _render_expense_row
+    referenced exp.attachment and exp.currency (neither exists on Expense —
+    always AttributeError), and _render_settlement_row referenced
+    s.original_amount/s.original_currency (didn't exist on Settlement either)
+    — every single render of the main events list would crash."""
+    import storage
+
+    db = storage.init_db(":memory:")
+    storage.save_user(
+        db,
+        group_id="g1",
+        public_key="alice",
+        name="Alice",
+        timestamp=1,
+        lamport_clock=1,
+        signature="",
+    )
+    storage.save_user(
+        db, group_id="g1", public_key="bob", name="Bob", timestamp=1, lamport_clock=1, signature=""
+    )
+    storage.save_expense(
+        db,
+        id="e1",
+        group_id="g1",
+        timestamp=100,
+        expense_date=100,
+        lamport_clock=1,
+        author_pubkey="alice",
+        amount=1000,
+        description="Dinner",
+        category="Food & Drink",
+        signature="",
+    )
+    storage.save_splits(
+        db,
+        "e1",
+        [
+            {
+                "id": "s1",
+                "timestamp": 100,
+                "lamport_clock": 1,
+                "author_pubkey": "alice",
+                "payer_key": "alice",
+                "debtor_key": "alice",
+                "amount": 500,
+                "signature": "",
+            },
+            {
+                "id": "s2",
+                "timestamp": 100,
+                "lamport_clock": 1,
+                "author_pubkey": "alice",
+                "payer_key": "alice",
+                "debtor_key": "bob",
+                "amount": 500,
+                "signature": "",
+            },
+        ],
+    )
+    storage.save_settlement(
+        db,
+        id="st1",
+        group_id="g1",
+        timestamp=200,
+        lamport_clock=1,
+        author_pubkey="bob",
+        from_key="bob",
+        to_key="alice",
+        amount=500,
+        note="thanks",
+        signature="",
+    )
+
+    app = _make_bare_app(root, db)
+    app._refresh()
+
+    assert len(app._event_list.winfo_children()) > 0
+    assert "1 expenses" in app._total_label.cget("text")
+    assert "1 payments" in app._total_label.cget("text")
+    assert "10.00" in app._total_label.cget("text")
+
+
+def test_app_refresh_with_attachment_does_not_crash(root, tmp_path):
+    """Regression: exp.attachment didn't exist on the Expense model at all,
+    so _render_expense_row raised AttributeError for every expense,
+    attachment or not."""
+    import storage
+
+    storage.set_paths(":memory:", str(tmp_path))
+    db = storage.init_db(":memory:")
+    storage.save_user(
+        db,
+        group_id="g1",
+        public_key="alice",
+        name="Alice",
+        timestamp=1,
+        lamport_clock=1,
+        signature="",
+    )
+    storage.save_expense(
+        db,
+        id="e1",
+        group_id="g1",
+        timestamp=100,
+        expense_date=100,
+        lamport_clock=1,
+        author_pubkey="alice",
+        amount=1000,
+        description="Dinner",
+        signature="",
+    )
+    storage.save_splits(
+        db,
+        "e1",
+        [
+            {
+                "id": "s1",
+                "timestamp": 100,
+                "lamport_clock": 1,
+                "author_pubkey": "alice",
+                "payer_key": "alice",
+                "debtor_key": "alice",
+                "amount": 1000,
+                "signature": "",
+            }
+        ],
+    )
+    storage.save_attachment(
+        db,
+        id="a1",
+        belongs_to="e1",
+        timestamp=100,
+        lamport_clock=1,
+        author_pubkey="alice",
+        sha256="deadbeef",
+        filename="receipt.png",
+        mime="image/png",
+        size=123,
+        signature="",
+    )
+    storage.mark_attachment_stored(db, "deadbeef")
+    (tmp_path / "deadbeef").write_bytes(b"fake image bytes")
+
+    app = _make_bare_app(root, db)
+    app._refresh()
+    assert len(app._event_list.winfo_children()) > 0
+
+
+def test_app_render_debts_shows_suggested_settlement(root):
+    import storage
+
+    db = storage.init_db(":memory:")
+    storage.save_user(
+        db,
+        group_id="g1",
+        public_key="alice",
+        name="Alice",
+        timestamp=1,
+        lamport_clock=1,
+        signature="",
+    )
+    storage.save_user(
+        db, group_id="g1", public_key="bob", name="Bob", timestamp=1, lamport_clock=1, signature=""
+    )
+    storage.save_expense(
+        db,
+        id="e1",
+        group_id="g1",
+        timestamp=100,
+        expense_date=100,
+        lamport_clock=1,
+        author_pubkey="alice",
+        amount=1000,
+        description="Dinner",
+        signature="",
+    )
+    storage.save_splits(
+        db,
+        "e1",
+        [
+            {
+                "id": "s1",
+                "timestamp": 100,
+                "lamport_clock": 1,
+                "author_pubkey": "alice",
+                "payer_key": "alice",
+                "debtor_key": "alice",
+                "amount": 500,
+                "signature": "",
+            },
+            {
+                "id": "s2",
+                "timestamp": 100,
+                "lamport_clock": 1,
+                "author_pubkey": "alice",
+                "payer_key": "alice",
+                "debtor_key": "bob",
+                "amount": 500,
+                "signature": "",
+            },
+        ],
+    )
+
+    app = _make_bare_app(root, db)
+    expenses = app._load_expenses()
+    settlements = app._load_settlements()
+    users = storage.get_all_users(db, "g1")
+    app._render_debts(expenses, settlements, users)
+    assert len(app._debt_frame.winfo_children()) > 0
+
+    def all_label_texts(w):
+        texts = []
+        if isinstance(w, tk.Label):
+            texts.append(w.cget("text"))
+        for c in w.winfo_children():
+            texts.extend(all_label_texts(c))
+        return texts
+
+    texts = all_label_texts(app._debt_frame)
+    # Regression: _u() previously normalized every sqlite3.Row user to pubkey
+    # "" (isinstance(dict) failed, getattr fell through), so pk_to_name mapped
+    # nothing and names() fell back to the truncated raw pubkey everywhere.
+    assert any("Bob" in t for t in texts)
+    assert any("Alice" in t for t in texts)
+
+
+def test_add_expense_with_new_attachment_round_trips(root, tmp_path):
+    """Full write-path regression test: ExpenseDialog._save() used to call
+    storage.save_attachment() with a completely wrong signature (2 positional
+    args vs. the real (db, *, id, belongs_to, ...) kwargs) and construct
+    Attachment(mime_type=...) (wrong kwarg name, missing required fields) —
+    attaching any file to an expense crashed immediately. Verifies the whole
+    create -> sign -> save -> mark_stored -> reload -> render path works."""
+    import crypto
+    import storage
+
+    storage.set_paths(":memory:", str(tmp_path))
+    db = storage.init_db(":memory:")
+    storage.save_user(
+        db,
+        group_id="g1",
+        public_key="alice",
+        name="Alice",
+        timestamp=1,
+        lamport_clock=1,
+        signature="",
+    )
+
+    app = _make_bare_app(root, db)
+    app._own_key = crypto.generate_private_key()
+    app._lamport_clock = 0
+    app._network = None
+
+    class FakeExpenseDialog:
+        def __init__(self, parent, users, own_pubkey, currency, rates):
+            self.result = {
+                "description": "Dinner",
+                "amount": 1250,
+                "payer_key": "alice",
+                "category": "Food & Drink",
+                "expense_date": None,
+                "new_attachment": {
+                    "sha256": crypto.hash_bytes(b"receipt bytes"),
+                    "filename": "receipt.png",
+                    "size": 13,
+                    "mime": "image/png",
+                },
+                "existing_attachment": None,
+                "original_amount": None,
+                "original_currency": None,
+                "debtor_keys": ["alice"],
+                "split_mode": "equal",
+                "split_percentages": None,
+                "split_custom_amounts": None,
+            }
+
+    storage.save_attachment_file(b"receipt bytes", crypto.hash_bytes(b"receipt bytes"))
+
+    with patch("gui.ExpenseDialog", FakeExpenseDialog), patch("gui.mb.showwarning"):
+        app._add_expense()
+
+    expenses = app._load_expenses()
+    assert len(expenses) == 1
+    exp = expenses[0]
+    assert exp.attachment is not None
+    assert exp.attachment.filename == "receipt.png"
+    assert exp.attachment.is_stored == 1
+    assert exp.attachment.signature  # was signed
+
+    app._refresh()
+    assert len(app._event_list.winfo_children()) > 0

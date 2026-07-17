@@ -281,14 +281,19 @@ write with whatever Lamport clock it carries.
 
 ## Known issues
 
-- **P2P connectivity is not end-to-end tested.** The libp2p version this
-  project actually installs (0.6.0) is a large jump from what used to be
-  pinned (`>=0.1.5`), with breaking API changes
-  (`GossipSub()` argument requirements, `IHost.run()` becoming an async
-  context manager). Code has been updated to match 0.6.0 and is
-  unit-tested with a mocked libp2p, but real mDNS discovery and GossipSub
-  mesh formation between two actual devices has not been exercised in this
-  environment. Test with two real instances before trusting sync in practice.
+- **P2P sync between two devices is not end-to-end tested.** The libp2p
+  version this project actually installs (0.6.0) is a large jump from what
+  used to be pinned (`>=0.1.5`), with breaking API changes (`GossipSub()`
+  argument requirements, `IHost.run()` and `Pubsub.run()` both becoming
+  async context managers that must be driven via
+  `libp2p.tools.async_service.background_trio_service`, not called
+  directly). A single running instance has been smoke-tested end-to-end
+  (host starts, listens, discovers and connects to real peers via mDNS and
+  bootstrap), which caught and fixed two crash bugs that made the P2P
+  thread fail immediately on every previous run. Full two-device GossipSub
+  sync (actually exchanging expenses/settlements) has still not been
+  exercised in this environment — test with two real instances before
+  trusting sync in practice.
 - Camera QR scanning depends on `opencv-python`; if it's not installed the
   "Scan camera" button is simply hidden (falls back to image-file import or
   pasting the base64 text).

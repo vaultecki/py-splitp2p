@@ -12,6 +12,8 @@ Each model:
 
 Local-only fields excluded from canonical_bytes and to_wire_dict:
   - Attachment.is_stored
+  - Expense.attachment (joined in by callers from the attachments table;
+    the Attachment record itself is separately synced/signed)
 
 Wire format for network sync:
   Records are serialized via to_wire_dict(), JSON-encoded, then encrypted
@@ -306,6 +308,9 @@ class Expense:
     original_currency: str | None = None
     signature: str = ""
     splits: list[Split] = field(default_factory=list)
+    # LOCAL ONLY — joined in by storage.py callers, never synced/signed directly
+    # (the Attachment record itself is its own synced entity)
+    attachment: "Attachment | None" = None
 
     def display_date(self) -> int:
         """Epoch seconds to sort/show by: the expense's actual date, falling
@@ -409,6 +414,8 @@ class Settlement:
     to_key: str  # who receives
     amount: int  # smallest currency unit
     settlement_date: int = 0  # epoch seconds of the actual payment date
+    original_amount: int | None = None  # only for foreign-currency payments
+    original_currency: str | None = None
     note: str | None = None
     signature: str = ""
 
@@ -420,7 +427,9 @@ class Settlement:
     def canonical_bytes(self) -> bytes:
         return (
             f"{self.id}|{self.group_id}|{self.from_key}"
-            f"|{self.to_key}|{self.amount}|{self.settlement_date}|{self.note or ''}"
+            f"|{self.to_key}|{self.amount}|{self.settlement_date}"
+            f"|{self.original_amount or 0}|{self.original_currency or ''}"
+            f"|{self.note or ''}"
             f"|{self.author_pubkey}"
             f"|{self.timestamp}|{self.lamport_clock}"
             f"|{self.is_deleted}"
@@ -438,6 +447,8 @@ class Settlement:
             "to_key": self.to_key,
             "amount": self.amount,
             "settlement_date": self.settlement_date,
+            "original_amount": self.original_amount,
+            "original_currency": self.original_currency,
             "note": self.note,
             "signature": self.signature,
         }
@@ -446,6 +457,8 @@ class Settlement:
     def from_wire_dict(cls, d: dict) -> "Settlement":
         return cls(
             settlement_date=d.get("settlement_date", 0),
+            original_amount=d.get("original_amount"),
+            original_currency=d.get("original_currency"),
             note=d.get("note"),
             **{
                 k: d[k]
@@ -473,6 +486,8 @@ class Settlement:
         amount: int,
         author_pubkey: str,
         settlement_date: int = 0,
+        original_amount: int | None = None,
+        original_currency: str | None = None,
         note: str | None = None,
         lamport_clock: int = 0,
     ) -> "Settlement":
@@ -487,6 +502,8 @@ class Settlement:
             to_key=to_key,
             amount=amount,
             settlement_date=settlement_date,
+            original_amount=original_amount,
+            original_currency=original_currency,
             note=note,
         )
 

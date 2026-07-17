@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS settlements (
     to_key        TEXT    NOT NULL,
     amount        INTEGER NOT NULL DEFAULT 0,
     settlement_date INTEGER NOT NULL DEFAULT 0,
+    original_amount   INTEGER,
+    original_currency TEXT,
     note          TEXT,
     signature     TEXT    NOT NULL
 );
@@ -404,6 +406,8 @@ def save_settlement(
     to_key: str,
     amount: int,
     settlement_date: int = 0,
+    original_amount: int | None = None,
+    original_currency: str | None = None,
     note: str | None = None,
     signature: str,
 ) -> bool:
@@ -423,7 +427,8 @@ def save_settlement(
         db.execute(
             "UPDATE settlements SET timestamp=?,lamport_clock=?,"
             "author_pubkey=?,is_deleted=?,from_key=?,to_key=?,"
-            "amount=?,settlement_date=?,note=?,signature=? WHERE id=?",
+            "amount=?,settlement_date=?,original_amount=?,original_currency=?,"
+            "note=?,signature=? WHERE id=?",
             (
                 timestamp,
                 lamport_clock,
@@ -433,6 +438,8 @@ def save_settlement(
                 to_key,
                 amount,
                 settlement_date,
+                original_amount,
+                original_currency,
                 note,
                 signature,
                 id,
@@ -441,8 +448,9 @@ def save_settlement(
     else:
         db.execute(
             "INSERT INTO settlements(id,group_id,timestamp,lamport_clock,"
-            "author_pubkey,is_deleted,from_key,to_key,amount,settlement_date,note,signature)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "author_pubkey,is_deleted,from_key,to_key,amount,settlement_date,"
+            "original_amount,original_currency,note,signature)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 id,
                 group_id,
@@ -454,6 +462,8 @@ def save_settlement(
                 to_key,
                 amount,
                 settlement_date,
+                original_amount,
+                original_currency,
                 note,
                 signature,
             ),
@@ -613,6 +623,13 @@ def mark_attachment_deleted(db: sqlite3.Connection, sha256: str) -> None:
 
 def get_attachments(db: sqlite3.Connection, expense_id: str) -> list[sqlite3.Row]:
     return db.execute("SELECT * FROM attachments WHERE belongs_to=?", (expense_id,)).fetchall()
+
+
+def save_attachment_file(data: bytes, sha256: str) -> None:
+    """Writes the raw attachment bytes to STORAGE_DIR, content-addressed by
+    sha256. Separate from save_attachment() above, which only persists the
+    DB metadata row."""
+    (Path(STORAGE_DIR) / sha256).write_bytes(data)
 
 
 def attachment_exists(sha256: str) -> bool:

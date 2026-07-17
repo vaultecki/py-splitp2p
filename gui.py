@@ -8,6 +8,7 @@ GUI - Decentralized expense splitting
 import base64
 import importlib.util
 import os
+import sqlite3
 import threading
 import time
 import tkinter as tk
@@ -440,19 +441,21 @@ def _open_ext(path: str) -> None:
 # QR-Code Dialoge: Anzeigen + Importieren
 # ---------------------------------------------------------------------------
 
-# QR payload format (JSON, base64-encoded):
+# QR payload format (JSON, base64-encoded, v3 — see _encode_group_qr):
 # {
-#   "v": 1,           # format version for future changes
-#   "name": "Trip",   # group name
-#   "pw": "pass123",  # password in plaintext (QR code is the key)
-#   "salt": "99ca..", # salt as hex (16 bytes = 32 hex chars)
-#   "currency": "EUR" # group currency
+#   "v": 3,                            # format version
+#   "name": "Trip",                    # group name
+#   "key": "a3f1...9b2e",               # 32-byte SecretBox key, 64 hex chars
+#   "topic": "550e8400-...-446655440000",  # UUID v4, P2P routing topic
+#   "currency": "EUR"                  # group currency
 # }
-# Encoded as base64(json) -> compact QR content (~120-160 bytes)
+# Encoded as base64(json) -> compact QR content
 
 
 def _u(m):
     """Normalize a user row/object to (pubkey, name)."""
+    if isinstance(m, sqlite3.Row):
+        m = dict(m)
     if isinstance(m, dict):
         return m.get("public_key", ""), m.get("name", "?")
     return getattr(m, "pubkey", getattr(m, "public_key", "")), getattr(
@@ -649,7 +652,7 @@ class QRImportDialog(tk.Toplevel):
         self.configure(bg=BG)
         self.resizable(False, False)
         self.grab_set()
-        self.result: dict = None
+        self.result: dict | None = None
         self._build()
         self.wait_window()
 
@@ -1198,8 +1201,8 @@ class ExpenseDialog(tk.Toplevel):
     def _save(self):
         from crypto import hash_bytes, mime_type_from_path
         from currency import convert
-        from models import Attachment, to_minor
-        from storage import save_attachment
+        from models import to_minor
+        from storage import save_attachment_file
 
         desc = self._desc.get().strip()
         if not desc:
@@ -1281,18 +1284,23 @@ class ExpenseDialog(tk.Toplevel):
                 mb.showerror("Error", "Individual amounts are invalid.", parent=self)
                 return
 
-        attachment = None
+        # The expense doesn't exist yet (no id), so we can't build a real
+        # Attachment record here — that happens in App._build_attachment()
+        # once the expense id is known. New file bytes are content-addressed
+        # by sha256, so they can be written to disk right away regardless.
+        new_attachment = None
+        existing_attachment = None
         if self._att_data and self._att_path:
             sha = hash_bytes(self._att_data)
-            save_attachment(self._att_data, sha)
-            attachment = Attachment(
-                sha256=sha,
-                filename=Path(self._att_path).name,
-                size=len(self._att_data),
-                mime_type=mime_type_from_path(self._att_path),
-            )
+            save_attachment_file(self._att_data, sha)
+            new_attachment = {
+                "sha256": sha,
+                "filename": Path(self._att_path).name,
+                "size": len(self._att_data),
+                "mime": mime_type_from_path(self._att_path),
+            }
         elif self._existing_att:
-            attachment = self._existing_att
+            existing_attachment = self._existing_att
 
         self.result = {
             "description": desc,
@@ -1301,7 +1309,8 @@ class ExpenseDialog(tk.Toplevel):
             "payer_key": _u(payer)[0],
             "category": self._category.get(),
             "expense_date": self._date_picker.get_date(),
-            "attachment": attachment,
+            "new_attachment": new_attachment,
+            "existing_attachment": existing_attachment,
             "original_amount": original_amount,
             "original_currency": original_currency,
             "debtor_keys": debtor_keys,
@@ -1361,9 +1370,10 @@ class SettlementDialog(tk.Toplevel):
             ),
             member_names[0] if member_names else "",
         )
+        other_names = [n for n in member_names if n != default_from]
         default_to = next(
             (_u(m)[1] for m in self.members if _u(m)[0] == prefill.get("to_key", "")),
-            member_names[-1] if len(member_names) > 1 else member_names[0] if member_names else "",
+            other_names[-1] if other_names else (member_names[0] if member_names else ""),
         )
 
         _lbl(frm, "FROM (who paid)", fg=FG_DIM, font=FONT_SMALL).pack(anchor="w")
@@ -2768,7 +2778,7 @@ class App(tk.Tk):
             private_key_from_bytes,
             private_key_to_bytes,
         )
-        from storage import configure_paths, init_db
+        from storage import init_db, set_paths
 
         self._cfg = ConfigManager("SplitP2P", "config.json")
 
@@ -2785,7 +2795,7 @@ class App(tk.Tk):
             self._cfg.set("storage_dir", storage_dir)
             self._cfg.save()
 
-        configure_paths(db_path, storage_dir)
+        set_paths(db_path, storage_dir)
         self._db = init_db()
 
         raw = self._cfg.get("private_key_hex")
@@ -3218,13 +3228,15 @@ class App(tk.Tk):
     # ── Ausgaben ────────────────────────────────────────────────────
 
     def _load_expenses(self):
-        from models import Expense, Split
-        from storage import get_expenses, get_splits
+        from models import Attachment, Expense, Split
+        from storage import get_attachments, get_expenses, get_splits
 
         result = []
         for row in get_expenses(self._db, self._group_id):
             exp = Expense.from_wire_dict(dict(row))
             exp.splits = [Split.from_wire_dict(dict(s)) for s in get_splits(self._db, exp.id)]
+            att_rows = get_attachments(self._db, exp.id)
+            exp.attachment = Attachment(**dict(att_rows[0])) if att_rows else None
             result.append(exp)
         return result
 
@@ -3238,7 +3250,8 @@ class App(tk.Tk):
 
     def _save_expense(self, expense):
         from crypto import sign_record
-        from storage import save_expense, save_splits
+        from storage import mark_attachment_stored, save_expense, save_splits
+        from storage import save_attachment as db_save_attachment
 
         expense.lamport_clock = self._next_lamport()
         expense.signature = sign_record(expense, self._own_key)
@@ -3262,6 +3275,27 @@ class App(tk.Tk):
             signature=expense.signature,
         )
         save_splits(self._db, expense.id, [s.to_wire_dict() for s in expense.splits])
+        if expense.attachment and not expense.attachment.signature:
+            # A brand-new attachment (not one already saved/signed on a
+            # previous edit) — sign, persist the metadata row, mark stored.
+            expense.attachment.lamport_clock = expense.lamport_clock
+            expense.attachment.signature = sign_record(expense.attachment, self._own_key)
+            db_save_attachment(
+                self._db,
+                id=expense.attachment.id,
+                belongs_to=expense.attachment.belongs_to,
+                timestamp=expense.attachment.timestamp,
+                lamport_clock=expense.attachment.lamport_clock,
+                author_pubkey=expense.attachment.author_pubkey,
+                sha256=expense.attachment.sha256,
+                filename=expense.attachment.filename,
+                mime=expense.attachment.mime,
+                size=expense.attachment.size,
+                signature=expense.attachment.signature,
+            )
+            mark_attachment_stored(self._db, expense.attachment.sha256)
+            if self._network:
+                self._network.publish_attachment(expense.attachment)
         if self._network:
             self._network.publish_expense(expense)
             self._network.publish_splits(expense.splits)
@@ -3284,6 +3318,8 @@ class App(tk.Tk):
             to_key=settlement.to_key,
             amount=settlement.amount,
             settlement_date=settlement.settlement_date,
+            original_amount=settlement.original_amount,
+            original_currency=settlement.original_currency,
             note=settlement.note,
             signature=settlement.signature,
         )
@@ -3300,6 +3336,24 @@ class App(tk.Tk):
         if mode == "custom" and r.get("split_custom_amounts"):
             return split_custom(expense_id, payer_key, r["split_custom_amounts"])
         return split_equally(expense_id, amount, payer_key, debtor_keys)
+
+    def _build_attachment(self, expense_id, r):
+        """Builds (or carries over) the Attachment for an expense, now that
+        its real id is known — ExpenseDialog only writes the raw file bytes
+        and returns metadata, since the expense doesn't exist yet at that point."""
+        from models import Attachment
+
+        new_att = r.get("new_attachment")
+        if new_att:
+            return Attachment.create(
+                belongs_to=expense_id,
+                sha256=new_att["sha256"],
+                filename=new_att["filename"],
+                author_pubkey=self._own_pubkey,
+                size=new_att.get("size"),
+                mime=new_att.get("mime"),
+            )
+        return r.get("existing_attachment")
 
     def _add_expense(self):
         from models import format_amount
@@ -3326,11 +3380,10 @@ class App(tk.Tk):
             original_currency=r.get("original_currency"),
             lamport_clock=self._lamport_clock,
         )
-        debtor_keys = r.get(
-            "debtor_keys", [u["public_key"] if isinstance(u, dict) else u.public_key for u in users]
-        )
+        debtor_keys = r.get("debtor_keys", [_u(u)[0] for u in users])
         payer_key = r.get("payer_key", self._own_pubkey)
         exp.splits = self._build_splits(exp.id, exp.amount, payer_key, debtor_keys, r)
+        exp.attachment = self._build_attachment(exp.id, r)
         self._save_expense(exp)
         self._append_log(
             "info",
@@ -3367,6 +3420,7 @@ class App(tk.Tk):
         default_payer = expense.splits[0].payer_key if expense.splits else self._own_pubkey
         payer_key = r.get("payer_key", default_payer)
         expense.splits = self._build_splits(expense.id, expense.amount, payer_key, debtor_keys, r)
+        expense.attachment = self._build_attachment(expense.id, r)
         self._save_expense(expense)
         self._append_log(
             "info",
@@ -3439,16 +3493,13 @@ class App(tk.Tk):
             amount=r["amount"],
             author_pubkey=self._own_pubkey,
             settlement_date=r.get("settlement_date", 0),
+            original_amount=r.get("original_amount"),
+            original_currency=r.get("original_currency"),
             note=r.get("note") or None,
             lamport_clock=self._lamport_clock,
         )
         self._save_settlement(rs)
-        _m = {
-            u["public_key"] if isinstance(u, dict) else u.public_key: u["name"]
-            if isinstance(u, dict)
-            else u.name
-            for u in users
-        }
+        _m = {_u(u)[0]: _u(u)[1] for u in users}
         self._append_log(
             "info",
             f"Payment: {_m.get(rs.from_key, rs.from_key[:8])} "
@@ -3479,6 +3530,8 @@ class App(tk.Tk):
             to_key=settlement.to_key,
             amount=settlement.amount,
             settlement_date=settlement.settlement_date,
+            original_amount=settlement.original_amount,
+            original_currency=settlement.original_currency,
             note=settlement.note,
             signature=settlement.signature,
         )
@@ -3517,8 +3570,7 @@ class App(tk.Tk):
             )
             return
         for u in users:
-            pk = u["public_key"] if isinstance(u, dict) else u.public_key
-            nm = u["name"] if isinstance(u, dict) else u.name
+            pk, nm = _u(u)
             row = tk.Frame(self._members_frame, bg=PANEL)
             row.pack(fill="x", pady=1)
             _lbl(
@@ -3571,12 +3623,7 @@ class App(tk.Tk):
     def _render_debts(self, expenses, settlements, users):
         for w in self._debt_frame.winfo_children():
             w.destroy()
-        pk_to_name = {
-            (u["public_key"] if isinstance(u, dict) else u.public_key): (
-                u["name"] if isinstance(u, dict) else u.name
-            )
-            for u in users
-        }
+        pk_to_name = {_u(u)[0]: _u(u)[1] for u in users}
 
         def name(pk):
             return pk_to_name.get(pk, pk[:8] + "…")
@@ -3627,15 +3674,10 @@ class App(tk.Tk):
         """Expenses and settlements — filtered and sorted."""
         for w in self._event_list.winfo_children():
             w.destroy()
-        pk_to_name = {
-            (u["public_key"] if isinstance(u, dict) else u.public_key): (
-                u["name"] if isinstance(u, dict) else u.name
-            )
-            for u in users
-        }
+        pk_to_name = {_u(u)[0]: _u(u)[1] for u in users}
 
         # Update member filter dropdown
-        names = ["All"] + [u["name"] if isinstance(u, dict) else u.name for u in users]
+        names = ["All"] + [_u(u)[1] for u in users]
         self._member_filter_cb.configure(values=names)
 
         # Suchbegriff + Filter auslesen
@@ -3784,7 +3826,7 @@ class App(tk.Tk):
 
         _lbl(
             right,
-            f"{_fa(exp.amount, exp.currency)} {exp.currency}",
+            f"{_fa(exp.amount, self._group_currency)} {self._group_currency}",
             fg=GREEN,
             font=FONT_LARGE,
             bg=PANEL,
